@@ -1,0 +1,74 @@
+================================================================================
+  META ACCOUNT CREATOR — WINDOWS PORTABLE & INSTALLER EDITION
+================================================================================
+
+HOW TO RUN (Zero-Installation, Zero-Setup):
+
+1. Extract the zip file:
+   - Right-click "MetaCreator-Windows-Portable.zip" -> "Extract All...".
+   - Extract to any folder of your choice (e.g. C:\Tools\MetaCreator or Desktop).
+
+2. Start the App:
+   - Double-click "Run.bat".
+   - Your web browser will automatically open with the dashboard at:
+     http://localhost:3070
+   - No Python or Node.js installation is required on your system!
+     Everything is self-contained in bin\ and _internal\.
+
+3. License Activation:
+   - On first launch, click on "Subscription" in the left sidebar or click
+     "Start Creating".
+   - The Activation Dialog will appear displaying your unique Hardware ID (HWID).
+   - Enter your license key (e.g. NOVA-XXXX-XXXX-XXXX) and click "Activate License".
+   - Once activated, the license is cached locally with HMAC-SHA256 signature
+     verification and includes a 72-hour offline grace period.
+
+4. Stop the App:
+   - Double-click "Stop.bat" to cleanly shut down the server and any background
+     browser workers.
+
+5. Troubleshooting & Live Console Logs:
+   - To inspect real-time engine stdout/stderr messages in a live terminal,
+     double-click "Run-Console.bat" instead of "Run.bat".
+
+--------------------------------------------------------------------------------
+HOW TO UPDATE WITHOUT REMOVING FILES OR LOSING DATA:
+--------------------------------------------------------------------------------
+
+IMPORTANT: NEVER delete your existing MetaCreator folder when updating!
+All your registered accounts, database, and license activation are stored
+in the "data\" and "license_data\" folders, which are NEVER overwritten.
+
+METHOD 1: AUTOMATED UPDATE WITH Update.bat (Recommended)
+1. Double-click "Update.bat".
+   - It automatically stops active processes to release Windows file locks.
+   - It creates a safe timestamped backup of your accounts and license into:
+     "backups\backup_YYYYMMDD_HHMMSS\"
+2. If you downloaded "MetaCreator-Windows-Patch.zip" or "update.zip", place it
+   in the folder and run "Update.bat" — it will extract and update everything
+   in place automatically!
+
+METHOD 2: DRAG & DROP / EXTRACT OVER
+1. Double-click "Stop.bat" first (to ensure no background processes lock files).
+2. Open your new ZIP (Portable ZIP or Patch ZIP).
+3. Extract or drag all files directly into your existing MetaCreator folder.
+4. When Windows prompts: "Replace or Skip Files":
+   Choose -> "[x] Replace the files in the destination"
+5. Double-click "Run.bat".
+   Done! Your accounts, database, and license remain 100% intact and active.
+
+--------------------------------------------------------------------------------
+INSTALLER EDITION (Optional):
+- If you prefer a standard Windows installer that adds Desktop and Start Menu
+  shortcuts, run the installer: "MetaCreator-Setup-v1.0.exe" from installer/dist.
+- Installs to %LOCALAPPDATA%\Programs\MetaCreator (requires no Admin privileges).
+
+--------------------------------------------------------------------------------
+FEATURES INCLUDED:
+- Built-in Portable Node.js Server (Port 3070)
+- Built-in Portable Python 3.14 Runtime with Playwright & Antidetect Engine
+- Pre-installed Windows Chromium Anti-Detect Browser
+- Offline Visual AI Captcha Solver (YOLOv5 ONNX) & Biometric Selfie Engine
+- Hardware-bound License Manager with HMAC-SHA256 Tamper Detection
+- Paginated table, real-time statistics, CSV and TXT exports
+================================================================================

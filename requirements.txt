@@ -1,0 +1,13 @@
+playwright==1.62.0
+playwright-stealth==2.0.3
+requests==2.34.2
+pyotp==2.10.0
+telethon==1.45.0
+rapidocr-onnxruntime==1.2.3
+pillow==12.3.0
+numpy==2.5.3
+faster-whisper==1.2.1
+vosk==0.3.45
+websockets==17.1
+PyYAML==6.0.3
+PyQt5==5.15.11

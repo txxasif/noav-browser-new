@@ -1,0 +1,14 @@
+{
+  "name": "meta_creator",
+  "version": "1.0.0",
+  "description": "Dedicated Meta Account Creator with real-time UI, pagination, and CSV export",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "worker:build": "node worker/license/scripts/build-worker.js",
+    "worker:deploy": "cd worker/license && npx wrangler deploy",
+    "build:win": "python3 build_windows_dist.py",
+    "release": "node scripts/release.js"
+  },
+  "license": "ISC"
+}

@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nova Browser — Meta &amp; Instagram Creator</title>
+  <!-- Icons: non-blocking (no render-blocking CDN round-trip; keeps the UI
+       responsive even when offline). Google Fonts removed in favour of the
+       system font stack (see styles.css) so first paint never waits on a CDN. -->
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" media="print" onload="this.media='all'">
+  <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"></noscript>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Left Sidebar Navigation (Nova Browser layout) -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-avatar" style="background: linear-gradient(135deg, #0081fb, #0064e0); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 1.25rem;">
+          <i class="fa-brands fa-meta"></i>
+        </div>
+        <div class="brand-title-box">
+          <h2>Nova Browser</h2>
+          <span class="brand-badge">CREATOR ENGINE</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <div class="nav-section-title">SETTINGS</div>
+        <button class="nav-item" id="nav-item-global-pass" type="button" title="One password for every created account (Meta + Instagram)">
+          <i class="fa-solid fa-key" style="color: var(--accent-cyan);"></i>
+          <span>Global Password</span>
+          <span id="global-pass-status" class="nav-pill-status" style="margin-left: auto; font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(148, 163, 184, 0.15); color: #94a3b8;">Not set</span>
+        </button>
+
+        <div class="nav-section-title">WORKSPACE</div>
+        <button class="nav-item active" data-view="view-meta-creator" title="Create Meta (Facebook) accounts only">
+          <i class="fa-brands fa-meta" style="color: #0081fb;"></i>
+          <span>Meta Creator</span>
+          <span id="metainsta-badge-meta" class="nav-pill nav-pill--tool">0</span>
+        </button>
+        <button class="nav-item" data-view="view-ig-creator" title="Create Meta accounts and join Instagram in the same session">
+          <i class="fa-brands fa-instagram" style="color: #f472b6;"></i>
+          <span>Instagram Creator</span>
+          <span id="metainsta-badge-ig" class="nav-pill nav-pill--tool">0</span>
+        </button>
+
+        <div class="nav-section-title">LICENSE &amp; SECURITY</div>
+        <button class="nav-item" id="nav-item-license" type="button" title="View / Activate License">
+          <i class="fa-solid fa-shield-halved" style="color: #10b981;"></i>
+          <span>Subscription</span>
+          <span id="sidebar-sub-status" class="nav-pill-status" style="margin-left: auto; font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(239, 68, 68, 0.15); color: #f87171;">Checking</span>
+        </button>
+      </nav>
+
+      <!-- Sidebar Bottom Card -->
+      <div class="sidebar-footer">
+        <div class="sidebar-user-card" id="sidebar-license-btn" title="Engine Status">
+          <div class="user-card-icon" style="color: var(--accent-green);">
+            <i class="fa-solid fa-shield-halved"></i>
+          </div>
+          <div class="user-card-info">
+            <div id="sidebar-user-plan" class="user-plan-text" style="color: #4ade80;">Engine Ready</div>
+            <div id="sidebar-user-expiry" class="user-expiry-text">Samsung S24 Anti-Detect</div>
+          </div>
+        </div>
+
+        <div class="sidebar-actions-row">
+          <button id="btn-theme-toggle" class="btn-sidebar-icon" title="Toggle Dark/Light Mode">
+            <i class="fa-solid fa-moon"></i>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <div class="main-wrapper">
+      <main class="content-scroll">
+        <!-- ================= VIEW: META CREATOR ================= -->
+        <section id="view-meta-creator" class="view-panel active">
+          <div class="creator-mount" data-kind="meta"></div>
+        </section>
+
+        <!-- ================= VIEW: INSTAGRAM CREATOR ================= -->
+        <section id="view-ig-creator" class="view-panel">
+          <div class="creator-mount" data-kind="ig"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <!-- ================= SHARED MODALS ================= -->
+
+  <!-- Global Password -->
+  <div id="modal-global-password" class="modal-overlay">
+    <div class="modal-box modal-box--sm">
+      <div class="modal-header">
+        <h3 class="modal-title"><i class="fa-solid fa-key" style="color: var(--accent-cyan);"></i> Global Password</h3>
+        <button type="button" class="close-modal" data-close="modal-global-password">&times;</button>
+      </div>
+      <form id="form-global-password">
+        <div style="padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 0.85rem;">
+          <div class="form-group" style="margin: 0;">
+            <label>Password</label>
+            <input type="password" id="input-global-password" class="form-control" autocomplete="new-password" placeholder="leave empty = auto" style="width: 100%;">
+          </div>
+          <div style="font-size: 0.75rem; color: var(--text-dim);">
+            Used for every account created after saving (Meta + Instagram). Leave empty to go back to auto-generated passwords.
+          </div>
+        </div>
+        <div class="modal-footer" style="padding: 1rem 1.5rem; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end; gap: 0.75rem;">
+          <button type="button" class="btn btn-secondary btn-sm" data-close="modal-global-password">Cancel</button>
+          <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Edit Account -->
+  <div id="modal-metainsta-edit" class="modal-overlay">
+    <div class="modal-box modal-box--sm">
+      <div class="modal-header">
+        <h3 class="modal-title"><i class="fa-solid fa-pen-to-square" style="color: var(--accent-cyan);"></i> Edit Account</h3>
+        <button type="button" class="close-modal" data-close="modal-metainsta-edit">&times;</button>
+      </div>
+      <form id="form-metainsta-edit">
+        <div style="padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 0.85rem;">
+          <input type="hidden" id="metainsta-edit-id">
+          <div class="form-group" style="margin: 0;">
+            <label>Username</label>
+            <input type="text" id="metainsta-edit-username" class="form-control" placeholder="e.g. jane.doe123" style="width: 100%;">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label>Password</label>
+            <input type="text" id="metainsta-edit-password" class="form-control" placeholder="Leave empty to keep current" style="width: 100%;">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label>Email</label>
+            <input type="text" id="metainsta-edit-email" class="form-control" style="width: 100%;">
+          </div>
+          <div class="form-group" style="margin: 0;">
+            <label>Name</label>
+            <input type="text" id="metainsta-edit-name" class="form-control" style="width: 100%;">
+          </div>
+        </div>
+        <div class="modal-footer" style="padding: 1rem 1.5rem; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end; gap: 0.75rem;">
+          <button type="button" class="btn btn-secondary btn-sm" data-close="modal-metainsta-edit">Cancel</button>
+          <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-floppy-disk"></i> Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Confirm Delete -->
+  <div id="modal-metainsta-confirm-delete" class="modal-overlay">
+    <div class="modal-box modal-box--sm" style="border: 1px solid rgba(239, 68, 68, 0.35); box-shadow: 0 10px 30px -5px rgba(239, 68, 68, 0.15);">
+      <div class="modal-header" style="border-bottom: 1px solid rgba(239, 68, 68, 0.2);">
+        <h3 class="modal-title" style="color: #f87171; display: flex; align-items: center; gap: 8px;">
+          <i class="fa-solid fa-triangle-exclamation"></i> <span id="metainsta-delete-modal-title">Delete Account</span>
+        </h3>
+        <button type="button" class="close-modal" data-close="modal-metainsta-confirm-delete">&times;</button>
+      </div>
+      <div style="padding: 1.35rem 1.5rem; display: flex; flex-direction: column; gap: 1rem;">
+        <div style="display: flex; gap: 1rem; align-items: flex-start;">
+          <div style="width: 44px; height: 44px; border-radius: 12px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.25); display: flex; align-items: center; justify-content: center; font-size: 1.25rem; color: #f87171; flex-shrink: 0;">
+            <i class="fa-solid fa-trash-can" id="metainsta-delete-modal-icon"></i>
+          </div>
+          <div>
+            <div id="metainsta-delete-modal-msg" style="font-size: 0.92rem; font-weight: 600; color: var(--text-color); margin-bottom: 0.35rem;">
+              Are you sure you want to delete this account?
+            </div>
+            <div id="metainsta-delete-modal-sub" style="font-size: 0.78rem; color: var(--text-dim); line-height: 1.4;">
+              This will permanently remove the account credentials from storage.
+            </div>
+          </div>
+        </div>
+        <div id="metainsta-delete-modal-target-box" style="background: var(--bg-input, #0f172a); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 0.7rem 0.9rem; font-size: 0.82rem; font-family: var(--font-mono); color: var(--text-muted); word-break: break-all;">
+          <span id="metainsta-delete-modal-target-text"></span>
+        </div>
+      </div>
+      <div class="modal-footer" style="padding: 0.9rem 1.5rem; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end; gap: 0.75rem; background: rgba(0,0,0,0.15);">
+        <button type="button" class="btn btn-secondary btn-sm" data-close="modal-metainsta-confirm-delete">Cancel</button>
+        <button type="button" id="btn-metainsta-confirm-delete-submit" class="btn btn-danger btn-sm" style="background: #dc2626; border-color: #ef4444;">
+          <i class="fa-solid fa-trash-can"></i> Confirm Delete
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- License Activation Modal (Cloudflare Workers + D1 Authority) -->
+  <div id="modal-license-activation" class="modal-overlay" style="z-index: 99999;">
+    <div class="modal-box modal-license" style="max-width: 460px; width: 100%; border: 1px solid rgba(99, 102, 241, 0.35); box-shadow: 0 20px 40px -10px rgba(0,0,0,0.8), 0 0 25px rgba(99, 102, 241, 0.15);">
+      <button class="close-modal modal-close modal-license-close" data-close="modal-license-activation" title="Close">&times;</button>
+      <div style="text-align: center; margin-bottom: 1.25rem;">
+        <div style="width: 56px; height: 56px; margin: 0 auto 0.75rem; border-radius: 16px; background: linear-gradient(135deg, rgba(99, 102, 241, 0.2), rgba(168, 85, 247, 0.2)); border: 1px solid rgba(99, 102, 241, 0.4); display: flex; align-items: center; justify-content: center; font-size: 1.5rem; color: #818cf8;">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <h2 style="font-size: 1.25rem; font-weight: 700; color: var(--text-color, #f8fafc); margin: 0 0 0.35rem;">Meta Creator Activation</h2>
+        <p style="font-size: 0.82rem; color: var(--text-dim, #94a3b8); margin: 0; line-height: 1.4;">Enter your license key to activate your copy of Meta Creator.</p>
+      </div>
+
+      <div id="license-alert-box" style="display: none; padding: 0.75rem 1rem; border-radius: 8px; font-size: 0.82rem; margin-bottom: 1rem; text-align: left; line-height: 1.4;"></div>
+
+      <div class="form-group" style="text-align: left; margin-bottom: 1rem;">
+        <label style="display: block; font-weight: 600; font-size: 0.82rem; margin-bottom: 0.4rem; color: var(--text-color, #e2e8f0);">License Key</label>
+        <input type="text" id="license-key-input" class="form-control" placeholder="e.g. NOVA-XXXX-XXXX-XXXX" style="letter-spacing: 0.5px; font-size: 0.95rem; text-transform: uppercase; font-family: var(--font-mono, monospace);">
+      </div>
+
+      <div style="margin-top: 1.25rem;">
+        <button type="button" id="btn-activate-license" class="btn btn-primary" style="width: 100%; padding: 0.75rem; font-size: 0.95rem; font-weight: 600; justify-content: center;">
+          <i class="fa-solid fa-shield-check"></i> Activate License
+        </button>
+      </div>
+
+      <div style="margin-top: 0.75rem;">
+        <button type="button" class="btn btn-secondary btn-sm" data-close="modal-license-activation" style="width: 100%; justify-content: center;">
+          Close / Continue
+        </button>
+      </div>
+
+      <div style="margin-top: 1.1rem; padding-top: 0.85rem; border-top: 1px solid var(--border-color, #334155); display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-dim, #94a3b8);">
+        <div style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          <span>HWID:</span>
+          <span id="license-hwid-display-modal" style="font-family: var(--font-mono, monospace); color: var(--accent-cyan, #38bdf8); font-weight: 600;">Detecting...</span>
+        </div>
+        <button type="button" id="btn-copy-hwid" class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.7rem; height: 24px;" title="Copy HWID to clipboard">
+          <i class="fa-solid fa-copy"></i> Copy
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-shelf"></div>
+
+  <script src="js/nova-core.js" defer></script>
+  <script src="js/nova-license.js" defer></script>
+  <script src="js/nova-meta-insta.js" defer></script>
+</body>
+</html>

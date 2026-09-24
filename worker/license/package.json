@@ -1,0 +1,15 @@
+{
+  "name": "meta-creator-license-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Cloudflare Workers D1 Licensing Authority for Meta Creator & Nova Engine",
+  "scripts": {
+    "build": "node scripts/build-worker.js",
+    "deploy": "node scripts/build-worker.js && npx wrangler deploy",
+    "dev": "npx wrangler dev",
+    "tail": "npx wrangler tail"
+  },
+  "keywords": ["cloudflare", "workers", "licensing", "d1"],
+  "author": "",
+  "license": "ISC"
+}

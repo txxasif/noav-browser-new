@@ -1,0 +1,12 @@
+name = "nova-license"
+main = "src/index.js"
+compatibility_date = "2026-09-04"
+
+# Existing production bindings — DO NOT change names/ids on deploy.
+# ADMIN_PASSWORD stays as a dashboard secret (never commit it here).
+account_id = "47e3c212692eeca156fc3f5e29c80220"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "license_db"
+database_id = "8820a730-fdbc-4669-b69b-8b5a933b0a3d"

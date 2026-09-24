@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>JA CAPTCHA</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: 'Poppins', sans-serif;
+    background: radial-gradient(circle at top, #000, #001a00 85%);
+    color: white;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 420px;
+    width: 480px;
+  }
+
+  .card {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 20px;
+    padding: 35px 30px 30px;
+    text-align: center;
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(0,255,0,0.15);
+    box-shadow: 0 0 25px rgba(0,255,0,0.2);
+    position: relative;
+    top: 20px; /* 🔹 Turnstile টা একটু নিচে নামানো হয়েছে */
+  }
+
+  .title {
+    font-size: 30px;
+    font-weight: 800;
+    color: #00ffcc;
+    text-shadow: 0 0 20px #00ffaa, 0 0 40px #00ffff;
+    margin-bottom: 18px; /* একটু বেশি gap দেওয়া হয়েছে */
+    letter-spacing: 1px;
+  }
+
+  .status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-size: 16px;
+    color: #00ff66;
+    text-shadow: 0 0 10px #00ff66, 0 0 25px #00ff44;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+
+  .status-dot {
+    width: 12px;
+    height: 12px;
+    background: #00ff66;
+    border-radius: 50%;
+    box-shadow: 0 0 10px #00ff66, 0 0 20px #00ff44;
+    animation: pulse 1s infinite alternate;
+  }
+
+  @keyframes pulse {
+    from { transform: scale(1); opacity: 0.8; }
+    to { transform: scale(1.4); opacity: 1; }
+  }
+
+  .logo {
+    width: 120px;
+    height: 120px;
+    border-radius: 24px;
+    margin: 18px 0;
+    animation: greenPulse 0.2s infinite;
+  }
+
+  @keyframes greenPulse {
+    0%, 50%, 100% {
+      box-shadow:
+        0 0 30px rgba(0,255,0,1),
+        0 0 60px rgba(0,255,0,0.8),
+        0 0 90px rgba(0,255,0,0.5);
+      filter: brightness(1.4);
+    }
+    25%, 75% {
+      box-shadow:
+        0 0 10px rgba(0,255,0,0.4),
+        0 0 20px rgba(0,255,0,0.2);
+      filter: brightness(0.9);
+    }
+  }
+
+  .description {
+    font-size: 13px;
+    color: #ffffff;
+    text-shadow: 0 0 6px #cccccc;
+    margin-top: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .brand {
+    font-size: 20px;
+    font-weight: 700;
+    color: #00ffcc;
+    text-shadow: 0 0 10px #00ffaa, 0 0 30px #00ffff;
+    margin: 8px 0 25px;
+  }
+
+  .telegram-label {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: #00ff66;
+    text-shadow: 0 0 10px #00ff99, 0 0 25px #00ff44;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 12px 22px;
+    border-radius: 14px;
+    background: #ffffff;
+    color: #000000;
+    font-weight: 700;
+    text-decoration: none;
+    transition: 0.2s;
+    box-shadow: 0 0 30px rgba(255,255,255,0.5);
+  }
+
+  .btn img {
+    width: 22px;
+    height: 22px;
+  }
+
+  .btn:hover {
+    transform: scale(1.08);
+    box-shadow: 0 0 60px rgba(255,255,255,0.8);
+  }
+
+  .footer {
+    margin-top: 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #00ff99;
+    text-shadow: 0 0 10px #00ff66, 0 0 25px #00ffaa;
+  }
+
+  .footer span:first-child {
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">Captcha Solver</div>
+    <div class="status">
+      <div class="status-dot"></div>
+      <span>ACTIVATED</span>
+    </div>
+    <img src="icons/icon128.png" alt="logo" class="logo">
+    <div class="description">
+     Smart Fast Captcha Solver Pro
+    </div>
+    <div class="brand">Fast Solver</div>
+    <div class="telegram-label">Telegram</div>
+    <a href="https://t.me/jacaptcha" target="_blank" rel="noopener noreferrer" class="btn">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg" alt="Telegram">
+      Contact
+    </a>
+    <div class="footer">
+      <span>JA CAPTCHA</span>
+    </div>
+  </div>
+</body>
+</html>
