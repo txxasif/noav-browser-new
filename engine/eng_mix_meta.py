@@ -59,6 +59,67 @@ class EngineMetaMixin:
         except Exception:
             return False
 
+    def _meta_signup_control(self, page):
+        """Return the visible Meta signup control, if the page has hydrated."""
+        dialog_selector = (
+            'button:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
+            '[role="button"]:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
+            'a:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
+            'div:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook"))'
+        )
+        try:
+            dialog = page.locator('div[role="dialog"]').first
+            if dialog.count() > 0 and dialog.is_visible():
+                sign_btn = dialog.locator(dialog_selector).first
+                if sign_btn.count() > 0 and sign_btn.is_visible():
+                    return sign_btn
+        except Exception:
+            pass
+        try:
+            sign_btn = page.locator(dialog_selector).first
+            if sign_btn.count() > 0 and sign_btn.is_visible():
+                return sign_btn
+        except Exception:
+            pass
+        return None
+
+    def _wait_for_meta_signup_control(self, page, timeout=8000):
+        """Wait for consent/signup UI instead of sleeping a fixed 3 seconds."""
+        try:
+            timeout_ms = int(os.environ.get("META_SIGNUP_READY_TIMEOUT_MS", timeout))
+        except (TypeError, ValueError):
+            timeout_ms = int(timeout)
+        timeout_ms = max(2000, min(timeout_ms, 15000))
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        consent_names = (
+            "Allow all cookies", "Allow essential and optional cookies",
+            "Only allow essential cookies", "Decline optional cookies", "Allow",
+        )
+        while time.monotonic() < deadline:
+            # Consent can cover the page and prevent the signup button from
+            # becoming actionable. Handle it as soon as it appears, then resume
+            # the same readiness wait.
+            consent_clicked = False
+            for btn_text in consent_names:
+                try:
+                    btn = page.get_by_role("button", name=btn_text).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(timeout=1500)
+                        consent_clicked = True
+                        break
+                except Exception:
+                    pass
+            if consent_clicked:
+                page.wait_for_timeout(250)
+                continue
+            control = self._meta_signup_control(page)
+            if control is not None:
+                return control
+            # Short adaptive poll while React hydrates; unlike the old fixed
+            # sleep this returns immediately when the control is ready.
+            page.wait_for_timeout(200)
+        return None
+
     def meta_ai_signup_funnel(self, page):
         """Adaptive wrapper around the meta.ai low-fraud funnel.
 
@@ -91,23 +152,13 @@ class EngineMetaMixin:
         try:
             self.log('[🌐] Trying meta.ai entry funnel (low-fraud path)…')
             page.goto(_META_AI_URL, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(3000)
 
-            # 1. Handle cookie consent banners if present
-            for btn_text in [
-                "Allow all cookies", "Allow essential and optional cookies",
-                "Only allow essential cookies", "Decline optional cookies", "Allow"
-            ]:
-                try:
-                    btn = page.get_by_role("button", name=btn_text).first
-                    if btn.is_visible():
-                        btn.click()
-                        page.wait_for_timeout(1500)
-                        break
-                except Exception:
-                    pass
+            # Wait for the hydrated signup UI (and consent dialog, if shown)
+            # instead of unconditionally sleeping before every attempt.
+            if self._wait_for_meta_signup_control(page) is None:
+                self.log('[⏳] Signup control was not visible during the adaptive wait; using bounded fallback retries.')
 
-            # 2. Find and click "Sign up" on the dialog/modal or page
+            # 1. Find and click "Sign up" on the dialog/modal or page
             signed = False
             for _ in range(4):
                 # Check for explicit dialog modal first (highest priority)
