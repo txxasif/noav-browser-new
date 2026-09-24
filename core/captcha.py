@@ -30,6 +30,11 @@ class CaptchaMixin:
                 pass
 
             has_checkpoint = self._has_human_check(p) or "confirm" in cur_body or "checkpoints" in cur_url
+            region_blocked = any(marker in cur_body for marker in (
+                "isn't available yet in your country",
+                "is not available in your country",
+                "not available in your country",
+            ))
 
             # Requirement: after signup ALWAYS drive to the human-verification
             # front door and run the checkpoint (reCAPTCHA + selfie). The old
@@ -38,7 +43,10 @@ class CaptchaMixin:
             # often https://www.meta.ai/?... which matched that fast-path, so
             # the confirm-human / pic-upload step was skipped.
             if "checkpoints" not in cur_url and not has_checkpoint:
-                self.log('[🛡️] Driving to the Meta checkpoint front door (human verification + selfie)…')
+                if region_blocked:
+                    self.log('[⚠️] Meta AI reports a region restriction; redirecting to auth.meta.com…')
+                else:
+                    self.log('[🛡️] Driving to the Meta checkpoint front door (human verification + selfie)…')
                 try:
                     p.goto(run._META_AUTH_URL, wait_until="domcontentloaded", timeout=60000)
                     p.wait_for_timeout(4000)
@@ -50,6 +58,14 @@ class CaptchaMixin:
             except Exception:
                 pass
             cur_url = (p.url or "").lower()
+            region_blocked_after = any(marker in cur_body for marker in (
+                "isn't available yet in your country",
+                "is not available in your country",
+                "not available in your country",
+            ))
+            if region_blocked_after and "auth.meta.com" in cur_url:
+                self.log('[⚠️] auth.meta.com also reports the region restriction; continuing to the Instagram join.')
+                return True
 
             # Account chooser ("Log in with your Meta Account"): click the
             # saved account row FIRST — human verification comes after it
