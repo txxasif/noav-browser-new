@@ -40,7 +40,7 @@ A high-performance, standalone tool focused purely on **Meta Account Creation & 
 cd /home/asif/Documents/my-projects/Antidetect-Tools/lin/meta_creator
 ./run.sh
 ```
-Open **http://localhost:3070** in your browser.
+Open the URL printed by `./run.sh` (normally **http://localhost:3070**; if that port is occupied by the Windows VM/QEMU forward, the launcher automatically selects the next free port).
 
 ### 2. Run via CLI (Headless or Scripted)
 ```bash
