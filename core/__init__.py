@@ -3,12 +3,10 @@
 Composes :class:`MetaInstaRunner` from verbatim mixins sliced out of the
 former monolithic ``runner.py`` (no logic change):
 
-* :mod:`core.mail_fish` — legacy headless REST temp-mail provider.
+* :mod:`core.mailbox` — mail.td browser inbox and OTP fetcher.
 * :mod:`core.base` — init + anti-detect launch + React event dispatch.
-* :mod:`core.telegram` — Taskly bot handshake & 2FA key submit.
 * :mod:`core.captcha` — ordered captcha solvers + Meta verification.
 * :mod:`core.signup` — Meta signup + screenshot telemetry hooks.
-* :mod:`core.mailbox` — temp-mailbox dispatch chain.
 * :mod:`core.lifecycle` — two-phase lifecycles + ledger export.
 
 MRO note: ``InstagramFlowMixin`` + ``run._MetaInstagramRunner`` stay last
@@ -29,7 +27,6 @@ from .license_mgr import LicenseManager  # noqa: E402
 from .base import MetaBaseMixin  # noqa: E402
 from .captcha import CaptchaMixin  # noqa: E402
 from .lifecycle import LifecycleMixin  # noqa: E402
-from .mail_fish import TempMailFishProvider  # noqa: E402
 from .mailbox import MailboxMixin  # noqa: E402
 from .signup import SignupMixin  # noqa: E402
 
@@ -46,4 +43,4 @@ class MetaInstaRunner(
     """Meta signup + Instagram login/link/join in the same browser session."""
 
 
-__all__ = ["MetaInstaRunner", "TempMailFishProvider", "LicenseManager"]
+__all__ = ["MetaInstaRunner", "LicenseManager"]

@@ -36,9 +36,8 @@ SYNC_ROOT_FILES = [
     "worker.py",
     "store.py",
     "db.py",
-    "mem_guard.py",
-    "mail_providers.py",
     "ai_config.py",
+    # mail_providers.py is intentionally excluded: mail.td is the only provider.
     "ig_flow.py",
     "runner.py",
     "selfie.png",
@@ -143,7 +142,17 @@ def sync_sources():
                 shutil.copy2(s_file, d_file)
                 synced_count += 1
 
-    # 3. Clean up any stale linux symlinks in win tree
+    # 3. Remove legacy mailbox-provider files from the Windows tree.  These
+    # files may survive in an older checkout and must not be shipped again.
+    for rel in ("mail_providers.py", "mem_guard.py", os.path.join("core", "mail_fish.py")):
+        stale = os.path.join(ROOT_WIN, rel)
+        if os.path.isfile(stale) or os.path.islink(stale):
+            try:
+                os.unlink(stale)
+            except OSError as exc:
+                raise RuntimeError(f"Could not remove legacy provider file {stale}: {exc}") from exc
+
+    # 4. Clean up any stale linux symlinks in win tree
     stale_link = os.path.join(ROOT_WIN, "engine", "ms-playwright")
     if os.path.islink(stale_link):
         try:
@@ -151,7 +160,7 @@ def sync_sources():
         except OSError:
             pass
 
-    # 4. Sync Windows scripts from windows_dist if present (including installer/)
+    # 5. Sync Windows scripts from windows_dist if present (including installer/)
     win_dist_dir = os.path.join(ROOT_LIN, "windows_dist")
     if os.path.isdir(win_dist_dir):
         for root, dirs, files in os.walk(win_dist_dir):
@@ -366,6 +375,7 @@ def build_portable_zip():
             "MetaCreator/Run-Console.bat",
             "MetaCreator/Stop.bat",
             "MetaCreator/Update.bat",
+            "MetaCreator/Update.ps1",
             "MetaCreator/core/licenseManager.js",
             "MetaCreator/core/license_mgr.py",
             "MetaCreator/core/licenseConfig.js",
@@ -381,6 +391,15 @@ def build_portable_zip():
             "MetaCreator/extensions/Captcha/dist/ort-wasm-simd.wasm",
             "MetaCreator/extensions/Captcha/models/yolov5-seg.ort",
         ]
+        forbidden_provider_files = [
+            n for n in names
+            if n in ("MetaCreator/mail_providers.py", "MetaCreator/mem_guard.py", "MetaCreator/core/mail_fish.py")
+        ]
+        if forbidden_provider_files:
+            raise RuntimeError(
+                "Legacy mailbox provider files leaked into release ZIP: "
+                f"{forbidden_provider_files}"
+            )
         missing_in_zip = [f for f in required_in_zip if f not in names]
         if missing_in_zip:
             raise RuntimeError(f"Portable ZIP validation failed! Missing files: {missing_in_zip}")
@@ -443,6 +462,18 @@ def build_patch_zip():
                 arc_name = os.path.join("MetaCreator", rel_path)
                 zf.write(abs_path, arc_name)
                 total_files += 1
+
+    with zipfile.ZipFile(patch_path, "r") as zf:
+        names = set(zf.namelist())
+        forbidden_provider_files = [
+            n for n in names
+            if n in ("MetaCreator/mail_providers.py", "MetaCreator/mem_guard.py", "MetaCreator/core/mail_fish.py")
+        ]
+        if forbidden_provider_files:
+            raise RuntimeError(
+                "Legacy mailbox provider files leaked into Patch ZIP: "
+                f"{forbidden_provider_files}"
+            )
 
     size_mb = os.path.getsize(patch_path) / (1024 * 1024)
     sha256 = compute_sha256(patch_path)

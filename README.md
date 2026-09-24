@@ -10,7 +10,7 @@ A high-performance, standalone tool focused purely on **Meta Account Creation & 
 
 - **Same Anti-Detect Core**: Samsung Galaxy S24 Ultra Android mobile profile emulation, custom fingerprint spoofing, and realistic interaction speeds.
 - **Two Independent Workspaces**: **Meta Creator** (Meta-only accounts) and **Instagram Creator** (Meta account → Instagram join) are separate pages, each with its own controls, stats, results table, pagination and live engine log.
-- **Fast Mailbox Dispatch**: Multi-tier mail dispatch (`mail.td` with rapid REST API code polling, `tempmailfish`, and auto-fallback).
+- **Fast Mailbox Dispatch**: Browser-backed `mail.td` inbox with REST API code polling.
 - **Offline & Autonomous Captchas**:
   - Offline Faster-Whisper / Vosk Audio STT reCAPTCHA solver.
   - Headless Visual AI extension support via Chromium.
@@ -29,7 +29,7 @@ A high-performance, standalone tool focused purely on **Meta Account Creation & 
   - SQLite WAL mode database (`data/store.db`).
   - Automatic synchronization with `data/accounts.json`, `data/accounts.csv`, and `accounts.txt`.
   - Process group isolation (prevents zombie or orphaned Chromium processes).
-  - RAM guard watchdog.
+  - No automatic RAM-guard clamp: the selected Parallel value is used as entered (up to the UI/CLI limit of 50).
 
 ---
 
@@ -61,7 +61,7 @@ Open **http://localhost:3070** in your browser.
 ```
 meta_creator/
 ├── engine/              # Anti-detect engine, launch parameters, captcha, models
-├── core/                # Lifecycle, signup wizard, mailbox mixin, base
+├── core/                # Lifecycle, signup wizard, mail.td mailbox mixin, base
 ├── extensions/          # Visual AI Captcha browser extension
 ├── public/              # Web dashboard frontend
 │   ├── index.html       # Sidebar + Meta/Instagram workspace mounts, shared modals
@@ -78,7 +78,7 @@ meta_creator/
 ├── worker.py            # Multi-worker loop engine (CLI / Background)
 ├── ai_config.py         # App configuration & URL registry
 ├── db.py & store.py     # Thread-safe SQLite store with auto-sync
-├── mem_guard.py         # Memory guard and RAM reserve checking
+├── engine/              # Low-memory Chromium launch/resource tuning
 ├── selfie.png           # Biometric verification selfie
 └── run.sh / start.sh    # Launcher scripts
 ```

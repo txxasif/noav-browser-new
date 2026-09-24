@@ -38,11 +38,8 @@ class MetaBaseMixin:
         self.captcha_mode = (captcha_mode or "extension").lower()
         if self.captcha_mode not in Urls.CAPTCHA_MODES:
             self.captcha_mode = "extension"
-        # ordered multi-tier mail: strict single pick or "auto" chain.
-        self.mail_provider = (mail_provider or "mailtd").lower()
-        if self.mail_provider not in Urls.MAIL_PROVIDERS:
-            self.mail_provider = "mailtd"
-        self.tempmail_provider = None
+        # mail.td is the only supported mailbox provider.
+        self.mail_provider = "mailtd"
         self.insta_secret = None          # 2FA base32 secret (space-stripped)
         self.device_model = None          # pinned phone model (Nova parity; set from record before resume)
         self.device_ua = None             # pinned full UA string

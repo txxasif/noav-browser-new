@@ -44,8 +44,6 @@ Source: "..\worker.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\runner.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\store.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\db.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\mem_guard.py"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\mail_providers.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ai_config.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ig_flow.py"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\selfie.png"; DestDir: "{app}"; Flags: ignoreversion
@@ -55,6 +53,7 @@ Source: "..\Run.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Run-Console.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Stop.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\Update.bat"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\Update.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\HOW_TO_RUN_ON_WINDOWS.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

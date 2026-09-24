@@ -45,12 +45,7 @@ const MI_WORKSPACE_DEFS = {
 };
 
 const MI_MAIL_PROVIDERS = [
-  { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td', hint: '(default)' },
-  { value: 'tempmailfish', icon: 'fa-solid fa-bolt', color: '#38bdf8', label: 'TempMail.fish', hint: '(fast)' },
-  { value: 'auto', icon: 'fa-solid fa-link', color: 'var(--accent-green)', label: 'Auto chain', hint: '(fish → others)' },
-  { value: 'guerrilla', icon: 'fa-solid fa-mask', color: 'var(--accent-purple)', label: 'Guerrilla', hint: '' },
-  { value: 'rotate', icon: 'fa-solid fa-arrows-rotate', color: 'var(--accent-cyan)', label: 'Rotate', hint: '(per account)' },
-  { value: 'mailtm', icon: 'fa-solid fa-at', color: '#f472b6', label: 'mail.tm', hint: '' },
+  { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td', hint: '(only provider)' },
 ];
 
 function miMailOptionsHtml(kind) {
@@ -133,7 +128,7 @@ function miCreatorPanelHtml(def) {
       <div class="creator-service">
         <div class="creator-service-title"><i class="fa-solid fa-envelope" style="color: var(--accent-cyan);"></i> Mail Inbox</div>
         <div class="creator-options">${miMailOptionsHtml(k)}</div>
-        <div class="creator-service-note">Single picks are strict (no silent switch). Auto chain tries fish → others, then mail.td.</div>
+        <div class="creator-service-note">mail.td is the only enabled mailbox provider.</div>
       </div>
 
       <div class="creator-service">
@@ -1121,8 +1116,8 @@ function createCreatorWorkspace(root, def, state, shared) {
     await shared.refreshShared();
   });
 
-  if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => { window.location = '/api/meta-insta/export?format=csv'; });
-  if (els.btnExportTxt) els.btnExportTxt.addEventListener('click', () => { window.location = '/api/meta-insta/export?format=txt'; });
+  if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => { window.location = `/api/meta-insta/export?format=csv&kind=${def.kind}`; });
+  if (els.btnExportTxt) els.btnExportTxt.addEventListener('click', () => { window.location = `/api/meta-insta/export?format=txt&kind=${def.kind}`; });
 
   if (els.btnClear) {
     els.btnClear.addEventListener('click', async () => {

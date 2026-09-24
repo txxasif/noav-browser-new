@@ -51,17 +51,9 @@ import run  # noqa: E402  (Anti-detect + offline captcha engine)
 # Keep current working directory anchored to AI_DIR (run.py sets chdir to its own dir)
 os.chdir(AI_DIR)
 
-# Self-contained multi-tier REST mail engine (fish → Guerrilla → mail.tm).
-# Lives in this project (mail_providers.py) — zero imports from other
-# projects, so nothing can ever shadow our engine modules again.
-try:
-    from mail_providers import (  # noqa: E402
-        create_any_provider as create_any_mail_provider,
-        create_temp_mail_provider as create_mail_provider,
-    )
-except Exception:
-    create_any_mail_provider = None
-    create_mail_provider = None
+# mail.td is the only supported mailbox provider for this build.
+# The browser-backed mail.td flow is implemented in engine/eng_mix_mail.py.
+# The legacy provider module is intentionally not imported or packaged.
 
 SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
 CAPTCHA_EXT_DIR = os.path.join(AI_DIR, "extensions", "Captcha")
@@ -84,12 +76,11 @@ class Urls:
     META_SIGNUP = run._META_AUTH_URL                      # https://auth.meta.com/
     META_POST_CHECKPOINT = run._META_POST_URL
 
-    # --- Temp-mail providers (ordered multi-tier REST chain) ---
-    TEMPMAILFISH_API = "https://api.tempmail.fish"
+    # --- Temp-mail provider (mail.td only) ---
     MAILTD = "https://mail.td/"
-    # Strict single picks + "auto" chain (fish → Guerrilla → mail.tm → mail.td).
-    # Default stays mailtd (most reliable delivery).
-    MAIL_PROVIDERS = ("mailtd", "tempmailfish", "guerrilla", "mailtm", "auto", "rotate")
+    MAIL_PROVIDERS = ("mailtd",)
+    # Keep a single explicit choice for callers that still import this symbol.
+    MAIL_PROVIDER_DEFAULT = "mailtd"
     CAPTCHA_MODES = ("extension", "audio")  # chosen first, the other on fallback
 
 

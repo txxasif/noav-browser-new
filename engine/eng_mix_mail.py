@@ -24,60 +24,186 @@ except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from eng_constants import _MAILTD_URL  # noqa: E402
 
 class EngineMailMixin:
+    @staticmethod
+    def _mailtd_address_from_page(page):
+        """Read the current mailbox address from the current mail.td UI.
+
+        mail.td renders the address in a dedicated ``code`` element.  The
+        old implementation searched the entire body for an e-mail pattern;
+        that is fragile because the page also contains support/footer text and
+        initially renders only a pending placeholder.  Read the address card
+        first, then use visible e-mail inputs as a compatibility fallback.
+        """
+        pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+        try:
+            values = page.locator(
+                'code[class*="CredentialCard_addr"], '
+                '[class*="CredentialCard_addr"], '
+                'input[type="email"], input[name*="address" i], '
+                '[data-address], [data-email]'
+            ).evaluate_all(
+                """els => els.flatMap(el => [
+                    el.innerText || '', el.textContent || '',
+                    el.value || '', el.getAttribute('data-address') || '',
+                    el.getAttribute('data-email') || '',
+                    el.getAttribute('aria-label') || ''
+                ])"""
+            )
+            for value in values:
+                m = re.search(pattern, str(value or ""))
+                if m:
+                    return m.group(0)
+        except Exception:
+            pass
+        return None
+
     def open_mailtd(self):
+        # A reused runner must never accidentally reuse the previous cycle's
+        # address while the new mail.td page is still initializing.
+        self.email = None
         self.mail = self.w.context.new_page()
         self.mail.goto(_MAILTD_URL, wait_until="domcontentloaded", timeout=60000)
         self.mail.wait_for_timeout(4000)
+
+        # Normally the page mints an inbox during idle time.  In an automated
+        # context mail.td intentionally suppresses that auto-mint, leaving the
+        # address card as ``·········``.  In that case explicitly click New.
         for _ in range(20):
-            txt = self.mail.evaluate("() => document.body.innerText")
-            m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", txt)
-            if m:
-                self.email = m.group(0)
+            addr = self._mailtd_address_from_page(self.mail)
+            if addr:
+                self.email = addr
                 break
             self.mail.wait_for_timeout(1000)
+
+        if not self.email:
+            self.log("[📧] mail.td has no address yet; requesting a new mailbox…")
+            addr = self.new_mailtd_address(timeout=75)
+            if addr:
+                self.email = addr
+
         if not self.email:
             raise RuntimeError("could not read mail.td address")
         self.log(f'<font color="#00FF00"><b>[📧] Meta inbox: {self.email}</b></font>')
 
     def new_mailtd_address(self, timeout: int = 40):
-        """Create a FRESH mail.td address via the page's "↻ New" button.
+        """Create a fresh mailbox through mail.td's live proof-of-work flow.
 
-        The page is proof-of-work gated, so this must run in the live browser.
-        Returns the new address (lowercased), or None on failure. Tokens are
-        read later from the live page's localStorage by ``_mailtd_api_ctx`` so
-        ``fetch_code`` automatically serves the NEW mailbox.
+        mail.td suppresses automatic mailbox creation for automated contexts.
+        On a fresh page the primary action is labeled ``Get an address``; after
+        an address exists, the refresh action is labeled ``New``.  The page
+        must perform the proof-of-work itself, so this method deliberately
+        clicks the UI instead of recreating mailbox creation over HTTP.
         """
         mail = getattr(self, "mail", None) or getattr(self, "page", None)
         if mail is None:
             return None
+
         old = (getattr(self, "email", "") or "").strip().lower()
+        create_responses = []
+
+        def on_response(response):
+            if "/api/accounts" not in response.url:
+                return
+            try:
+                method = response.request.method
+            except Exception:
+                method = "?"
+            if method != "POST":
+                return
+            try:
+                body = response.text()
+            except Exception as exc:
+                body = f"<response body unavailable: {exc}>"
+            item = {"status": response.status, "body": body[:500]}
+            create_responses.append(item)
+            try:
+                self.log(
+                    f"[📧] mail.td create response: HTTP {response.status} "
+                    f"{body[:300]}"
+                )
+            except Exception:
+                pass
+
+        mail.on("response", on_response)
+        selectors = [
+            'button:has-text("Get an address")',
+            'button:has-text("New")',
+            'button:has-text("↻ New")',
+            'button[aria-label*="address" i]',
+            'button[aria-label*="new" i]',
+        ]
+        if old:
+            # For an already-created inbox, prefer the refresh action over the
+            # initial/empty-state action.
+            selectors = [
+                'button:has-text("New")',
+                'button:has-text("↻ New")',
+                'button[aria-label*="new" i]',
+                'button:has-text("Get an address")',
+            ]
+
         clicked = False
-        for sel in ('button:has-text("↻ New")', 'button:has-text("New")',
-                    '[aria-label*="New" i]'):
-            try:
-                el = mail.locator(sel).first
-                if el.count() and el.is_visible():
-                    el.click()
-                    clicked = True
-                    break
-            except Exception:
-                continue
-        if not clicked:
+        try:
+            seen = set()
+            for selector in selectors:
+                if selector in seen:
+                    continue
+                seen.add(selector)
+                try:
+                    locator = mail.locator(selector).first
+                    if locator.count() and locator.is_visible():
+                        locator.click(timeout=10000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                # The localized/mangled glyphs in some Windows console output
+                # do not affect the DOM, but the primary button class is stable.
+                try:
+                    locator = mail.locator("button.cSolid").first
+                    if locator.count() and locator.is_visible():
+                        locator.click(timeout=10000)
+                        clicked = True
+                except Exception:
+                    pass
+
+            if not clicked:
+                try:
+                    self.log("[⚠️] mail.td: no mailbox creation action was available")
+                except Exception:
+                    pass
+                return None
+
+            end = time.time() + max(5, timeout)
+            while time.time() < end:
+                mail.wait_for_timeout(1000)
+                addr = self._mailtd_address_from_page(mail)
+                if addr:
+                    addr = addr.lower()
+                    if addr != old:
+                        try:
+                            self.log(
+                                f'<font color="#00FF00"><b>[📧] Extra temp mailbox: {addr}</b></font>'
+                            )
+                        except Exception:
+                            pass
+                        return addr
+
+            if create_responses:
+                try:
+                    self.log(
+                        "[⚠️] mail.td mailbox creation finished without an address; "
+                        f"last API response: {create_responses[-1]}"
+                    )
+                except Exception:
+                    pass
             return None
-        end = time.time() + max(5, timeout)
-        while time.time() < end:
-            mail.wait_for_timeout(1000)
+        finally:
             try:
-                txt = mail.evaluate("() => document.body.innerText") or ""
+                mail.remove_listener("response", on_response)
             except Exception:
-                continue
-            m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", txt)
-            if m:
-                addr = m.group(0).lower()
-                if addr != old:
-                    self.log(f'<font color="#00FF00"><b>[📧] Extra temp mailbox: {addr}</b></font>')
-                    return addr
-        return None
+                pass
 
     def _mail_text(self):
         return self.mail.evaluate(

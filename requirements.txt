@@ -1,6 +1,5 @@
 playwright==1.62.0
 playwright-stealth==2.0.3
-requests==2.34.2
 pyotp==2.10.0
 telethon==1.45.0
 rapidocr-onnxruntime==1.2.3

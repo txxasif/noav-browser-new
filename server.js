@@ -6,7 +6,6 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const zlib = require('zlib');
 const { spawn, execSync } = require('child_process');
 
@@ -725,41 +724,23 @@ const server = http.createServer((req, res) => {
         return;
       }
 
-      // Pre-flight RAM Guard (MetaAuto parity): prevent machine freezes & OOM kills
-      const freeMemMb = Math.floor(os.freemem() / (1024 * 1024));
-      if (freeMemMb < 1500) {
+      // The dashboard value is authoritative.  There is no RAM pre-flight,
+      // automatic reduction, or watchdog in the creator runtime: the user
+      // explicitly controls the number of browser slots.
+      const requestedConcurrency = Number.parseInt(opts.concurrency, 10);
+      if (!Number.isFinite(requestedConcurrency) || requestedConcurrency < 1 || requestedConcurrency > 50) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'ERROR',
-          error: `Low system RAM: only ${freeMemMb} MB free. Need at least 1500 MB available before launching browser automation.`
+          error: 'Parallel must be a whole number from 1 to 50. No automatic RAM reduction is applied.'
         }));
         return;
       }
-
-      let concurrency = Math.max(1, Math.min(parseInt(opts.concurrency || 1, 10), 50));
+      const concurrency = requestedConcurrency;
       const headless = opts.headless !== false;
-      // RAM Guard: clamp to what free memory can actually hold. Over-committing
-      // crashes Chromium mid-run ("Connection closed while reading from the
-      // driver") and loses the batch. A visible clamp beats a silent OOM.
-      // Headless Chromium is much lighter than headed, so account for both.
-      // Set ENGINE_ALLOW_OVERCOMMIT=1 to force the requested count.
-      const totalMemMb = Math.floor(os.totalmem() / (1024 * 1024));
-      const reserveMb = Math.min(2500, Math.max(1000, Math.floor(totalMemMb * 0.15)));
-      const perBrowserMb = headless ? 320 : 800;
-      const safeMaxConc = Math.max(1, Math.floor((freeMemMb - reserveMb) / perBrowserMb));
-      const allowOvercommit = process.env.ENGINE_ALLOW_OVERCOMMIT === '1';
-      if (concurrency > safeMaxConc) {
-        if (allowOvercommit) {
-          console.log(`[RAM Guard] ${concurrency} parallel requested with ${freeMemMb} MB free (safe ~${safeMaxConc}) — continuing (ENGINE_ALLOW_OVERCOMMIT=1).`);
-        } else {
-          console.log(`[RAM Guard] Reducing parallel ${concurrency} -> ${safeMaxConc} (${freeMemMb} MB free, ~${perBrowserMb} MB/browser${headless ? ', headless' : ', headed'}, reserve ${reserveMb} MB).`);
-          broadcastEvent({ type: 'log', message: `[RAM Guard] Reducing parallel ${concurrency} -> ${safeMaxConc} (only ${freeMemMb} MB free, ${headless ? 'headless' : 'headed'}). Set ENGINE_ALLOW_OVERCOMMIT=1 to force.` });
-          concurrency = safeMaxConc;
-        }
-      }
       const target = parseInt(opts.target || 0, 10);
       const delay = Math.max(1, parseInt(opts.delay || 4, 10));
-      const mail = opts.mail_provider || opts.mail || 'mailtd';
+      const mail = 'mailtd';
       const captcha = opts.captcha_mode || opts.captcha || 'extension';
       const mode = (opts.mode === 'meta-ig') ? 'meta-ig' : 'meta';
       // Global password: request override, else the saved dashboard setting.
@@ -1024,40 +1005,75 @@ const server = http.createServer((req, res) => {
   // 10. GET /api/meta-insta/export (also /api/export)
   if ((pathname.startsWith('/api/meta-insta/export') || pathname === '/api/export') && req.method === 'GET') {
     const format = (urlObj.searchParams.get('format') || 'csv').toLowerCase();
+    const kind = (urlObj.searchParams.get('kind') || '').toLowerCase() === 'ig' ? 'ig' : 'meta';
     (async () => {
       await syncFilesFromStore();
 
       if (format === 'txt') {
-      if (fs.existsSync(ACCOUNTS_TXT)) {
-        res.writeHead(200, {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Content-Disposition': 'attachment; filename="meta_accounts.txt"'
-        });
-        fs.createReadStream(ACCOUNTS_TXT).pipe(res);
-      } else {
-        const accounts = getAccounts();
-        const txt = accounts.map(a => `${a.instagram_username || a.username || a.email}:${a.password || ''}`).join('\n');
-        res.writeHead(200, {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Content-Disposition': 'attachment; filename="meta_accounts.txt"'
-        });
-        res.end(txt);
+        if (fs.existsSync(ACCOUNTS_TXT)) {
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="meta_accounts.txt"'
+          });
+          fs.createReadStream(ACCOUNTS_TXT).pipe(res);
+        } else {
+          const accounts = getAccounts();
+          const txt = accounts.map(a => `${a.instagram_username || a.username || a.email}:${a.password || ''}`).join('\n');
+          res.writeHead(200, {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="meta_accounts.txt"'
+          });
+          res.end(txt);
+        }
+        return;
       }
-      return;
-    }
 
-    // CSV format
-    if (fs.existsSync(ACCOUNTS_CSV) && fs.statSync(ACCOUNTS_CSV).size > 0) {
-      res.writeHead(200, {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': 'attachment; filename="meta_accounts.csv"'
-      });
-      fs.createReadStream(ACCOUNTS_CSV).pipe(res);
-    } else {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('No CSV data available yet.');
-    }
-      return;
+      if (kind === 'ig') {
+        const accounts = getAccounts();
+        const isIg = (a) => String((a && a.status) || '') !== 'MetaCreated'
+          && (a && (a.instagram_username || String(a.platform || '').match(/Instagram/i)));
+        const rows = ['username,password,cookies,combo'];
+        const csvCell = (value) => {
+          const text = String(value == null ? '' : value);
+          return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+        };
+        for (const a of accounts) {
+          if (!isIg(a)) continue;
+          const username = a.instagram_username || a.username || '';
+          const password = a.password || '';
+          if (!username || !password) continue;
+          let cookieHeader = '';
+          try {
+            const f = cookieFileFor(a.id);
+            if (f && fs.existsSync(f)) {
+              const parsed = JSON.parse(fs.readFileSync(f, 'utf8'));
+              if (Array.isArray(parsed)) {
+                cookieHeader = parsed.filter(c => c && c.name)
+                  .map(c => `${c.name}=${c.value == null ? '' : c.value}`).join('; ');
+              }
+            }
+          } catch (e) {}
+          const combo = `${username}|${password}|${cookieHeader}`;
+          rows.push([username, password, cookieHeader, combo].map(csvCell).join(','));
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="instagram_accounts.csv"'
+        });
+        res.end(rows.join('\r\n') + '\r\n');
+        return;
+      }
+
+      if (fs.existsSync(ACCOUNTS_CSV) && fs.statSync(ACCOUNTS_CSV).size > 0) {
+        res.writeHead(200, {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': 'attachment; filename="meta_accounts.csv"'
+        });
+        fs.createReadStream(ACCOUNTS_CSV).pipe(res);
+      } else {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('No CSV data available yet.');
+      }
     })();
     return;
   }

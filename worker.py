@@ -4,7 +4,7 @@ meta_creator — Multi-Worker Loop Engine
 =======================================
 Runs N concurrent anti-detect mobile browser windows in a continuous cycle:
 1. Open Browser (Samsung S24 Ultra Android anti-detect profile)
-2. Initialize temporary mailbox (mail.td / tempmailfish / auto)
+2. Initialize the temporary mail.td inbox
 3. Execute Meta registration (Adult DOB > 2000, sanitized display name, password)
 4. Receive and confirm verification code from email
 5. Solve human verification checkpoint (Whisper Audio STT reCAPTCHA + Biometric Selfie)
@@ -216,7 +216,7 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
         worker.emit(f"❌ Cycle failed: {exc}")
         if "Connection closed while reading from the driver" in str(exc):
             worker.emit("💡 Browser/driver connection lost — usually RAM pressure or a crashed Chromium. "
-                        "Lower Parallel (or set ENGINE_ALLOW_OVERCOMMIT=0 and use Headless).")
+                        "The requested Parallel value is preserved; retry or use Headless for lower resource use.")
         if getattr(runner, "last_record_id", None):
             worker.emit(f"💾 Account record preserved in store: {runner.last_record_id}")
             emit_event({
@@ -277,18 +277,10 @@ def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: i
         except Exception:
             pass
 
-        # Check memory guard if available
-        try:
-            from mem_guard import check_ram_safe
-            if not check_ram_safe(reserve_mb=3000):
-                emit_event({
-                    "type": "log",
-                    "slot_id": slot_id,
-                    "message": "[RAM guard] Low memory detected, pausing 10s...",
-                })
-                time.sleep(10)
-        except Exception:
-            pass
+        # The requested slot count is controlled by the dashboard/CLI.
+        # Resource tuning lives in the browser launcher (low-memory flags and
+        # tracker blocking); do not silently pause or reduce user-selected
+        # concurrency here.
 
         ok, detail = run_single_meta_cycle(
             slot_id=slot_id,
@@ -335,7 +327,7 @@ def main():
     parser.add_argument("--target", type=int, default=0, help="Target total accounts to create (0 = unlimited)")
     parser.add_argument("--delay", type=int, default=4, help="Delay in seconds between cycles")
     parser.add_argument("--headless", action="store_true", help="Run in headless browser mode")
-    parser.add_argument("--mail", type=str, default="mailtd", choices=Urls.MAIL_PROVIDERS, help="Mailbox provider")
+    parser.add_argument("--mail", type=str, default="mailtd", choices=("mailtd",), help="Mailbox provider (mail.td only)")
     parser.add_argument("--captcha", type=str, default="extension", choices=Urls.CAPTCHA_MODES, help="Captcha solving mode")
     parser.add_argument("--mode", type=str, default="meta", choices=["meta", "meta-ig"], help="Creation mode: Meta account only, or Meta + Instagram join")
 
@@ -383,26 +375,10 @@ def main():
         print(f"[License] Check error: {exc}")
         sys.exit(1)
 
-    # Memory Guard: clamp concurrency to allocatable RAM and start background watchdog
-    try:
-        from mem_guard import ram_concurrency_cap, start_watchdog
-        capped_conc, note = ram_concurrency_cap(concurrency, headless=headless)
-        if capped_conc == 0:
-            msg = f"[RAM Guard] CRITICAL: Refusing to start — {note}"
-            print(f"[!] {msg}")
-            emit_event({"type": "log", "message": msg})
-            return
-        if capped_conc < concurrency:
-            msg = f"[RAM Guard] Free memory clamp: concurrency {concurrency} -> {capped_conc} ({note})"
-            print(f"[*] {msg}")
-            emit_event({"type": "log", "message": msg})
-            concurrency = capped_conc
-        elif note:
-            print(f"[*] [RAM Guard] {note}")
-            emit_event({"type": "log", "message": f"[RAM Guard] {note}"})
-        start_watchdog(_stop_requested, log=lambda m: emit_event({"type": "log", "message": m}))
-    except Exception as exc:
-        print(f"[mem_guard] note: {exc}")
+    # Keep the user-selected concurrency exactly as requested.  The launcher
+    # applies low-memory browser flags and cleans up completed profiles; the
+    # worker does not impose a second RAM policy.
+    print(f"[*] Concurrency policy: user-selected value {concurrency} will be used without RAM clamping.")
 
     def sig_handler(signum, frame):
         _stop_requested.set()
