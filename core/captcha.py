@@ -29,6 +29,11 @@ class CaptchaMixin:
             except Exception:
                 pass
 
+            is_meta_ai_success = (
+                any(x in cur_url for x in ("meta.ai/?", "meta.ai/home", "meta.ai/chat", "meta.ai/prompt"))
+                and "error=" not in cur_url
+                and "sign in to get started" not in cur_body
+            )
             has_checkpoint = self._has_human_check(p) or "confirm" in cur_body or "checkpoints" in cur_url
             region_blocked = any(marker in cur_body for marker in (
                 "isn't available yet in your country",
@@ -36,12 +41,14 @@ class CaptchaMixin:
                 "not available in your country",
             ))
 
-            # Requirement: after signup ALWAYS drive to the human-verification
-            # front door and run the checkpoint (reCAPTCHA + selfie). The old
-            # "authenticated on meta.ai naturally" fast-path could return True
-            # before the selfie upload — on Windows the post-signup landing is
-            # often https://www.meta.ai/?... which matched that fast-path, so
-            # the confirm-human / pic-upload step was skipped.
+            # Match meta_auto_ai: a clean, already-authenticated Meta AI
+            # session must not be forced through auth.meta.com again. A real
+            # checkpoint still sets has_checkpoint and is handled below; a
+            # country-availability notice takes the explicit auth redirect.
+            if is_meta_ai_success and not has_checkpoint and not region_blocked:
+                self.log('<font color="#00FF00"><b>[✔] Meta session authenticated on meta.ai naturally.</b></font>')
+                return True
+
             if "checkpoints" not in cur_url and not has_checkpoint:
                 if region_blocked:
                     self.log('[⚠️] Meta AI reports a region restriction; redirecting to auth.meta.com…')
