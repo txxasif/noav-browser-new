@@ -156,6 +156,8 @@ try {
 } catch (e) {}
 
 let activeLoopProcess = null;
+let startInFlight = false;
+let workerStdoutBuffer = '';
 let currentLoopConfig = { concurrency: 1, headless: true, target: 0, delay: 4, mail: 'mailtd', captcha: 'extension', mode: 'meta' };
 const sseClients = new Set();
 
@@ -211,6 +213,20 @@ function broadcastEvent(data) {
     flushSseBatch();
   }
   writeSse(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function consumeWorkerLine(line) {
+  const trimmed = String(line || '').trim();
+  if (!trimmed) return;
+  if (trimmed.startsWith('__EVENT__')) {
+    try {
+      const evt = JSON.parse(trimmed.slice(9));
+      broadcastEvent(evt);
+    } catch (e) {}
+  } else {
+    console.log(`[Worker] ${trimmed}`);
+    broadcastEvent({ type: 'log', message: trimmed });
+  }
 }
 
 // accounts.json is read by both /status and /accounts on every poll cycle.
@@ -698,22 +714,33 @@ const server = http.createServer((req, res) => {
 
   // 4. POST /api/meta-insta/start (also /api/loop/start)
   if ((pathname === '/api/meta-insta/start' || pathname === '/api/loop/start') && req.method === 'POST') {
-    if (activeLoopProcess) {
+    if (activeLoopProcess || startInFlight) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ERROR', error: 'Meta creator is already actively running.' }));
       return;
     }
 
+    startInFlight = true;
+    const releaseStart = () => { startInFlight = false; };
     let body = '';
     req.on('data', chunk => { body += chunk; });
+    req.on('aborted', releaseStart);
     req.on('end', async () => {
-      let opts = { concurrency: 1, target: 0, delay: 4, headless: true, mail: 'mailtd', captcha: 'extension' };
+      let opts = { concurrency: 1, target: 0, delay: 4, headless: true, mail: 'mailtd', captcha: 'extension', start_stagger_ms: null };
       try {
         if (body) opts = Object.assign(opts, JSON.parse(body));
       } catch (e) {}
 
       // License Gate: Ensure machine has active license before starting automation
-      const licCheck = await licenseMgr.validateOrActivateLicense(null, false);
+      let licCheck;
+      try {
+        licCheck = await licenseMgr.validateOrActivateLicense(null, false);
+      } catch (licenseErr) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'License validation failed: ' + licenseErr.message }));
+        releaseStart();
+        return;
+      }
       if (!licCheck.isValid) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -721,25 +748,40 @@ const server = http.createServer((req, res) => {
           error: `Active license required to start Meta Creator (${licCheck.status}: ${licCheck.message || 'Please activate in Subscription.'})`,
           hwid: licCheck.hwid
         }));
+        releaseStart();
         return;
       }
 
       // The dashboard value is authoritative.  There is no RAM pre-flight,
       // automatic reduction, or watchdog in the creator runtime: the user
       // explicitly controls the number of browser slots.
-      const requestedConcurrency = Number.parseInt(opts.concurrency, 10);
-      if (!Number.isFinite(requestedConcurrency) || requestedConcurrency < 1 || requestedConcurrency > 50) {
+      const requestedConcurrency = Number(opts.concurrency);
+      if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1 || requestedConcurrency > 50) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'ERROR',
           error: 'Parallel must be a whole number from 1 to 50. No automatic RAM reduction is applied.'
         }));
+        releaseStart();
         return;
       }
       const concurrency = requestedConcurrency;
       const headless = opts.headless !== false;
       const target = parseInt(opts.target || 0, 10);
       const delay = Math.max(1, parseInt(opts.delay || 4, 10));
+      let startStaggerMs = null;
+      if (opts.start_stagger_ms !== undefined && opts.start_stagger_ms !== null && String(opts.start_stagger_ms).trim() !== '') {
+        startStaggerMs = Number(opts.start_stagger_ms);
+        if (!Number.isInteger(startStaggerMs) || startStaggerMs < 0 || startStaggerMs > 10000) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            status: 'ERROR',
+            error: 'start_stagger_ms must be a whole number from 0 to 10000.'
+          }));
+          releaseStart();
+          return;
+        }
+      }
       const mail = 'mailtd';
       const captcha = opts.captcha_mode || opts.captcha || 'extension';
       const mode = (opts.mode === 'meta-ig') ? 'meta-ig' : 'meta';
@@ -749,7 +791,7 @@ const server = http.createServer((req, res) => {
       // Optional fixed username (workspace field). Also env-only.
       const newUsername = String(opts.new_username || '').trim().slice(0, 64);
 
-      currentLoopConfig = { concurrency, headless, target, delay, mail, captcha, mode };
+      currentLoopConfig = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs };
 
       const args = [
         path.join(ROOT_DIR, 'worker.py'),
@@ -761,6 +803,7 @@ const server = http.createServer((req, res) => {
         '--mode', mode
       ];
       if (headless) args.push('--headless');
+      if (startStaggerMs !== null) args.push('--start-stagger-ms', String(startStaggerMs));
 
       console.log(`[MetaCreator] Starting worker loop: ${PYTHON_BIN} ${args.join(' ')}`);
 
@@ -770,6 +813,7 @@ const server = http.createServer((req, res) => {
         : path.join(ROOT_DIR, 'engine', 'ms-playwright');
 
       try {
+        workerStdoutBuffer = '';
         activeLoopProcess = spawn(PYTHON_BIN, args, {
           cwd: ROOT_DIR,
           detached: !isWin,
@@ -789,6 +833,7 @@ const server = http.createServer((req, res) => {
       } catch (spawnErr) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ERROR', error: 'Failed to spawn worker: ' + spawnErr.message }));
+        releaseStart();
         return;
       }
 
@@ -802,23 +847,13 @@ const server = http.createServer((req, res) => {
       });
 
       activeLoopProcess.stdout.on('data', data => {
-        const lines = data.toString('utf-8').split('\n');
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          if (trimmed.startsWith('__EVENT__')) {
-            try {
-              const evt = JSON.parse(trimmed.slice(9));
-              broadcastEvent(evt);
-              if (evt.type === 'account_created') {
-                broadcastEvent({ type: 'account_created', account: evt.account || evt });
-              }
-            } catch (e) {}
-          } else {
-            console.log(`[Worker] ${trimmed}`);
-            broadcastEvent({ type: 'log', message: trimmed });
-          }
-        }
+        // Child-process stdout is a byte stream; a JSON event can be split
+        // across chunks. Keep the partial line instead of dropping/corrupting
+        // it during a high-volume parallel run.
+        workerStdoutBuffer += data.toString('utf-8');
+        const lines = workerStdoutBuffer.split('\n');
+        workerStdoutBuffer = lines.pop() || '';
+        for (const line of lines) consumeWorkerLine(line);
       });
 
       activeLoopProcess.stderr.on('data', data => {
@@ -832,21 +867,39 @@ const server = http.createServer((req, res) => {
         broadcastEvent({ type: 'log', message: `[STDERR] ${text}` });
       });
 
+      activeLoopProcess.on('error', spawnErr => {
+        console.error(`[MetaCreator] Worker process error: ${spawnErr.message}`);
+        broadcastEvent({ type: 'log', message: `[Worker] ${spawnErr.message}` });
+        releaseStart();
+        if (activeLoopProcess) activeLoopProcess = null;
+      });
+
       activeLoopProcess.on('close', code => {
+        if (workerStdoutBuffer) {
+          consumeWorkerLine(workerStdoutBuffer);
+          workerStdoutBuffer = '';
+        }
         console.log(`[MetaCreator] Loop process exited with code ${code}`);
         broadcastEvent({ type: 'loop_stopped', exit_code: code });
         broadcastEvent({ type: 'status', running: false });
         activeLoopProcess = null;
+        startInFlight = false;
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'SUCCESS', message: `Meta creator started with ${concurrency} concurrent windows.` }));
+      releaseStart();
     });
     return;
   }
 
   // 5. POST /api/meta-insta/stop (also /api/loop/stop)
   if ((pathname === '/api/meta-insta/stop' || pathname === '/api/loop/stop') && req.method === 'POST') {
+    if (startInFlight && !activeLoopProcess) {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ERROR', error: 'Start is still being initialized; try Stop again in a moment.' }));
+      return;
+    }
     if (activeLoopProcess) {
       killProcessGroup(activeLoopProcess, 'SIGINT');
       const proc = activeLoopProcess;

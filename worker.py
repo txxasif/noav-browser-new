@@ -52,6 +52,19 @@ _session_lock = threading.Lock()
 _stop_requested = threading.Event()
 
 
+def _resolve_start_stagger_ms(value=None) -> int:
+    """Smooth the initial browser launch burst without changing Parallel."""
+    if value is None:
+        value = os.environ.get("INSTA_START_STAGGER_MS")
+    if value is None or str(value).strip() == "":
+        value = 250 if os.name == "nt" else 0
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = 250 if os.name == "nt" else 0
+    return max(0, min(value, 10000))
+
+
 class AISlotWorker:
     """Worker slot interface used by MetaInstaRunner for logging and browser lifecycle."""
 
@@ -156,6 +169,7 @@ class AISlotWorker:
         self.is_running = False
 
     def _cleanup_browser_resources(self):
+        profile_dir = self.user_data_dir
         for close in (
             lambda: self.context and self.context.close(),
             lambda: self.playwright and self.playwright.stop(),
@@ -164,17 +178,26 @@ class AISlotWorker:
                 close()
             except Exception:
                 pass
-        if self.user_data_dir and os.path.exists(self.user_data_dir) and os.environ.get("KEEP_PROFILE") != "1":
+        self.context = None
+        self.playwright = None
+        try:
+            from engine.resource_runtime import unregister_profile
+            unregister_profile(profile_dir)
+        except Exception:
+            pass
+        if profile_dir and os.path.exists(profile_dir) and os.environ.get("KEEP_PROFILE") != "1":
             try:
-                shutil.rmtree(self.user_data_dir, ignore_errors=True)
+                shutil.rmtree(profile_dir, ignore_errors=True)
             except Exception:
                 pass
+        self.user_data_dir = None
 
 
 def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "") -> tuple[bool, str]:
     """Execute one Meta Account Creation cycle (`meta` = Meta only, `meta-ig` = Meta + Instagram join)."""
     from runner import MetaInstaRunner
 
+    cycle_started = time.monotonic()
     worker = AISlotWorker(slot_id=slot_id, is_headless=is_headless, password=new_password or None)
     runner = MetaInstaRunner(
         worker,
@@ -197,12 +220,14 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
         meta_only = (mode != "meta-ig")
         rec_id = runner.create_account(twofa=False, meta_only=meta_only)
         worker.emit(f"✅ Successfully created {'Meta→IG' if not meta_only else 'Meta'} account: {runner.email}")
+        duration_ms = int((time.monotonic() - cycle_started) * 1000)
         emit_event({
             "type": "slot_event",
             "slot_id": slot_id,
             "status": "closed",
-            "detail": f"Completed: {runner.email}",
+            "detail": f"Completed in {duration_ms / 1000:.1f}s: {runner.email}",
             "email": runner.email,
+            "duration_ms": duration_ms,
         })
         emit_event({
             "type": "account_created",
@@ -213,7 +238,8 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
         })
         return True, rec_id
     except Exception as exc:
-        worker.emit(f"❌ Cycle failed: {exc}")
+        duration_ms = int((time.monotonic() - cycle_started) * 1000)
+        worker.emit(f"❌ Cycle failed after {duration_ms / 1000:.1f}s: {exc}")
         if "Connection closed while reading from the driver" in str(exc):
             worker.emit("💡 Browser/driver connection lost — usually RAM pressure or a crashed Chromium. "
                         "The requested Parallel value is preserved; retry or use Headless for lower resource use.")
@@ -230,7 +256,8 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
             "type": "slot_event",
             "slot_id": slot_id,
             "status": "error",
-            "detail": f"Error: {exc}",
+            "detail": f"Error after {duration_ms / 1000:.1f}s: {exc}",
+            "duration_ms": duration_ms,
         })
         return False, str(exc)
     finally:
@@ -244,9 +271,10 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
             pass
 
 
-def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: int = 4, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = ""):
+def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: int = 4, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "", start_stagger_ms: int = 0):
     """Loop for a single slot creating Meta accounts continuously."""
     consecutive_fails = 0
+    initial_stagger_done = False
 
     while not _stop_requested.is_set():
         with _session_lock:
@@ -281,6 +309,12 @@ def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: i
         # Resource tuning lives in the browser launcher (low-memory flags and
         # tracker blocking); do not silently pause or reduce user-selected
         # concurrency here.
+        if not initial_stagger_done:
+            initial_stagger_done = True
+            stagger_seconds = max(0, int(start_stagger_ms)) * max(0, slot_id - 1) / 1000.0
+            deadline = time.monotonic() + stagger_seconds
+            while not _stop_requested.is_set() and time.monotonic() < deadline:
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
         ok, detail = run_single_meta_cycle(
             slot_id=slot_id,
@@ -330,6 +364,8 @@ def main():
     parser.add_argument("--mail", type=str, default="mailtd", choices=("mailtd",), help="Mailbox provider (mail.td only)")
     parser.add_argument("--captcha", type=str, default="extension", choices=Urls.CAPTCHA_MODES, help="Captcha solving mode")
     parser.add_argument("--mode", type=str, default="meta", choices=["meta", "meta-ig"], help="Creation mode: Meta account only, or Meta + Instagram join")
+    parser.add_argument("--start-stagger-ms", type=int, default=None,
+                        help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
 
     args = parser.parse_args()
 
@@ -337,6 +373,7 @@ def main():
     target = max(0, args.target)
     delay = max(1, args.delay)
     headless = args.headless
+    start_stagger_ms = _resolve_start_stagger_ms(args.start_stagger_ms)
 
     # Global password (META_NEW_PASSWORD env from server.js): same password
     # for every created account. Too-short values fall back to auto passwords.
@@ -379,6 +416,7 @@ def main():
     # applies low-memory browser flags and cleans up completed profiles; the
     # worker does not impose a second RAM policy.
     print(f"[*] Concurrency policy: user-selected value {concurrency} will be used without RAM clamping.")
+    print(f"[*] Startup stagger: {start_stagger_ms}ms per slot (Parallel unchanged).")
 
     def sig_handler(signum, frame):
         _stop_requested.set()
@@ -393,6 +431,7 @@ def main():
         "target": target,
         "delay": delay,
         "headless": headless,
+        "start_stagger_ms": start_stagger_ms,
         "mail_provider": args.mail,
         "mode": args.mode,
     })
@@ -412,6 +451,7 @@ def main():
                 mode=args.mode,
                 new_password=global_password,
                 new_username=global_username,
+                start_stagger_ms=start_stagger_ms,
             )
             for i in range(concurrency)
         ]

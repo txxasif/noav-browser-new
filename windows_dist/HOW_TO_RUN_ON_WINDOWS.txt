@@ -31,6 +31,16 @@ HOW TO RUN (Zero-Installation, Zero-Setup):
    - To inspect real-time engine stdout/stderr messages in a live terminal,
      double-click "Run-Console.bat" instead of "Run.bat".
 
+LOW-RESOURCE / PROFILE SETTINGS (optional):
+   - The default PC-Mobile profile keeps the Meta AI UA, Client Hints,
+     viewport, GPU, locale, and timezone coherent. Set PC_MODE=0 in the
+     process environment only when diagnosing a profile-specific regression.
+   - INSTA_LOW_MEM=1 is enabled by default. For measured tuning only, adjust
+     INSTA_V8_HEAP_MB and INSTA_RENDERER_LIMIT; do not use unsafe
+     single-process Chromium flags.
+   - Parallel is never silently reduced. Use Headless and measure before
+     selecting a high slot count on a small Windows device.
+
 --------------------------------------------------------------------------------
 HOW TO UPDATE WITHOUT REMOVING FILES OR LOSING DATA:
 --------------------------------------------------------------------------------

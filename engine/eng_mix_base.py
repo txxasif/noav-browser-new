@@ -13,6 +13,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 
 import os as _os
@@ -22,6 +23,14 @@ try:
     from .eng_constants import HERE, _MONTHS  # package import
 except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from eng_constants import HERE, _MONTHS  # noqa: E402
+try:
+    from .resource_runtime import active_profiles, should_prune  # type: ignore
+except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
+    from resource_runtime import active_profiles, should_prune  # type: ignore  # noqa: E402
+
+_CHROME_VERSION_CACHE: dict[str, str] = {}
+_CHROME_VERSION_LOCK = threading.Lock()
+
 
 class EngineBaseMixin:
     def __init__(self, worker):
@@ -57,43 +66,52 @@ class EngineBaseMixin:
         self.w.log_signal.emit(msg)
 
     def _detect_chrome_version(self, w):
-        """Return the real browser build without launching a GUI on Windows.
+        """Return the browser build, probing each executable only once.
 
-        Chrome for Testing's Windows executable does not reliably implement
-        ``chrome.exe --version`` as a console command: it opens a temporary
-        Chrome-for-Testing window, exits, and leaves the restore bubble behind.
-        That probe also runs immediately before the real persistent context,
-        which made headed starts look like an extra browser was flashing.
-
-        On Windows read the PE version resource through PowerShell instead. On
-        POSIX retain the cheap executable ``--version`` probe.
+        The Windows probe starts a short-lived PowerShell process.  Running it
+        once per slot creates a burst of PowerShell/Chrome work during a
+        parallel start, so cache the immutable result per executable path.
         """
         import subprocess
         try:
-            exe = w.playwright.chromium.executable_path
-            if os.name == "nt":
-                # The executable path comes from the bundled Playwright tree,
-                # but quote it anyway because Windows paths may contain spaces.
-                safe_exe = str(exe).replace("'", "''")
-                ps = (
-                    "$ErrorActionPreference='Stop'; "
-                    f"(Get-Item -LiteralPath '{safe_exe}').VersionInfo.ProductVersion"
-                )
-                out = subprocess.check_output(
-                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
-                    text=True,
-                    timeout=10,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            else:
-                out = subprocess.check_output([exe, "--version"], text=True, timeout=20)
-            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", out)
-            if m:
-                return m.group(1)
+            exe = str(w.playwright.chromium.executable_path)
+            cache_key = os.path.normcase(os.path.abspath(exe))
         except Exception:
-            pass
-        return "124.0.6367.82"
+            return "124.0.6367.82"
+
+        with _CHROME_VERSION_LOCK:
+            cached = _CHROME_VERSION_CACHE.get(cache_key)
+            if cached:
+                return cached
+            version = None
+            try:
+                if os.name == "nt":
+                    # The executable path comes from the bundled Playwright
+                    # tree, but quote it because Windows paths may contain
+                    # spaces or apostrophes.
+                    safe_exe = exe.replace("'", "''")
+                    ps = (
+                        "$ErrorActionPreference='Stop'; "
+                        f"(Get-Item -LiteralPath '{safe_exe}').VersionInfo.ProductVersion"
+                    )
+                    out = subprocess.check_output(
+                        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps],
+                        text=True,
+                        timeout=10,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                else:
+                    out = subprocess.check_output([exe, "--version"], text=True, timeout=20)
+                match = re.search(r"(\d+\.\d+\.\d+\.\d+)", out)
+                if match:
+                    version = match.group(1)
+            except Exception:
+                pass
+            if not version:
+                version = "124.0.6367.82"
+            _CHROME_VERSION_CACHE[cache_key] = version
+            return version
 
     # -- human-like interaction -------------------------------------------
     def _pause(self, page, lo=0.4, hi=1.4):
@@ -211,16 +229,22 @@ class EngineBaseMixin:
     def _human_type(self, page, locator, text, timeout=25000):
         return self._clean_fill(page, locator, text, timeout=timeout)
 
-    def _prune_profiles(self, base, keep=20):
-        """Keep the newest profile dirs; remove older ones to bound disk use.
+    def _prune_profiles(self, base, keep=None):
+        """Keep the newest profile dirs without racing active slots.
 
-        Never prune a dir still referenced by an account record (per-account
-        IG profiles must survive for Nova-parity reuse on open/resume), and
-        never prune a dir holding a LIVE browser (its SingletonLock points
-        at a running Chromium pid) — deleting it mid-run orphans the session
-        and makes the live profile unclonable for inspection.
+        Profile pruning used to run a full directory/database scan for every
+        slot.  On a 10–20 slot start that creates unnecessary I/O and, on
+        Windows, the old ``/proc``-only live-process check could not protect a
+        currently running profile.  Throttle the scan, protect the in-process
+        registry, and use a short minimum age before removing an unreferenced
+        directory.
         """
         def _live_holder(d):
+            # Linux Chromium exposes SingletonLock as a symlink.  Windows
+            # does not provide an equivalent /proc-style check, so the
+            # registry below is the authoritative protection there.
+            if os.name == "nt":
+                return False
             try:
                 tgt = os.readlink(os.path.join(d, "SingletonLock"))
             except Exception:
@@ -235,23 +259,59 @@ class EngineBaseMixin:
                 return "chrome" in cmd.lower() and d in cmd
             except Exception:
                 return False
+
         try:
+            keep = int(os.environ.get("INSTA_PROFILE_KEEP", "20")) if keep is None else int(keep)
+            keep = max(1, min(keep, 200))
+        except (TypeError, ValueError):
+            keep = 20
+        try:
+            prune_interval = max(0.0, float(os.environ.get("INSTA_PROFILE_PRUNE_INTERVAL", "30")))
+        except (TypeError, ValueError):
+            prune_interval = 30.0
+        try:
+            min_age = max(0.0, float(os.environ.get("INSTA_PROFILE_MIN_AGE_SEC", "300")))
+        except (TypeError, ValueError):
+            min_age = 300.0
+
+        base_key = os.path.normcase(os.path.abspath(base))
+        if not should_prune("profiles:" + base_key, prune_interval):
+            return
+
+        try:
+            now = time.time()
+            protected = active_profiles()
             keep_dirs = set()
             try:
                 import store as _store
                 for _r in _store.list_all():
                     _pd = (_r or {}).get("profile_dir")
                     if _pd:
-                        keep_dirs.add(os.path.abspath(_pd))
+                        keep_dirs.add(os.path.normcase(os.path.abspath(_pd)))
             except Exception:
                 pass
-            dirs = [os.path.join(base, d) for d in os.listdir(base)
-                    if d.startswith("insta_")]
-            dirs = [d for d in dirs if os.path.isdir(d)
-                    and os.path.abspath(d) not in keep_dirs
-                    and not _live_holder(d)]
-            dirs.sort(key=lambda d: os.path.getmtime(d), reverse=True)
-            for old in dirs[keep:]:
+
+            candidates = []
+            for name in os.listdir(base):
+                if not name.startswith("insta_"):
+                    continue
+                path = os.path.join(base, name)
+                if not os.path.isdir(path):
+                    continue
+                normalized = os.path.normcase(os.path.abspath(path))
+                if normalized in protected or normalized in keep_dirs or _live_holder(path):
+                    continue
+                try:
+                    # A profile younger than the grace period may belong to a
+                    # just-starting slot whose context has not registered yet.
+                    if now - os.path.getmtime(path) < min_age:
+                        continue
+                except OSError:
+                    continue
+                candidates.append(path)
+
+            candidates.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+            for old in candidates[keep:]:
                 shutil.rmtree(old, ignore_errors=True)
         except Exception:
             pass

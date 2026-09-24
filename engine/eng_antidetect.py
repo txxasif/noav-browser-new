@@ -47,6 +47,51 @@ _MOBILE_HW = (6, 8, 8, 12)
 _MOBILE_MEM = (6, 8, 8, 12)
 _MOBILE_TOUCH = (5, 10)
 
+# Consumer Meta AI profile documented by the MetaAuto-AI recon.  The UA
+# version is filled from the real bundled Chromium at launch; these values
+# only describe the device contract.  Keep this list small and coherent:
+# model, Android version, viewport, and GPU must agree in the injected
+# fingerprint, HTTP Client Hints, and JavaScript navigator values.
+_PC_MOBILE_DEVICES = (
+    {
+        "model": "SM-S918B",
+        "android_version": "13",
+        "screen": {"width": 412, "height": 915, "pixelRatio": 3},
+        "gpu_vendor": "Intel Inc.",
+        "gpu_renderer": "Intel Iris OpenGL Engine",
+    },
+    {
+        "model": "Pixel 6",
+        "android_version": "12",
+        "screen": {"width": 411, "height": 914, "pixelRatio": 3},
+        "gpu_vendor": "Intel Inc.",
+        "gpu_renderer": "Intel Iris OpenGL Engine",
+    },
+)
+
+
+def pc_mobile_identity(seed, model=None) -> dict:
+    """Return the stable PC-Mobile profile used by the Meta AI funnel."""
+    key = (str(seed or "") or "meta").strip() or "meta"
+    h = int(hashlib.sha256(key.encode("utf-8")).hexdigest(), 16)
+    choices = [d for d in _PC_MOBILE_DEVICES if model is None or d["model"] == model]
+    dev = (choices or _PC_MOBILE_DEVICES)[h % max(1, len(choices or _PC_MOBILE_DEVICES))]
+    return {
+        "model": dev["model"],
+        "android_version": dev["android_version"],
+        "ua_os": f"Linux; Android {dev['android_version']}; {dev['model']}",
+        "platform": "Linux armv8l",
+        "gpu_vendor": dev["gpu_vendor"],
+        "gpu_renderer": dev["gpu_renderer"],
+        "hw": 8,
+        "mem": 8,
+        "max_touch": 5,
+        "screen": dict(dev["screen"]),
+        "timezone": "America/New_York",
+        "locale": "en-US",
+        "profile_mode": "pc-mobile",
+    }
+
 
 def device_identity(seed) -> dict:
     """Deterministic, diverse mobile device identity for one profile.
@@ -69,6 +114,8 @@ def device_identity(seed) -> dict:
         "hw": _MOBILE_HW[(h // 17) % len(_MOBILE_HW)],
         "mem": _MOBILE_MEM[(h // 19) % len(_MOBILE_MEM)],
         "max_touch": _MOBILE_TOUCH[(h // 23) % len(_MOBILE_TOUCH)],
+        "screen": {"width": 393, "height": 852, "pixelRatio": 3},
+        "profile_mode": "stock-mobile",
     }
 
 
@@ -82,6 +129,10 @@ def _build_antidetect_script(user_agent, chrome_full="124.0.6367.82", is_mobile=
             "gpu_vendor": "Qualcomm", "gpu_renderer": "Adreno (TM) 750",
             "hw": 8, "mem": 8, "max_touch": 5,
         }
+        screen = ident.get("screen") or {"width": 393, "height": 852, "pixelRatio": 3}
+        network = {"languages": ["en-US", "en"], "webrtc": "BLOCK"}
+        if ident.get("timezone"):
+            network["timezone"] = str(ident["timezone"])
         cfg = {
             "name": "InstaAuto-Mobile",
             "type": "ANDROID_MOBILE",
@@ -93,8 +144,8 @@ def _build_antidetect_script(user_agent, chrome_full="124.0.6367.82", is_mobile=
             "hardwareConcurrency": int(ident.get("hw", 8)),
             "deviceMemory": int(ident.get("mem", 8)),
             "maxTouchPoints": int(ident.get("max_touch", 5)),
-            "network": {"languages": ["en-US", "en"], "webrtc": "BLOCK"},
-            "screen": {"width": 393, "height": 852, "pixelRatio": 3},
+            "network": network,
+            "screen": screen,
             "device": {"model": ident.get("model", "SM-S928B"),
                        "androidVersion": ident.get("android_version", "14"),
                        "gpu": {"vendor": ident.get("gpu_vendor", "Qualcomm"),

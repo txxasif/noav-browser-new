@@ -29,6 +29,8 @@ from .eng_antidetect import (
     _get_extension_id_from_manifest,
     _get_shared_whisper_model,
     _pin_extensions_in_profile,
+    device_identity,
+    pc_mobile_identity,
 )
 from .eng_bootstrap import (
     _find_browsers_dir,
@@ -102,6 +104,8 @@ __all__ = [
     "_JS_SCROLL_DOWN",
     "_JS_DUMP_BUTTONS",
     "_JS_CLICK_TERMS",
+    "device_identity",
+    "pc_mobile_identity",
     "_build_antidetect_script",
     "_get_extension_id_from_manifest",
     "_pin_extensions_in_profile",

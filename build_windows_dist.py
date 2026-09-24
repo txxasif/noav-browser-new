@@ -276,6 +276,7 @@ def validate_runtimes():
     py_exe = os.path.join(ROOT_WIN, "_internal", "python.exe")
     pw_dir = os.path.join(ROOT_WIN, "_internal", "ms-playwright")
     insta_init = os.path.join(ROOT_WIN, "instagram", "__init__.py")
+    resource_runtime = os.path.join(ROOT_WIN, "engine", "resource_runtime.py")
 
     if not os.path.isfile(node_exe):
         log("WARN", f"bin/node.exe not found at {node_exe}")
@@ -288,15 +289,31 @@ def validate_runtimes():
         log("OK", f"Bundled python.exe: {os.path.getsize(py_exe) // 1024} KB")
 
     if not os.path.isdir(pw_dir):
-        log("WARN", f"_internal/ms-playwright directory not found at {pw_dir}")
+        log("ERROR", f"_internal/ms-playwright directory not found at {pw_dir}")
+        raise RuntimeError("Missing bundled Playwright browser directory in Windows tree.")
     else:
-        log("OK", f"Playwright browsers directory exists: {pw_dir}")
+        browser_bins = []
+        for root, _dirs, files in os.walk(pw_dir):
+            browser_bins.extend(
+                os.path.join(root, name) for name in files
+                if name.lower() in ("chrome.exe", "chrome")
+            )
+        if not browser_bins:
+            log("ERROR", f"No Chromium executable found under {pw_dir}")
+            raise RuntimeError("Missing bundled Chromium executable in Windows tree.")
+        log("OK", f"Playwright browser executable validated: {browser_bins[0]}")
 
     if not os.path.isfile(insta_init):
         log("ERROR", f"instagram package missing at {insta_init}")
         raise RuntimeError("Missing instagram package in Windows tree.")
     else:
         log("OK", "instagram package validated in Windows tree.")
+
+    if not os.path.isfile(resource_runtime):
+        log("ERROR", f"resource runtime helper missing at {resource_runtime}")
+        raise RuntimeError("Missing engine/resource_runtime.py in Windows tree.")
+    else:
+        log("OK", "resource runtime helper validated in Windows tree.")
 
 
 def validate_license_parity():
@@ -371,6 +388,7 @@ def build_portable_zip():
         required_in_zip = [
             "MetaCreator/server.js",
             "MetaCreator/worker.py",
+            "MetaCreator/engine/resource_runtime.py",
             "MetaCreator/Run.bat",
             "MetaCreator/Run-Console.bat",
             "MetaCreator/Stop.bat",

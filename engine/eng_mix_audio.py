@@ -13,6 +13,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 
 import os as _os
@@ -27,6 +28,14 @@ try:
 except ImportError:
     from eng_antidetect import _get_shared_whisper_model  # noqa: E402
 
+_SHARED_VOSK_MODEL = None
+_VOSK_MODEL_LOCK = threading.Lock()
+_VOSK_INFER_LOCK = threading.Lock()
+_SHARED_OCR_ENGINE = None
+_OCR_MODEL_LOCK = threading.Lock()
+_OCR_INFER_LOCK = threading.Lock()
+
+
 class EngineAudioMixin:
     def _run(self, cmd, timeout=60):
         import subprocess
@@ -34,36 +43,42 @@ class EngineAudioMixin:
                               stderr=subprocess.DEVNULL, timeout=timeout)
 
     def _ensure_vosk(self):
+        global _SHARED_VOSK_MODEL
         if self._vosk_model is not None:
             return self._vosk_model
-        try:
-            import vosk
-        except Exception:
-            return None
-        model_dir = os.path.join(HERE, "models", "vosk-model-small-en-us-0.15")
-        if not os.path.isdir(model_dir):
+        with _VOSK_MODEL_LOCK:
+            if _SHARED_VOSK_MODEL is not None:
+                self._vosk_model = _SHARED_VOSK_MODEL
+                return self._vosk_model
             try:
-                import urllib.request
-                import zipfile
-                os.makedirs(os.path.join(HERE, "models"), exist_ok=True)
-                zp = os.path.join(HERE, "models", "vosk.zip")
-                self.log('[🌐] Downloading Vosk speech model (first time, ~40 MB)…')
-                urllib.request.urlretrieve(
-                    "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
-                    zp)
-                with zipfile.ZipFile(zp) as z:
-                    z.extractall(os.path.join(HERE, "models"))
-                os.remove(zp)
-            except Exception as exc:
-                self.log(f'[⚠️] Vosk model download failed: {exc}')
+                import vosk
+            except Exception:
                 return None
-        try:
-            vosk.SetLogLevel(-1)
-            self._vosk_model = vosk.Model(model_dir)
-            return self._vosk_model
-        except Exception as exc:
-            self.log(f'[⚠️] Vosk load failed: {exc}')
-            return None
+            model_dir = os.path.join(HERE, "models", "vosk-model-small-en-us-0.15")
+            if not os.path.isdir(model_dir):
+                try:
+                    import urllib.request
+                    import zipfile
+                    os.makedirs(os.path.join(HERE, "models"), exist_ok=True)
+                    zp = os.path.join(HERE, "models", "vosk.zip")
+                    self.log('[🌐] Downloading Vosk speech model (first time, ~40 MB)…')
+                    urllib.request.urlretrieve(
+                        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+                        zp)
+                    with zipfile.ZipFile(zp) as z:
+                        z.extractall(os.path.join(HERE, "models"))
+                    os.remove(zp)
+                except Exception as exc:
+                    self.log(f'[⚠️] Vosk model download failed: {exc}')
+                    return None
+            try:
+                vosk.SetLogLevel(-1)
+                _SHARED_VOSK_MODEL = vosk.Model(model_dir)
+                self._vosk_model = _SHARED_VOSK_MODEL
+                return self._vosk_model
+            except Exception as exc:
+                self.log(f'[⚠️] Vosk load failed: {exc}')
+                return None
     def _ensure_whisper(self):
         return _get_shared_whisper_model(self.log)
 
@@ -83,14 +98,18 @@ class EngineAudioMixin:
         model = self._ensure_vosk()
         if model is None:
             return ""
-        wf = wave.open(wav_path, "rb")
-        rec = vosk.KaldiRecognizer(model, wf.getframerate())
-        while True:
-            data = wf.readframes(4000)
-            if not data:
-                break
-            rec.AcceptWaveform(data)
-        return _json.loads(rec.FinalResult()).get("text", "")
+        with _VOSK_INFER_LOCK:
+            wf = wave.open(wav_path, "rb")
+            try:
+                rec = vosk.KaldiRecognizer(model, wf.getframerate())
+                while True:
+                    data = wf.readframes(4000)
+                    if not data:
+                        break
+                    rec.AcceptWaveform(data)
+                return _json.loads(rec.FinalResult()).get("text", "")
+            finally:
+                wf.close()
 
     def _normalize_captcha(self, text):
         """reCAPTCHA audio is a spoken *phrase* now — submit the whole thing with homophone mapping."""
@@ -355,15 +374,25 @@ class EngineAudioMixin:
                 continue
         return False
 
+    def _ensure_ocr(self):
+        """Load one shared OCR model instead of one ONNX session per slot."""
+        global _SHARED_OCR_ENGINE
+        if self._ocr_engine is not None:
+            return self._ocr_engine
+        with _OCR_MODEL_LOCK:
+            if _SHARED_OCR_ENGINE is None:
+                from rapidocr_onnxruntime import RapidOCR
+                _SHARED_OCR_ENGINE = RapidOCR()
+            self._ocr_engine = _SHARED_OCR_ENGINE
+        return self._ocr_engine
+
     def _solve_image_captcha(self, page):
         """OCR Meta's 'enter the code from the image' captcha with RapidOCR."""
         try:
-            from rapidocr_onnxruntime import RapidOCR
+            ocr_engine = self._ensure_ocr()
         except Exception:
             return False
         try:
-            if self._ocr_engine is None:
-                self._ocr_engine = RapidOCR()
             # pick the largest visible <img> (the captcha image)
             best, best_area = None, 0
             for img in page.locator("img").all():
@@ -381,7 +410,8 @@ class EngineAudioMixin:
             png = os.path.join(HERE, "captcha_img.png")
             with open(png, "wb") as f:
                 f.write(shot)
-            result, _ = self._ocr_engine(png)
+            with _OCR_INFER_LOCK:
+                result, _ = ocr_engine(png)
             if not result:
                 return False
             code = "".join(t[1] for t in result).replace(" ", "")

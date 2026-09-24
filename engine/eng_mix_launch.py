@@ -13,6 +13,7 @@ import random
 import re
 import shutil
 import sys
+import threading
 import time
 
 import os as _os
@@ -23,9 +24,89 @@ try:
 except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from eng_constants import HERE, _NOVA_FLAGS  # noqa: E402
 try:
-    from .eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity  # noqa: E402
+    from .eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity, pc_mobile_identity  # noqa: E402
 except ImportError:
-    from eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity  # noqa: E402
+    from eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity, pc_mobile_identity  # noqa: E402
+try:
+    from .resource_runtime import register_profile  # type: ignore
+except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
+    from resource_runtime import register_profile  # type: ignore  # noqa: E402
+
+_BROWSER_EXE_CACHE: dict[tuple[str, ...], str] = {}
+_BROWSER_EXE_LOCK = threading.Lock()
+_BROWSER_INSTALL_LOCK = threading.Lock()
+_BROWSER_INSTALL_ATTEMPTED = False
+
+
+def _find_bundled_chromium() -> str | None:
+    """Find the bundled Chromium once instead of walking it per slot.
+
+    The old launch path recursively scanned the complete Playwright tree for
+    every parallel slot.  At 10–20 slots this duplicated a large amount of
+    filesystem work during the exact startup burst where resources are
+    already most constrained.
+    """
+    candidates = (
+        os.path.join(HERE, "..", "_internal", "ms-playwright"),
+        os.path.join(HERE, "_internal", "ms-playwright"),
+        os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
+        os.path.join(HERE, "ms-playwright"),
+    )
+    key = tuple(os.path.normcase(os.path.abspath(p)) if p else "" for p in candidates)
+    with _BROWSER_EXE_LOCK:
+        cached = _BROWSER_EXE_CACHE.get(key)
+        if cached:
+            return cached
+        for root in candidates:
+            if not root or not os.path.isdir(root):
+                continue
+            for current, _dirs, files in os.walk(root):
+                for filename in files:
+                    if filename.lower() in ("chrome.exe", "chrome"):
+                        found = os.path.normpath(os.path.join(current, filename))
+                        _BROWSER_EXE_CACHE[key] = found
+                        return found
+    return None
+
+
+def _ensure_playwright_browser() -> bool:
+    """Install a missing browser once per worker, never once per slot."""
+    global _BROWSER_INSTALL_ATTEMPTED
+    found = _find_bundled_chromium()
+    if found:
+        return True
+    with _BROWSER_INSTALL_LOCK:
+        found = _find_bundled_chromium()
+        if found:
+            return True
+        if _BROWSER_INSTALL_ATTEMPTED:
+            return False
+        _BROWSER_INSTALL_ATTEMPTED = True
+        try:
+            import subprocess
+            subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium", "chromium-headless-shell"],
+                check=True,
+                timeout=300,
+            )
+        except Exception:
+            return False
+    return bool(_find_bundled_chromium())
+
+
+def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _pc_mode_enabled() -> bool:
+    """Use the MetaAuto-AI PC-Mobile contract unless explicitly disabled."""
+    raw = os.environ.get("PC_MODE", os.environ.get("META_PROFILE_MODE", "1"))
+    return str(raw).strip().lower() in ("1", "true", "yes", "on", "pc", "pc-mobile")
+
 
 class EngineLaunchMixin:
     def _launch(self):
@@ -36,11 +117,23 @@ class EngineLaunchMixin:
         base = os.path.join(os.getcwd(), "profiles")
         os.makedirs(base, exist_ok=True)
         if override:
-            prof = os.path.expanduser(override)
+            override = os.path.expanduser(override)
+            slot_num = int(getattr(w, "slot_id", 1) or 1)
+            if slot_num > 1 and os.environ.get("INSTA_ALLOW_SHARED_PROFILE", "0") not in ("1", "true", "yes"):
+                prof = os.path.join(override, f"slot_{slot_num}")
+                self.log(f'[⚠️] Partitioning shared profile override for slot {slot_num}.')
+            else:
+                prof = override
         else:
-            prof = os.path.join(base, f"insta_{w.slot_id}_{int(time.time())}")
-            self._prune_profiles(base)
+            prof = os.path.join(base, f"insta_{w.slot_id}_{time.time_ns()}")
+        # Set ownership before any fallible setup so the worker's finally path
+        # can always release the registry entry.
         w.user_data_dir = prof
+        register_profile(prof)
+        if not override:
+            # Register before pruning so a just-created slot can never remove
+            # its own directory during a concurrent launch burst.
+            self._prune_profiles(base)
         os.makedirs(prof, exist_ok=True)
 
         # Disable Chrome Password Manager & Save Password Bubble in profile, and
@@ -103,42 +196,58 @@ class EngineLaunchMixin:
         # Keep UA + Client Hints consistent with the real browser build.
         self._chrome_full = self._detect_chrome_version(w)
 
-        # Profile selection: Mobile profile (default proven workable) or Desktop
+        # Profile selection.  PC-Mobile is the consumer Meta AI contract from
+        # the MetaAuto-AI recon; PC_MODE=0 keeps the older stock-mobile path.
         self.is_mobile = (os.environ.get("INSTA_DEVICE_MODE", "mobile").lower() != "desktop")
+        _seed = os.path.basename(str(prof).rstrip("/")) or str(getattr(w, "slot_id", "ig"))
+        _pinned = getattr(self, "device_model", None)
+        _pc_models = ("SM-S918B", "Pixel 6")
+        pc_mode = bool(self.is_mobile and _pc_mode_enabled()
+                       and (not _pinned or _pinned in _pc_models))
         if self.is_mobile:
-            # Deterministic per-profile identity: diverse across accounts, stable
-            # on resume, and the single source of truth shared with the
-            # anti-detect script so the UA and the injected fingerprint never
-            # disagree (they used to: random UA model vs hardcoded SM-S928B).
-            # INSTA_DEVICE_VARY=0 restores the old single fixed device.
-            _seed = os.path.basename(str(prof).rstrip("/")) or str(getattr(w, "slot_id", "ig"))
-            if os.environ.get("INSTA_DEVICE_VARY", "1").strip().lower() in ("0", "false", "no"):
-                ident = {"model": "SM-S928B", "android_version": "14",
-                         "ua_os": "Linux; Android 14; SM-S928B", "platform": "Linux armv8l",
-                         "gpu_vendor": "Qualcomm", "gpu_renderer": "Adreno (TM) 750",
-                         "hw": 8, "mem": 8, "max_touch": 5}
+            if pc_mode:
+                ident = pc_mobile_identity(_seed, model=_pinned if _pinned in _pc_models else None)
+                self.log(
+                    f'[📱] Browser profile: PC-Mobile ({ident["model"]} / Android '
+                    f'{ident["android_version"]} / Chrome {self._chrome_full})'
+                )
             else:
-                ident = device_identity(_seed)
+                # Deterministic per-profile identity: diverse across accounts,
+                # stable on resume, and shared by the launcher and init script.
+                if os.environ.get("INSTA_DEVICE_VARY", "1").strip().lower() in ("0", "false", "no"):
+                    ident = {
+                        "model": "SM-S928B", "android_version": "14",
+                        "ua_os": "Linux; Android 14; SM-S928B", "platform": "Linux armv8l",
+                        "gpu_vendor": "Qualcomm", "gpu_renderer": "Adreno (TM) 750",
+                        "hw": 8, "mem": 8, "max_touch": 5,
+                        "screen": {"width": 393, "height": 852, "pixelRatio": 3},
+                        "profile_mode": "stock-mobile",
+                    }
+                else:
+                    ident = device_identity(_seed)
+                self.log(f'[📱] Browser profile: Stock Mobile (Android / Touch) — {ident["model"]} / {ident["gpu_renderer"]}')
             # Pinned per account (Nova parity): reuse the creation-time model so
             # every resume/open presents the SAME phone.
-            _pinned = getattr(self, "device_model", None)
-            if _pinned:
+            if _pinned and not pc_mode:
                 ident = dict(ident, model=_pinned,
                              ua_os=f"Linux; Android {ident.get('android_version', '14')}; {_pinned}")
             self._device_ident = ident
+            self.profile_mode = ident.get("profile_mode", "pc-mobile" if pc_mode else "stock-mobile")
             model = ident["model"]
             self.device_model = model
             ua = (f"Mozilla/5.0 ({ident['ua_os']}) AppleWebKit/537.36 "
                   f"(KHTML, like Gecko) Chrome/{self._chrome_full} Mobile Safari/537.36")
-            viewport = {"width": 393, "height": 852}
+            _screen = ident.get("screen") or {"width": 393, "height": 852}
+            viewport = {"width": int(_screen["width"]), "height": int(_screen["height"])}
             scale = 3
             touch = True
             platform = ident["platform"]
             gpu_vendor = ident["gpu_vendor"]
             gpu_renderer = ident["gpu_renderer"]
-            self.log(f'[📱] Browser profile: Mobile (Android / Touch) — {model} / {gpu_renderer}')
         else:
+            pc_mode = False
             self._device_ident = None
+            self.profile_mode = "desktop"
             ua = (f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                   f"(KHTML, like Gecko) Chrome/{self._chrome_full} Safari/537.36")
             viewport = {"width": 1280, "height": 800}
@@ -152,8 +261,14 @@ class EngineLaunchMixin:
         try:
             with open(os.path.join(prof, "device.json"), "w", encoding="utf-8") as _df:
                 import json as _json
-                _json.dump({"model": getattr(self, "device_model", model if self.is_mobile else "desktop"),
-                            "ua": ua}, _df)
+                _json.dump({
+                    "model": getattr(self, "device_model", model if self.is_mobile else "desktop"),
+                    "ua": ua,
+                    "profile_mode": getattr(self, "profile_mode", "unknown"),
+                    "viewport": viewport,
+                    "timezone": (self._device_ident or {}).get("timezone", "")
+                    if self.is_mobile else "",
+                }, _df)
         except Exception:
             pass
 
@@ -165,13 +280,15 @@ class EngineLaunchMixin:
         # SwiftShader anyway), a capped V8 heap and a renderer limit keep each
         # browser small; WebGL is still spoofed by the anti-detect init script.
         if os.environ.get("INSTA_LOW_MEM", "1") != "0":
+            renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 3, 1, 8)
+            v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 512, 128, 2048)
             args += [
                 "--disable-gpu",
                 "--disable-gpu-compositing",
                 "--disable-accelerated-2d-canvas",
                 "--disable-background-networking",
-                "--js-flags=--max-old-space-size=512",
-                "--renderer-process-limit=3",
+                f"--js-flags=--max-old-space-size={v8_heap_mb}",
+                f"--renderer-process-limit={renderer_limit}",
             ]
         # Suppress the "Chrome for Testing v… is only for automated testing"
         # infobar (CfT's "user education UI"). CfT reads a JSON config via
@@ -190,6 +307,11 @@ class EngineLaunchMixin:
         # RIGHT (warm_pool._TG_TILE). Without this the later-booted TG window
         # lands on top of the IG onboarding mid-typing.
         if not bool(getattr(w, "is_headless", False)):
+            if pc_mode:
+                # Keep the visible window consistent with the emulated
+                # viewport; a 500px tiled window makes the PC-Mobile contract
+                # incoherent even though the page viewport is correct.
+                args += [f"--window-size={viewport['width']},{viewport['height']}"]
             # INSTA_UI_MODE controls the headed window strategy:
             #   new (default) — Wayland-native visible windows, exactly like the
             #     "new" branch: the compositor owns focus, so automation can
@@ -197,7 +319,7 @@ class EngineLaunchMixin:
             #     is not set (Wayland ignores it).
             #   isolated — force --ozone-platform=x11 for left/right tiling and
             #     run on the private virtual display (virtual_display.py).
-            if os.environ.get("INSTA_UI_MODE", "new").strip().lower() in ("new", "desktop", "wayland"):
+            elif os.environ.get("INSTA_UI_MODE", "new").strip().lower() in ("new", "desktop", "wayland"):
                 args += ["--window-size=500,950"]
             else:
                 try:
@@ -274,24 +396,24 @@ class EngineLaunchMixin:
             args=args,
             ignore_default_args=["--enable-automation"],
         )
-        bundled_bin = None
-        for bpath in (
-            os.path.join(HERE, "..", "_internal", "ms-playwright"),
-            os.path.join(HERE, "_internal", "ms-playwright"),
-            os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
-            os.path.join(HERE, "ms-playwright"),
-        ):
-            if not bpath or not os.path.isdir(bpath):
-                continue
-            for root, dirs, files in os.walk(bpath):
-                for f in files:
-                    if f.lower() in ("chrome.exe", "chrome"):
-                        bundled_bin = os.path.normpath(os.path.join(root, f))
-                        break
-                if bundled_bin:
-                    break
-            if bundled_bin:
-                break
+        if pc_mode:
+            # Keep the HTTP Client Hints and JS-visible navigator contract in
+            # the same profile.  The major version follows the real bundled
+            # Chromium; never pin an old Chrome number against a newer binary.
+            _major = (self._chrome_full or "124.0.0.0").split(".")[0]
+            launch_kwargs.update(
+                screen={"width": viewport["width"], "height": viewport["height"]},
+                locale="en-US",
+                timezone_id="America/New_York",
+                color_scheme="light",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-ch-ua": f'"Chromium";v="{_major}", "Not=A?Brand";v="24"',
+                    "sec-ch-ua-mobile": "?1",
+                    "sec-ch-ua-platform": '"Android"',
+                },
+            )
+        bundled_bin = _find_bundled_chromium()
 
         if bundled_bin and os.path.isfile(bundled_bin):
             launch_kwargs["executable_path"] = bundled_bin
@@ -359,22 +481,29 @@ class EngineLaunchMixin:
                     pass
 
             if not launched:
-                # Auto-install missing Playwright Chromium
-                self.log('[⏳] Missing Playwright browser — auto-downloading Chromium...')
-                try:
-                    import subprocess
-                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium", "chromium-headless-shell"], check=True, timeout=300)
+                # Missing runtimes are a packaging problem.  Coordinate the
+                # repair once per worker instead of letting every slot launch
+                # its own installer and fallback storm.
+                self.log('[⏳] Missing Playwright browser — one shared install attempt…')
+                if _ensure_playwright_browser():
                     kw = dict(launch_kwargs)
                     kw.pop("executable_path", None)
                     kw.pop("channel", None)
                     _mark_profile_clean()
-                    w.context = w.playwright.chromium.launch_persistent_context(**kw)
-                    self.log('[🌐] Engine: bundled Chromium (newly installed)')
-                    launched = True
-                except Exception as exc:
-                    self.log(f'[❌] Playwright install failed: {exc}')
+                    try:
+                        w.context = w.playwright.chromium.launch_persistent_context(**kw)
+                        self.log('[🌐] Engine: bundled Chromium (newly installed)')
+                        launched = True
+                    except Exception as exc:
+                        self.log(f'[❌] Post-install browser launch failed: {exc}')
+                else:
+                    self.log('[❌] Shared Playwright browser install unavailable; aborting this slot.')
+            if not launched:
+                try:
                     _mark_profile_clean()
                     w.context = w.playwright.chromium.launch_persistent_context(**launch_kwargs)
+                except Exception as exc:
+                    self.log(f'[❌] Browser launch failed after fallback: {exc}')
         # Block third-party ads/analytics/trackers at the network layer. Cuts
         # page weight, memory and load time during signup. Env-gated:
         # INSTA_BLOCK_TRACKERS=0 disables (for A/B). Only well-known
@@ -401,18 +530,25 @@ class EngineLaunchMixin:
             if _blocked_n:
                 self.log(f'[🚫] Ad/tracker blocking on ({_blocked_n} domains; INSTA_BLOCK_TRACKERS=0 to disable).')
         # Extra low-level leak patches (CDP/webdriver/plugins/chrome.runtime).
-        try:
-            from playwright_stealth import Stealth
-            Stealth(
-                navigator_user_agent_override=ua,
-                navigator_platform_override=platform,
-                navigator_languages_override=("en-US", "en"),
-                webgl_vendor_override=gpu_vendor,
-                webgl_renderer_override=gpu_renderer,
-            ).apply_stealth_sync(w.context)
-            self.log('[🛡️] Stealth patches applied.')
-        except Exception as exc:
-            self.log(f'[⚠️] Stealth skipped: {exc}')
+        # The PC-Mobile contract uses the inline init script only.  The
+        # playwright-stealth package injects its own userAgentData brands and
+        # can contradict the real Chromium version, which may freeze Meta's
+        # Sign-up button.  Keep it available for the legacy stock profile.
+        if not pc_mode:
+            try:
+                from playwright_stealth import Stealth
+                Stealth(
+                    navigator_user_agent_override=ua,
+                    navigator_platform_override=platform,
+                    navigator_languages_override=("en-US", "en"),
+                    webgl_vendor_override=gpu_vendor,
+                    webgl_renderer_override=gpu_renderer,
+                ).apply_stealth_sync(w.context)
+                self.log('[🛡️] Stealth patches applied (stock profile).')
+            except Exception as exc:
+                self.log(f'[⚠️] Stealth skipped: {exc}')
+        else:
+            self.log('[🛡️] Stealth: inline profile only (PC-Mobile parity).')
         # Port of anti-detect fingerprinting (Page.addScriptToEvaluateOnNewDocument).
         try:
             w.context.add_init_script(_build_antidetect_script(
