@@ -62,16 +62,17 @@ class LifecycleMixin:
         ``status="Created"`` (and storage_state saved) so a submitter drains it
         later through a free Telegram account or Nitro Follower.
 
-        ``meta_only=True`` stops after the Meta account + email verification and
-        parks it as ``MetaCreated`` (no Instagram join) — used by the Coinsta
-        direct flow where the Instagram signup happens inside the app webview.
+        ``meta_only=True`` stops after the Meta account, human verification,
+        and selfie checkpoint complete, then parks it as ``MetaCreated``
+        (no Instagram join) — used by the Coinsta direct flow where the
+        Instagram signup happens inside the app webview.
         """
         tgt = target or getattr(self, "target", "telegram") or "telegram"
         self._install_screenshot_hooks()
         self._launch()
         self.open_mail()
         self.meta_signup()                        # Meta account + email code
-        self.ensure_meta_verified()               # reCAPTCHA audio + selfie (meta_auto_ai parity: always attempted)
+        self.ensure_meta_verified()               # reCAPTCHA audio + selfie
         if meta_only:
             self.save_ai_result(status="MetaCreated", target=tgt)
             return self.last_record_id
@@ -96,38 +97,7 @@ class LifecycleMixin:
             if not self.ig_direct_login(self.ig_username or self.username or self.email, self.password):
                 raise RuntimeError("Instagram session not established (no sessionid); not parking")
 
-        # For Telegram accounts: ensure email is confirmed & linked to Instagram profile
-        if tgt == "telegram":
-            try:
-                self.ig_link_email_to_instagram(self.email)
-            except IGDeadEnd:
-                # Dead end (bare saved-account chooser / session lost): do NOT
-                # park a broken account — let the creator close the browser and
-                # move to the next one.
-                raise
-            except Exception as exc:
-                self.log(f'[⚠️] Email linkage note: {exc}')
-
-        if twofa:
-            secret = self.ig_2fa_begin()
-            if secret:
-                import pyotp
-                self.ig_2fa_confirm(pyotp.TOTP(secret).now())   # local code
-            else:
-                # Park gate (2FA business): an account that could not enable
-                # 2FA at creation is checkpoint-fragile downstream (submitter
-                # logins land on unrecoverable email-code screens once the temp
-                # inbox is gone). Do NOT park it — fail fast so the slot
-                # retries with a fresh account instead of burning submit attempts.
-                raise RuntimeError("2FA setup failed during creation; not parking (checkpoint-fragile)")
-
-        target_pw = password or self.new_password
-        if target_pw and target_pw != self.password:
-            ok_pw = self.ig_set_password(target_pw, current_password=self.password)
-            if not ok_pw:
-                self.log('[⚠️] Direct password change failed; falling back to reset link…')
-                self.ig_reset_password(target_pw)
-
+        # Phase 2 complete: store username, password, email, and cookies
         self.save_ai_result(status="Created", target=tgt)
         return self.last_record_id
 
@@ -455,6 +425,18 @@ class LifecycleMixin:
                 }""") or {}
         except Exception:
             mail_tokens = {}
+        # Extract cookies before saving
+        cookies_list = []
+        cookie_str = ""
+        try:
+            if hasattr(self, "w") and getattr(self.w, "context", None):
+                cookies_list = self.w.context.cookies()
+                ig_cookies = [c for c in cookies_list if "instagram.com" in c.get("domain", "")]
+                chosen = ig_cookies if ig_cookies else cookies_list
+                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in chosen if c.get("name") and c.get("value") is not None)
+        except Exception:
+            pass
+
         tgt = target or getattr(self, "target", None) or "Meta"
         rec = {
             "id": rec_id,
@@ -482,6 +464,8 @@ class LifecycleMixin:
             "created_at": created,
             "status": status,
             "platform": "Meta+Instagram",
+            "cookies": cookie_str,
+            "cookie": cookie_str,
         }
 
         # 1. JSON & SQLite (dashboard) — thread-safe store insert
@@ -491,20 +475,14 @@ class LifecycleMixin:
             self.log(f'[⚠️] Store add notice: {exc}')
         self.last_record_id = rec["id"]
 
-        # NOTE: store.add() above already rewrote accounts.csv / accounts.txt
-        # via sync_files(). The old append-blocks here duplicated the newest
-        # CSV row and left a malformed "Email: ..." trailer in accounts.txt,
-        # so they were removed — sync_files() is the single writer now.
-
         # 4. Raw Playwright cookies export
         try:
-            if hasattr(self, "w") and getattr(self.w, "context", None):
-                cookies = self.w.context.cookies()
+            if cookies_list:
                 cdir = os.path.join(AI_DIR, "cookies")
                 os.makedirs(cdir, exist_ok=True)
                 fn = os.path.join(cdir, f"cookies_{rec['id']}.txt")
                 with open(fn, "w", encoding="utf-8") as f:
-                    json.dump(cookies, f, indent=2)
+                    json.dump(cookies_list, f, indent=2)
         except Exception:
             pass
 
@@ -513,7 +491,7 @@ class LifecycleMixin:
             public_rec = {k: rec.get(k) for k in (
                 "id", "target", "status", "name", "email", "username",
                 "instagram_username", "tg_account", "tg_login", "tg_submitted",
-                "tg_bot", "dob", "mail_provider", "created_at", "platform")}
+                "tg_bot", "dob", "mail_provider", "created_at", "platform", "cookies")}
             emit_event({
                 "type": "account_created",
                 "slot_id": getattr(self.w, "slot_id", 1),
@@ -524,4 +502,4 @@ class LifecycleMixin:
             })
         except Exception:
             pass
-        self.log(f'<font color="#00FF00"><b>[🎉] Saved: {rec["email"]} (ID: {rec_id})</b></font>')
+        self.log(f'<font color="#00FF00"><b>[🎉] Saved: @{rec["username"] or rec["email"]} (ID: {rec_id})</b></font>')

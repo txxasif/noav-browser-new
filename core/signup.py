@@ -46,7 +46,14 @@ class SignupMixin:
             self._visible = orig_visible
 
     def _install_screenshot_hooks(self):
-        """Capture a screenshot at each key milestone for observability."""
+        """Capture a screenshot at each key milestone for observability.
+
+        Nova parity: screenshots are sync PNG + disk IO on the creator
+        thread — with 20 slots this blocks the Meta wizard. Disabled by
+        default; set INSTA_SCREENSHOTS=1 to re-enable.
+        """
+        if os.environ.get("INSTA_SCREENSHOTS", "0").strip() not in ("1", "true", "yes", "on"):
+            return
         screens = os.path.join(AI_DIR, "screens")
         os.makedirs(screens, exist_ok=True)
         markers = {

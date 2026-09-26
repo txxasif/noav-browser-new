@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     claimed_at REAL,
     attempts INTEGER DEFAULT 0,
     platform TEXT,
+    cookies TEXT,
     extra TEXT
 );
 
@@ -68,7 +69,7 @@ COLUMNS = [
     "profile_dir", "device_model", "device_ua",
     "nitro_device", "nitro_submitted", "nitro_submitted_at",
     "coinsta_device", "coinsta_submitted", "coinsta_submitted_at",
-    "dob", "mail_provider", "created_at", "claimed_at", "attempts", "platform", "extra"
+    "dob", "mail_provider", "created_at", "claimed_at", "attempts", "platform", "cookies", "extra"
 ]
 
 
@@ -133,6 +134,10 @@ def init_db() -> None:
         pass
     try:
         conn.execute("ALTER TABLE accounts ADD COLUMN coinsta_submitted_at TEXT;")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN cookies TEXT;")
     except Exception:
         pass
     # Index after the columns exist (safe on both fresh and migrated tables).

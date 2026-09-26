@@ -745,6 +745,95 @@ class IgHelpersMixin:
         """
         dismissed = False
 
+        # 0. "We suspect automated behavior on your account" scraping warning.
+        # Scoped to THIS wall only (not the full _dismiss_scraping_warning "way
+        # out", which also aborts on "something went wrong" and is too blunt
+        # mid-join). It lived exclusively in ac_nav.py/twofa.py, so during a
+        # FRESH JOIN the flow parked on the Dismiss button at
+        # instagram.com/accoun… and burned the leased task (observed
+        # 2026-09-26). One check here covers every IG entry point — invariant 20:
+        # no duplicate guards, and this helper already owns cross-screen recovery.
+        try:
+            _tail = (p.inner_text("body") or "").lower()
+            if ("we suspect automated behavior" in _tail
+                    or "scraping_warning" in (p.url or "")):
+                self.log('[🚪] Scraping warning during IG flow — tapping Dismiss…')
+                for _sel in ('button:text-is("Dismiss")',
+                             'div[role="button"]:text-is("Dismiss")',
+                             'button:has-text("Dismiss")',
+                             'div[role="button"]:has-text("Dismiss")'):
+                    try:
+                        _b = p.locator(_sel).first
+                        if _b.count() > 0 and _b.is_visible():
+                            _b.click(force=True, timeout=2000)
+                            dismissed = True
+                            break
+                    except Exception:
+                        continue
+                if not dismissed:
+                    try:
+                        p.keyboard.press("Escape")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 0b. "Something went wrong" / "There's an issue and the page could not
+        # be loaded" with a "Reload page" button (seen on instagram.com/ab…,
+        # i.e. the JOIN path). Policy (operator decision 2026-09-26): RELOAD
+        # first and give the page a full 60s grace — never close the task on
+        # first sight. Before this, nothing in login.py/join.py handled it (only
+        # ac_nav.py/twofa.py did), so the slot spun on the dead screen until
+        # join timeout and the TG task was cancelled ~7 min AFTER its 8-min TTL
+        # had already expired. Past the grace it is a genuine dead end: raise
+        # IGDeadEnd so the cycle closes the browser, cancels the task and moves
+        # on (invariant 17 semantics — a broken account is never submitted).
+        try:
+            _tail = (p.inner_text("body") or "").lower()
+            _is_sww = ("something went wrong" in _tail
+                       or "page could not be loaded" in _tail)
+            if not _is_sww:
+                # Screen is healthy — clear the grace timer so a later, separate
+                # occurrence gets its own full minute.
+                self._ig_sww_since = None
+            else:
+                import time as _t
+                _now = _t.time()
+                _first = getattr(self, "_ig_sww_since", None)
+                if _first is None:
+                    _first = _now
+                    self._ig_sww_since = _first
+                    self.log('[⚠️] IG "Something went wrong" — reloading '
+                             '(60s grace before giving up).')
+                _held = _now - _first
+                if _held < 60:
+                    for _sel in ('button:text-is("Reload page")',
+                                 'div[role="button"]:text-is("Reload page")',
+                                 'button:has-text("Reload")',
+                                 'div[role="button"]:has-text("Reload")'):
+                        try:
+                            _b = p.locator(_sel).first
+                            if _b.count() > 0 and _b.is_visible():
+                                _b.click(force=True, timeout=2000)
+                                dismissed = True
+                                self.log(f'[🔄] Reloaded after {_held:.0f}s.')
+                                break
+                        except Exception:
+                            continue
+                    if not dismissed:
+                        p.wait_for_timeout(2000)
+                    return dismissed
+                self._ig_sww_since = None
+                raise IGDeadEnd(
+                    f'IG "Something went wrong" persisted {_held:.0f}s (> 60s '
+                    f'grace) on {(p.url or "")[:90]} — reloading did not recover. '
+                    f'Closing the browser, cancelling the task and moving to the '
+                    f'next account (never submitted).')
+        except IGDeadEnd:
+            raise
+        except Exception:
+            pass
+
         # 1. Comprehensive single-pass JS evaluation (< 10ms execution time)
         try:
             js_res = p.evaluate("""() => {

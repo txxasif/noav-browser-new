@@ -9,6 +9,18 @@ from typing import Optional
 from ai_config import TG_DEFAULT_TASK, Urls, get_random_selfie  # noqa: E402
 
 
+def _fast_mode_enabled() -> bool:
+    """Nova speed parity: instant clicks/fills, no human mouse/typing delays.
+
+    Enabled by default (INSTA_FAST_MODE=1). Set INSTA_FAST_MODE=0 to restore
+    the human-like mouse moves + per-char typing in the bundled engine.
+    reCAPTCHA clicks intentionally stay human-like via _human_click_recaptcha.
+    """
+    return os.environ.get("INSTA_FAST_MODE", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
 class MetaBaseMixin:
     def __init__(
         self,
@@ -85,6 +97,56 @@ class MetaBaseMixin:
         self.selfie_path = get_random_selfie()
         if os.path.exists(self.selfie_path):
             self.log(f'[🖼️] Verification selfie assigned: {os.path.basename(self.selfie_path)}')
+
+    # ------------------------------------------------------------------ #
+    # Nova speed parity — instant clicks/fills, no human delays.
+    # Mirrors Nova-Browser-Linux/core/metaInstaWorker.py:563-575. Every
+    # _try_click/_try_fill/_advance call routes through these, so this
+    # covers the whole Meta wizard. reCAPTCHA keeps its own human-like
+    # _human_click_recaptcha path (fraud-sensitive), untouched here.
+    # ------------------------------------------------------------------ #
+    def _pause(self, page, lo=0.4, hi=1.4):  # noqa: ARG002
+        if _fast_mode_enabled():
+            return
+        return super()._pause(page, lo, hi)
+
+    def _human_click(self, page, locator, timeout=25000):  # noqa: ARG002
+        if _fast_mode_enabled():
+            try:
+                locator.click(timeout=timeout)
+                return
+            except Exception:
+                pass
+        return super()._human_click(page, locator, timeout)
+
+    def _clean_fill(self, page, locator, text, timeout=25000):  # noqa: ARG002
+        if _fast_mode_enabled():
+            try:
+                locator.fill(text, timeout=timeout)
+            except Exception:
+                try:
+                    locator.fill(text, timeout=timeout)
+                except Exception:
+                    return super()._clean_fill(page, locator, text, timeout)
+            try:
+                if locator.input_value() == text:
+                    return True
+            except Exception:
+                return True
+            try:
+                self._react_set_value(locator, text)
+            except Exception:
+                pass
+            try:
+                return locator.input_value() == text
+            except Exception:
+                return True
+        return super()._clean_fill(page, locator, text, timeout)
+
+    def _human_type(self, page, locator, text, timeout=25000):  # noqa: ARG002
+        if _fast_mode_enabled():
+            return self._clean_fill(page, locator, text, timeout)
+        return super()._human_type(page, locator, text, timeout)
 
     def _dispatch_react_events(self, page, locator):
         """Dispatch explicit synthetic React events (input, change, blur) to synchronize Fiber tree."""

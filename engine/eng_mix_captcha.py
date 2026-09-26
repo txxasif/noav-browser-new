@@ -288,6 +288,87 @@ class EngineCaptchaMixin:
             except Exception:
                 return
 
+    def _recaptcha_anchor_checked(self, anchor):
+        """Return True for both ARIA and Google checkbox state variants."""
+        if anchor is None:
+            return False
+        try:
+            cb = anchor.locator("#recaptcha-anchor").first
+            if cb.count() == 0:
+                return False
+            try:
+                if (cb.get_attribute("aria-checked") or "").strip().lower() == "true":
+                    return True
+            except Exception:
+                pass
+            # Some Google/Linux frames render the green state through the
+            # wrapper class/data-state while leaving aria-checked stale.
+            return bool(cb.evaluate("""el => {
+                const root = el.closest('.recaptcha-checkbox') || el.parentElement || el;
+                const state = [root.className, root.getAttribute('data-state'),
+                               root.getAttribute('aria-label')].join(' ');
+                return /checked|verified|complete/i.test(state);
+            }"""))
+        except Exception:
+            return False
+
+    def _checkpoint_action(self, page, names=("Continue", "Next", "Confirm"), require_enabled=True):
+        """Find an enabled/visible checkpoint action in the page or any frame."""
+        try:
+            frames = [page] + list(page.frames)
+        except Exception:
+            frames = [page]
+        seen = set()
+        frames = [f for f in frames if not (id(f) in seen or seen.add(id(f)))]
+        for exact in (True, False):
+            for frame in frames:
+                for name in names:
+                    try:
+                        loc = frame.get_by_role("button", name=name, exact=exact)
+                        count = loc.count()
+                    except Exception:
+                        continue
+                    for index in range(count):
+                        try:
+                            el = loc.nth(index)
+                            if not el.is_visible():
+                                continue
+                            enabled = True
+                            try:
+                                enabled = el.is_enabled()
+                            except Exception:
+                                pass
+                            if require_enabled and (not enabled or
+                                    (el.get_attribute("aria-disabled") or "").lower() == "true" or
+                                    el.get_attribute("disabled") is not None):
+                                continue
+                            return el
+                        except Exception:
+                            continue
+        return None
+
+    def _click_checkpoint_action(self, page, name, timeout=1500):
+        el = self._checkpoint_action(page, names=(name,), require_enabled=True)
+        if el is None:
+            return False
+        try:
+            el.scroll_into_view_if_needed(timeout=timeout)
+        except Exception:
+            pass
+        try:
+            self._human_click(page, el, timeout)
+            return True
+        except Exception:
+            try:
+                el.click(timeout=timeout)
+                return True
+            except Exception:
+                try:
+                    el.click(force=True, timeout=timeout)
+                    return True
+                except Exception:
+                    return False
+
     def _wait_for_extension_solve(self, page, timeout=90):
         """Wait for in-browser JA Captcha extension to solve visual / Turnstile challenge (Nova-parity).
 
@@ -314,7 +395,7 @@ class EngineCaptchaMixin:
         if anchor is not None:
             try:
                 cb = anchor.locator("#recaptcha-anchor")
-                if cb.count() > 0 and cb.get_attribute("aria-checked") != "true":
+                if cb.count() > 0 and not self._recaptcha_anchor_checked(anchor):
                     self.log('[🧩] Clicking reCAPTCHA "I\'m not a robot" checkbox…')
                     self._human_click_recaptcha(page, cb, timeout=6000)
                     page.wait_for_timeout(2000)
@@ -329,7 +410,7 @@ class EngineCaptchaMixin:
             anchor, bframe = self._recaptcha_frames(page)
             if anchor is not None:
                 try:
-                    if anchor.locator("#recaptcha-anchor").get_attribute("aria-checked") == "true":
+                    if self._recaptcha_anchor_checked(anchor):
                         self.log(f'<font color="#00FF00"><b>[✅] reCAPTCHA verified in {int(time.time() - start)}s!</b></font>')
                         return True
                 except Exception:
@@ -345,19 +426,25 @@ class EngineCaptchaMixin:
                 self.log(f'[✅] Visual AI Extension solved challenge in {int(time.time() - start)}s!')
                 return True
 
-            # Attempt to click Continue if active
+            # Attempt to click Continue if active. Search child frames and
+            # require an enabled control so a transient disabled button is not
+            # reported as a successful click.
             for btn_txt in ("Continue", "Next", "Confirm"):
-                if self._try_click(page, btn_txt, timeout=1200):
+                if self._click_checkpoint_action(page, btn_txt, timeout=1200):
                     self.log(f'[+] Clicked {btn_txt} during visual solve…')
                     self._poll_checkpoint_settled(page, timeout=4)
                     if not self._has_human_check(page):
                         return True
 
             # If extension has not solved after the bail window and a challenge
-            # iframe remains open, hand off to Audio STT instead of waiting the cap.
+            # iframe remains open, hand off to Audio STT only when no action is
+            # visible. A present Continue button may still be transitioning from
+            # disabled to enabled after the green checkbox state.
             if (time.time() - start) >= bail and bframe is not None:
-                self.log(f'[⚠️] Visual AI did not finish in {int(bail)}s; falling back to Audio STT…')
-                return False
+                if self._checkpoint_action(page, names=("Continue", "Next", "Confirm"),
+                                           require_enabled=False) is None:
+                    self.log(f'[⚠️] Visual AI did not finish in {int(bail)}s; falling back to Audio STT…')
+                    return False
 
         self.log(f'[⚠️] Visual AI extension did not finish in {timeout}s; falling back to Audio STT…')
         return False

@@ -1,14 +1,7 @@
 /**
- * Nova Browser UI — Creator workspaces.
+ * Nova Browser UI — Meta Creator Workspace.
  *
- * The dashboard exposes two independent workspaces built from ONE factory:
- *   • Meta Creator       (mode = "meta")    → Meta-only accounts
- *   • Instagram Creator  (mode = "meta-ig") → Meta account + Instagram join
- *
- * Each workspace owns its controls, stats, results table, pagination and log.
- * Shared concerns (accounts state, SSE stream, delete/edit modals, global
- * password, license) live in initMetaInsta() so both stay in sync without
- * duplicating work.
+ * Dedicated Meta Account Creation Engine.
  */
 
 const MI_WORKSPACE_DEFS = {
@@ -16,26 +9,26 @@ const MI_WORKSPACE_DEFS = {
     kind: 'meta',
     mode: 'meta',
     title: 'Meta Account Creator',
-    subtitle: 'Create Meta (Facebook) accounts in an anti-detect browser. No Instagram join.',
+    subtitle: 'Create Instagram accounts via Meta signup in an anti-detect browser.',
     accent: '#0081fb',
     icon: 'fa-brands fa-meta',
-    countLabel: 'Meta Accounts',
-    countSub: 'Meta-only accounts created',
-    savedSub: 'JSON + CSV + TXT',
-    usernameLabel: 'New username (optional)',
+    countLabel: 'Accounts Created',
+    countSub: 'Accounts created',
+    savedSub: 'JSON + CSV + TXT + Cookies',
+    usernameLabel: 'Account username (optional)',
     usernamePlaceholder: 'leave empty = auto',
-    startLabel: 'Start Creating Meta',
-    flowHint: 'Flow: Meta signup → verify → save credentials.',
+    startLabel: 'Start Creator',
+    flowHint: 'Flow: Meta signup → selfie verify → join Instagram → follow 1-2 profiles → save credentials + cookies.',
   },
   ig: {
     kind: 'ig',
     mode: 'meta-ig',
-    title: 'Instagram Account Creator',
-    subtitle: 'Create a Meta account, then join Instagram in the same anti-detect session.',
+    title: 'Instagram Creator',
+    subtitle: 'Create Instagram accounts (via Meta signup) in an anti-detect browser.',
     accent: '#f472b6',
     icon: 'fa-brands fa-instagram',
     countLabel: 'Instagram Accounts',
-    countSub: 'Accounts with an Instagram session',
+    countSub: 'Instagram accounts created',
     savedSub: 'JSON + CSV + TXT + cookies',
     usernameLabel: 'Instagram username (optional)',
     usernamePlaceholder: 'leave empty = auto',
@@ -60,7 +53,7 @@ function miCreatorPanelHtml(def) {
   const k = def.kind;
   const cols = [
     ['id', '# (Index)'], ['uname', 'Username'], ['name', 'Name'], ['email', 'Email'],
-    ['password', 'Password'], ['created', 'Created'], ['actions', 'Actions'],
+    ['password', 'Password'], ['cookies', 'Cookies'], ['created', 'Created'], ['actions', 'Actions'],
   ];
   const colMenu = cols.map(([col, label]) => `
     <label class="creator-col-option">
@@ -306,7 +299,12 @@ function initMetaInsta() {
         if (s.mode === 'meta' || s.mode === 'meta-ig') state.activeMode = s.mode;
         if (!state.running) state.activeMode = null;
         else if (!state.activeMode) state.activeMode = 'meta';
-        state.accounts = (acc && acc.accounts) || [];
+        state.accounts = ((acc && acc.accounts) || [])
+          // Strict pipeline isolation (meta_auto_ai parity): accounts created by
+          // TG Classic carry target="telegram" and belong to the TG tab only.
+          // Without this a TG Classic run also showed up in the Instagram
+          // Creator workspace and inflated its sidebar badge.
+          .filter((a) => String((a && a.target) || '') !== 'telegram');
       } catch (e) {
         state.running = false;
       } finally {
@@ -518,7 +516,7 @@ function initMetaInsta() {
         ws.setProgress(d);
       }
     } else if (d.type === 'account_created') {
-      if (ws) ws.appendLog(`[✔] Created: ${d.account?.instagram_username || d.account?.email || d.email || ''}`);
+      if (ws) ws.appendLog(`[✔] Created: ${d.account?.username || d.account?.email || d.email || ''}`);
       refreshShared();
     } else if (d.type === 'license_invalid') {
       state.running = false;
@@ -778,7 +776,9 @@ function createCreatorWorkspace(root, def, state, shared) {
   function comboOf(a) {
     const u = a.instagram_username || a.username || '';
     const p = a.password || '';
-    return a.twofa_secret ? `${u}|${p}|${a.twofa_secret}` : `${u}|${p}`;
+    const email = a.email || '';
+    const c = a.cookies || a.cookie || '';
+    return `${u}|${p}|${email}|${c}`;
   }
 
   function perPageCount() {
@@ -807,6 +807,7 @@ function createCreatorWorkspace(root, def, state, shared) {
         const n = start + i + 1;
         const u = a.instagram_username || a.username || '';
         const masked = (a.password || '').replace(/.(?=.{3})/g, '•');
+        const cVal = a.cookies || a.cookie || '';
         return `
         <tr>
           <td data-col="id" style="color: var(--text-muted); font-variant-numeric: tabular-nums;" title="Original Order: #${a._origIndex}">${n}</td>
@@ -814,11 +815,12 @@ function createCreatorWorkspace(root, def, state, shared) {
           <td data-col="name">${escapeHtml(a.name || '—')}</td>
           <td data-col="email" class="mono"><span>${escapeHtml(a.email || '—')}</span> <button type="button" class="btn btn-secondary btn-sm" data-copyemail="${a.id}" title="Copy email" style="padding: 0.15rem 0.45rem;"><i class="fa-solid fa-copy"></i></button></td>
           <td data-col="password" class="mono"><span title="Use Copy for the full combo">${escapeHtml(masked || '—')}</span> <button type="button" class="btn btn-secondary btn-sm" data-copypass="${a.id}" title="Copy password" style="padding: 0.15rem 0.45rem;"><i class="fa-solid fa-copy"></i></button></td>
+          <td data-col="cookies" class="mono"><span title="${escapeHtml(cVal || '—')}">${escapeHtml(cVal.slice(0, 20) + (cVal.length > 20 ? '…' : '') || '—')}</span> <button type="button" class="btn btn-secondary btn-sm" data-copyrawcookie="${a.id}" title="Copy cookies string" style="padding: 0.15rem 0.45rem;"><i class="fa-solid fa-cookie"></i></button></td>
           <td data-col="created" style="color: var(--text-muted); font-size: 0.78rem; white-space: nowrap;">${escapeHtml(a.created_at || '—')}</td>
           <td data-col="actions"><div class="metainsta-actions">
             <button type="button" class="btn btn-primary btn-sm" data-open-meta="${a.id}" title="Open persisted Meta session (auth.meta.com)${a.metaPersisted === false ? ' — no persisted profile, cookies only' : ''}"><i class="fa-brands fa-meta"></i> Meta</button>
             ${((a.mail_provider || 'mailtd') !== 'mailtd' || a.mailPersisted === false) ? '' : `<button type="button" class="btn btn-secondary btn-sm" data-open-mail="${a.id}" title="Open persisted mail inbox (mail.td)"><i class="fa-solid fa-envelope"></i> Mail</button>`}
-            <button type="button" class="btn btn-secondary btn-sm" data-copy="${a.id}" title="Copy uname|pass|token"><i class="fa-solid fa-copy"></i></button>
+            <button type="button" class="btn btn-secondary btn-sm" data-copy="${a.id}" title="Copy uname|pass|email|cookie"><i class="fa-solid fa-copy"></i></button>
             <button type="button" class="btn btn-secondary btn-sm" data-cookie="${a.id}" title="Export saved browser cookies (JSON)"><i class="fa-solid fa-cookie-bite"></i></button>
             <button type="button" class="btn btn-secondary btn-sm" data-edit="${a.id}" title="Edit stored fields"><i class="fa-solid fa-pen"></i></button>
             <button type="button" class="btn btn-secondary btn-sm" data-del="${a.id}" title="Delete account" style="color: #f87171;"><i class="fa-solid fa-xmark"></i></button>
@@ -875,7 +877,7 @@ function createCreatorWorkspace(root, def, state, shared) {
     if (rowsDelegated || !els.resultsList) return;
     rowsDelegated = true;
     els.resultsList.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-del],button[data-copy],button[data-copypass],button[data-copyuname],button[data-copyemail],button[data-cookie],button[data-edit],button[data-open-meta],button[data-open-mail]');
+      const btn = ev.target.closest('button[data-del],button[data-copy],button[data-copypass],button[data-copyuname],button[data-copyemail],button[data-copyrawcookie],button[data-cookie],button[data-edit],button[data-open-meta],button[data-open-mail]');
       if (!btn) return;
       const d = btn.dataset;
       if (d.del !== undefined) { handleDelete(d.del); return; }
@@ -883,6 +885,15 @@ function createCreatorWorkspace(root, def, state, shared) {
       if (d.copypass !== undefined) { handleCopyField(d.copypass, 'password'); return; }
       if (d.copyuname !== undefined) { handleCopyField(d.copyuname, 'username'); return; }
       if (d.copyemail !== undefined) { handleCopyField(d.copyemail, 'email'); return; }
+      if (d.copyrawcookie !== undefined) {
+        const a = findAccount(d.copyrawcookie);
+        if (a && (a.cookies || a.cookie)) {
+          navigator.clipboard.writeText(a.cookies || a.cookie).then(() => showToast('Cookies copied!', 'success'));
+        } else {
+          showToast('No cookies found for this account.', 'warning');
+        }
+        return;
+      }
       if (d.cookie !== undefined) { handleCookieExport(d.cookie, btn); return; }
       if (d.edit !== undefined) { handleEdit(d.edit); return; }
       if (d.openMeta !== undefined) { openMetaInstaAccount(d.openMeta, 'meta'); return; }
@@ -931,7 +942,7 @@ function createCreatorWorkspace(root, def, state, shared) {
   function handleCopy(id) {
     const a = findAccount(id);
     if (!a) return;
-    navigator.clipboard.writeText(comboOf(a)).then(() => showToast('Copied uname|pass|token!', 'success'));
+    navigator.clipboard.writeText(comboOf(a)).then(() => showToast('Copied uname|pass|email|cookie!', 'success'));
   }
 
   function handleCopyField(id, field) {
@@ -1200,12 +1211,12 @@ function createCreatorWorkspace(root, def, state, shared) {
   if (els.combo) {
     els.combo.addEventListener('click', () => {
       const link = document.createElement('a');
-      link.href = `/api/meta-insta/export-combo?kind=${def.kind}`;
-      link.download = def.kind === 'ig' ? 'ig_combo.txt' : 'meta_combo.txt';
+      link.href = '/api/meta-insta/export-combo?kind=meta';
+      link.download = 'meta_combo.txt';
       document.body.appendChild(link);
       link.click();
       link.remove();
-      showToast(`Exporting ${def.kind === 'ig' ? 'Instagram' : 'Meta'} combos…`, 'success');
+      showToast('Exporting Meta combos…', 'success');
     });
   }
 

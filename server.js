@@ -66,6 +66,38 @@ function writeSettings(patch) {
   }
   return next;
 }
+// ---------------- TG Classic helpers ----------------
+// The TG profile pool lives in data/tg_accounts.json (registered by
+// tg_login*.py / the dashboard). Read-only here; never mutate from the server.
+function readTgPool() {
+  try {
+    const f = path.join(ROOT_DIR, 'data', 'tg_accounts.json');
+    if (!fs.existsSync(f)) return [];
+    const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+    const rows = Array.isArray(raw) ? raw : (raw.accounts || []);
+    return (Array.isArray(rows) ? rows : Object.values(rows)).map(a => ({
+      id: a.id,
+      label: a.label || a.name || a.id,
+      mode: a.mode || 'web',
+      enabled: a.enabled !== false,
+      proxy: a.proxy || null,
+      status: a.status || 'idle',
+      logged_in: a.logged_in === true,
+      tasks_done: a.tasks_done || 0,
+    }));
+  } catch (e) { return []; }
+}
+
+// Pre-flight for /api/tg/start: true when at least one pool profile is enabled
+// AND logged in. The coupled cycle creates the Meta account BEFORE leasing a
+// Telegram profile, so an empty/disabled/logged-out pool must be refused up
+// front instead of burning a Meta account and then failing.
+function tgPoolUsable() {
+  try {
+    return readTgPool().some(a => a.enabled !== false && a.logged_in === true);
+  } catch (e) { return false; }
+}
+
 function storedGlobalPassword() {
   return String(readSettings().globalPassword || '').trim().slice(0, 128);
 }
@@ -125,6 +157,46 @@ const PYTHON_BIN = getPythonBin();
 // Send JSON with gzip when the client accepts it. /api/meta-insta/accounts
 // is ~1.5 MB with 812 accounts (fetched every 10s poll) — gzip cuts it to
 // ~150-200 KB with zero frontend changes.
+// Run a python helper and parse its final stdout line as JSON.
+function runPythonJson(pythonBin, rootDir, script, args, timeoutMs) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(pythonBin, [path.join(rootDir, script)].concat(args || []), {
+        cwd: rootDir, windowsHide: true,
+        env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONUTF8: '1' }),
+      });
+    } catch (e) { resolve({ ok: false, error: 'spawn failed: ' + e.message }); return; }
+    let out = '', err = '';
+    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} resolve({ ok: false, error: 'timeout' }); }, timeoutMs || 120000);
+    child.stdout.on('data', d => { out += d.toString(); });
+    child.stderr.on('data', d => { err += d.toString(); });
+    child.on('error', e => { clearTimeout(t); resolve({ ok: false, error: String(e.message || e) }); });
+    child.on('close', () => {
+      clearTimeout(t);
+      const line = out.trim().split('\n').filter(Boolean).pop() || '';
+      try { resolve(JSON.parse(line)); }
+      catch (e) { resolve({ ok: false, error: (err || out || 'no output').trim().slice(0, 400) }); }
+    });
+  });
+}
+
+// Self-heal a STALE engine handle. If a worker hung/crashed without firing
+// 'close' (or Node missed it), slot().proc stays truthy and every Start
+// is refused until the whole app is restarted — the "everything shows BUSY and
+// nothing runs" wedge. A Node ChildProcess exposes exitCode once it has exited,
+// so reap on every status/guard read.
+function reapDeadEngine() {
+  try {
+    if (slot().proc && slot().proc.exitCode !== null) {
+      console.log('[MetaCreator] Reaping stale engine handle (exitCode=' + slot().proc.exitCode + ')');
+      slot().proc = null;
+      slot().config = null;
+    }
+  } catch (e) {}
+  return !!slot().proc;
+}
+
 function sendJson(req, res, obj, statusCode) {
   try {
     const body = Buffer.from(JSON.stringify(obj));
@@ -155,10 +227,25 @@ try {
   updateManager.cleanupStaleUpdateFiles(process.pkg ? process.execPath : null);
 } catch (e) {}
 
-let activeLoopProcess = null;
-let startInFlight = false;
+// Per-pipeline engine slots. The Meta and Meta->IG tabs share ONE engine
+// (same process, different --mode), so there are two slots, not three.
+// Previously a single global meant starting TG Classic made the Meta/IG tabs
+// read "BUSY" even when the TG worker had already died. Each slot now carries
+// its own proc/in-flight flag/config, so a tab only ever reports ITS OWN state.
+const engineSlots = {
+  metainsta: { proc: null, inFlight: false, config: null },
+  tg:        { proc: null, inFlight: false, config: null },
+};
+// Which slot the CURRENT request context operates on. Set at the top of every
+// engine route group (see setEngine('tg') / setEngine('metainsta')).
+let activeEngine = 'metainsta';
+function setEngine(name) { activeEngine = (name === 'tg') ? 'tg' : 'metainsta'; }
+function slot() { return engineSlots[activeEngine]; }
 let workerStdoutBuffer = '';
-let currentLoopConfig = { concurrency: 1, headless: true, target: 0, delay: 4, mail: 'mailtd', captcha: 'extension', mode: 'meta' };
+// Each slot's config starts as null and is populated by its own start route;
+// every read already guards with (slot().config || {}). The old single
+// object literal is gone on purpose — a shared default is what made the
+// Meta/IG tabs report TG's settings.
 const sseClients = new Set();
 
 if (!fs.existsSync(DATA_DIR)) {
@@ -357,6 +444,12 @@ const STATIC_CACHE = new Map();
 const server = http.createServer((req, res) => {
   const urlObj = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = urlObj.pathname;
+
+  // Pick the engine slot ONCE per request, from the path. This MUST be here and
+  // not inside individual route blocks: a status read that ran before its own
+  // start-block had set it would read whichever slot the PREVIOUS request left
+  // active — so /api/meta-insta/status reported TG's worker as "running".
+  setEngine(pathname.indexOf('/api/tg/') === 0 ? 'tg' : 'metainsta');
 
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -557,13 +650,16 @@ const server = http.createServer((req, res) => {
       sendJson(req, res, {
         status: 'SUCCESS',
         tool: 'meta-insta',
-        running: !!activeLoopProcess,
+        running: reapDeadEngine(),
         engineOk: true,
-        concurrency: currentLoopConfig.concurrency,
+        // slot().config is nulled on /stop, so these MUST be guarded —
+        // an unguarded read crashed the server on the first status poll after
+        // any stop ("Cannot read properties of null (reading 'concurrency')").
+        concurrency: (slot().config || {}).concurrency || 1,
         total_accounts: accounts.length,
         created: accounts.length,
-        mode: currentLoopConfig.mode,
-        state: activeLoopProcess ? 'RUNNING' : 'IDLE'
+        mode: (slot().config || {}).mode || 'meta',
+        state: slot().proc ? 'RUNNING' : 'IDLE'
       });
     })();
     return;
@@ -713,15 +809,389 @@ const server = http.createServer((req, res) => {
   }
 
   // 4. POST /api/meta-insta/start (also /api/loop/start)
+  // ---- TG balance (both bots: Taskly + PayGo) ----
+  // Reads the 💰 Balance key from the account's Telethon session. A .session
+  // file serves ONE client at a time, so this is refused while the account is
+  // leased by a worker.
+  if (pathname === '/api/tg/mtproto/balance' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const id = String(b.id || '').trim();
+      if (!id) { sendJson(req, res, { ok: false, error: 'id required' }, 400); return; }
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py', ['--id', id, '--json'], 120000);
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 500);
+    });
+    return;
+  }
+
+  if (pathname === '/api/tg/mtproto/balance_all' && req.method === 'POST') {
+    (async () => {
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py', ['--all', '--json'], 900000);
+      try {
+        const t = (r && r.totals) || {};
+        broadcastEvent({ type: 'log', pipeline: 'telegram',
+          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): Taskly $'
+            + Number(t.taskly || 0).toFixed(2) + ' \u00b7 PayGo $' + Number(t.paygo || 0).toFixed(2)
+            + ' \u00b7 TOTAL $' + Number(t.grand || 0).toFixed(2) });
+      } catch (e) {}
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 500);
+    })();
+    return;
+  }
+  // =============== end TG balance ===============
+
+  // ---- TG pool: enable/disable + remove (per-profile task switch) ----
+  // tg_accounts.acquire() already skips enabled:false, so disabling just stops
+  // the profile receiving tasks; the session and profile dir are untouched.
+  if (pathname === '/api/tg/accounts/toggle' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const id = String(b.id || '').trim();
+      if (!id) { sendJson(req, res, { ok: false, error: 'id required' }, 400); return; }
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_toggle.py',
+        ['--id', id, '--enabled', b.enabled ? '1' : '0'], 60000);
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 400);
+    });
+    return;
+  }
+  if (pathname === '/api/tg/accounts/remove' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const id = String(b.id || '').trim();
+      if (!id) { sendJson(req, res, { ok: false, error: 'id required' }, 400); return; }
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_toggle.py',
+        ['--id', id, '--remove'], 60000);
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 400);
+    });
+    return;
+  }
+  if (pathname === '/api/tg/pool/enable_all' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_toggle.py',
+        ['--all', b.enabled ? '1' : '0'], 120000);
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 400);
+    });
+    return;
+  }
+  // =============== end TG pool controls ===============
+
+  // ---- MTProto API credentials (data/tg_mtproto.json) ----
+  // Step 0 of Add-MTProto: one api_id/api_hash pair works for ALL accounts (it
+  // identifies the app, not the account). GET reports whether it is present;
+  // POST saves it. Never returned to the client in full (hash masked).
+  if (pathname === '/api/tg/mtproto/credentials' && req.method === 'GET') {
+    try {
+      const f = path.join(ROOT_DIR, 'data', 'tg_mtproto.json');
+      let cfg = {};
+      if (fs.existsSync(f)) { try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')) || {}; } catch (e) {} }
+      const envId = process.env.TG_API_ID || '';
+      const envHash = process.env.TG_API_HASH || '';
+      const apiId = String(cfg.api_id || envId || '');
+      const apiHash = String(cfg.api_hash || envHash || '');
+      sendJson(req, res, {
+        ok: true,
+        has_credentials: !!(apiId && apiHash),
+        api_id: apiId || null,
+        api_hash_masked: apiHash ? (apiHash.slice(0, 4) + '\u2026' + apiHash.slice(-4)) : null,
+        source: cfg.api_id ? 'file' : (envId ? 'env' : 'none'),
+      });
+    } catch (e) {
+      sendJson(req, res, { ok: false, error: String(e.message || e) }, 500);
+    }
+    return;
+  }
+
+  if (pathname === '/api/tg/mtproto/credentials' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const apiId = String(b.api_id || '').trim();
+      const apiHash = String(b.api_hash || '').trim();
+      if (!apiId || !/^\d+$/.test(apiId)) {
+        sendJson(req, res, { ok: false, error: 'api_id must be a number (from my.telegram.org)' }, 400); return;
+      }
+      if (!apiHash || apiHash.length < 16) {
+        sendJson(req, res, { ok: false, error: 'api_hash looks too short (32 hex chars expected)' }, 400); return;
+      }
+      try {
+        const dir = path.join(ROOT_DIR, 'data');
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const f = path.join(dir, 'tg_mtproto.json');
+        fs.writeFileSync(f, JSON.stringify({ api_id: Number(apiId), api_hash: apiHash }, null, 2));
+        try { fs.chmodSync(f, 0o600); } catch (e) {}
+        sendJson(req, res, { ok: true, message: 'API credentials saved to data/tg_mtproto.json' });
+      } catch (e) {
+        sendJson(req, res, { ok: false, error: 'could not save credentials: ' + e.message }, 500);
+      }
+    });
+    return;
+  }
+  // =============== end MTProto credentials ===============
+
+  // ---- TG account ADD (MTProto / Telethon) ----
+  // Spawns tg_login_mtproto.py with the JSON payload on STDIN so the login code
+  // and (if 2FA) the password NEVER appear in `ps` argv. The script prints ONE
+  // JSON line; we relay it verbatim. `needs_password:true` means 2FA is on and
+  // the UI must prompt, then call /api/tg/mtproto/verify again with `password`.
+  function runTgLogin(mode, payload) {
+    return new Promise((resolve) => {
+      let child;
+      // api_id/api_hash arrive as _api_id/_api_hash (they are set once per
+      // account, not per-login). Pass them via ENV so they never appear in
+      // `ps` argv, then drop the underscore keys before writing stdin.
+      const env = Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONUTF8: '1' });
+      if (payload && payload._api_id) env.TG_API_ID = String(payload._api_id);
+      if (payload && payload._api_hash) env.TG_API_HASH = String(payload._api_hash);
+      const stdinPayload = Object.assign({}, payload || {});
+      delete stdinPayload._api_id;
+      delete stdinPayload._api_hash;
+      try {
+        child = spawn(PYTHON_BIN, [path.join(ROOT_DIR, 'tg_login_mtproto.py'), mode], {
+          cwd: ROOT_DIR, windowsHide: true, env,
+        });
+      } catch (e) { resolve({ ok: false, error: 'spawn failed: ' + e.message }); return; }
+      let out = '', err = '';
+      const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) {} resolve({ ok: false, error: 'timeout' }); }, 180000);
+      child.stdout.on('data', d => { out += d.toString(); });
+      child.stderr.on('data', d => { err += d.toString(); });
+      child.on('error', e => { clearTimeout(t); resolve({ ok: false, error: String(e.message || e) }); });
+      child.on('close', () => {
+        clearTimeout(t);
+        const line = out.trim().split('\n').filter(Boolean).pop() || '';
+        try { resolve(JSON.parse(line)); }
+        catch (e) { resolve({ ok: false, error: (err || out || 'no output').trim().slice(0, 400) }); }
+      });
+      try { child.stdin.write(JSON.stringify(stdinPayload)); child.stdin.end(); }
+      catch (e) { /* child already gone */ }
+    });
+  }
+
+  if ((pathname === '/api/tg/mtproto/send_code' || pathname === '/api/tg/mtproto/verify')
+      && req.method === 'POST') {
+    const mode = pathname.endsWith('send_code') ? '--send-code' : '--verify';
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let payload = {};
+      try { payload = JSON.parse(body || '{}'); } catch (e) {}
+      const res1 = await runTgLogin(mode, payload);
+      sendJson(req, res, res1);
+    });
+    return;
+  }
+  // =============== end TG account ADD ===============
+
+  // ================= TG Classic (/api/tg/*) =================
+  // Meta -> Instagram -> Taskly submit. Runs worker.py --coupled (one browser
+  // per task). Shares the accounts ledger with Meta/IG; TG profiles come from
+  // data/tg_accounts.json.
+  if (pathname === '/api/tg/pool' && req.method === 'GET') {
+    sendJson(req, res, { status: 'SUCCESS', accounts: readTgPool() });
+    return;
+  }
+
+  if (pathname === '/api/tg/status' && req.method === 'GET') {
+    (async () => {
+      let accounts = [];
+      try { accounts = await loadAccounts(); } catch (e) {}
+      const tg = accounts.filter(a => (a.target || '') === 'telegram');
+      const parked = tg.filter(a => a.status === 'Created' && !a.tg_submitted).length;
+      const submitted = tg.filter(a => a.status === 'Submitted' || a.tg_submitted).length;
+      sendJson(req, res, {
+        status: 'SUCCESS',
+        tool: 'tg-classic',
+        running: reapDeadEngine(),
+        pipeline: 'telegram',
+        ig_mode: slot().proc ? 'classic' : null,
+        engine: slot().config || null,
+        // KPIs the TG panel renders (same shape as meta_auto_ai's tg tab)
+        total_accounts: accounts.length,
+        tg_total: tg.length,
+        tg_pending: parked,
+        tg_submitted: submitted,
+        concurrency: (slot().config || {}).concurrency || 0,
+        pool: { accounts: readTgPool() },
+      });
+    })();
+    return;
+  }
+
+  if (pathname === '/api/tg/start' && req.method === 'POST') {
+    if (reapDeadEngine() || slot().inFlight) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ERROR', error: 'An engine is already running.' }));
+      return;
+    }
+    slot().inFlight = true;
+    const releaseStartTg = () => { slot().inFlight = false; };
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('aborted', releaseStartTg);
+    req.on('end', async () => {
+      let opts = { concurrency: 3, target: 0, delay: 4, headless: true,
+                   captcha: 'extension', tg_task: 'Create Inst (No mail)',
+                   tg_bot: 'taskly', add_email: false, twofa: true };
+      try { if (body) opts = Object.assign(opts, JSON.parse(body)); } catch (e) {}
+
+      // License gate — same contract as the Meta/IG start route.
+      let licCheck;
+      try {
+        licCheck = await licenseMgr.validateOrActivateLicense(null, false);
+      } catch (licenseErr) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'License validation failed: ' + licenseErr.message }));
+        releaseStartTg(); return;
+      }
+      if (!licCheck.isValid) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'No valid license for this machine.' }));
+        releaseStartTg(); return;
+      }
+
+      const concurrency = Math.max(1, Math.min(parseInt(opts.concurrency || 3, 10) || 3, 10));
+      const target = Math.max(0, parseInt(opts.target || 0, 10) || 0);
+      const delay = Math.max(1, parseInt(opts.delay || 4, 10) || 4);
+      const headless = opts.headless !== false;
+      const captcha = opts.captcha || 'extension';
+      const tgTask = String(opts.tg_task || 'Create Inst (No mail)').slice(0, 80);
+      const tgBot = ['taskly', 'paygo'].includes(String(opts.tg_bot))
+        ? String(opts.tg_bot) : 'taskly';
+      const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
+      const newUsername = String(opts.new_username || '').trim().slice(0, 64);
+
+      // Refuse a start that can never lease a profile (see tgPoolUsable). The
+      // frontend preflight shows the toast; this is the authoritative guard.
+      if (!tgPoolUsable()) {
+        releaseStartTg();
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR',
+          error: 'No logged-in Telegram profile. Add or log in a profile (and enable it) before starting TG Classic.' }));
+        return;
+      }
+
+      slot().config = { concurrency, headless, target, delay, captcha,
+                            coupled: true, tg_task: tgTask, tg_bot: tgBot,
+                            twofa: opts.twofa !== false };
+
+      const args = [
+        path.join(ROOT_DIR, 'worker.py'),
+        '--concurrency', String(concurrency),
+        '--target', String(target),
+        '--delay', String(delay),
+        '--mail', 'mailtd',
+        '--captcha', captcha,
+        '--mode', 'meta',
+        '--coupled',
+        '--tg-task', tgTask,
+        '--tg-bot', tgBot,
+      ];
+      if (opts.twofa !== false) args.push('--twofa');
+      if (opts.add_email === true || opts.add_email === 'true') args.push('--add-email');
+      if (headless) args.push('--headless');
+
+      console.log(`[MetaCreator] Starting TG Classic: ${PYTHON_BIN} ${args.join(' ')}`);
+      const isWinTg = process.platform === 'win32';
+      const browsersTg = fs.existsSync(path.join(ROOT_DIR, '_internal', 'ms-playwright'))
+        ? path.join(ROOT_DIR, '_internal', 'ms-playwright')
+        : path.join(ROOT_DIR, 'engine', 'ms-playwright');
+      try {
+        workerStdoutBuffer = '';
+        slot().proc = spawn(PYTHON_BIN, args, {
+          cwd: ROOT_DIR,
+          detached: !isWinTg,
+          windowsHide: true,
+          env: Object.assign({}, process.env, {
+            PYTHONUNBUFFERED: '1',
+            PYTHONUTF8: '1',
+            PYTHONIOENCODING: 'utf-8',
+            PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || browsersTg,
+            ...(newPassword ? { META_NEW_PASSWORD: newPassword } : {}),
+            ...(newUsername ? { META_NEW_USERNAME: newUsername } : {})
+          })
+        });
+      } catch (spawnErr) {
+        releaseStartTg();
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'Failed to spawn TG worker: ' + spawnErr.message }));
+        return;
+      }
+
+      // Stream the worker's output. WITHOUT this the child's stdout/stderr is
+      // discarded and the TG console stays empty even when the worker dies
+      // instantly (e.g. a bad kwarg) — you see "started" and no browser tab.
+      slot().proc.stdout.on('data', data => {
+        workerStdoutBuffer += data.toString('utf-8');
+        const lines = workerStdoutBuffer.split('\n');
+        workerStdoutBuffer = lines.pop() || '';
+        for (const line of lines) consumeWorkerLine(line);
+      });
+      slot().proc.stderr.on('data', data => {
+        const text = data.toString('utf-8').trim();
+        if (!text) return;
+        if (/socket\.send\(\) raised exception\.?/i.test(text)) return;
+        console.error(`[TG Worker STDERR] ${text}`);
+        broadcastEvent({ type: 'log', pipeline: 'telegram', message: `[STDERR] ${text}` });
+      });
+      slot().proc.on('error', err => {
+        broadcastEvent({ type: 'log', pipeline: 'telegram', message: `[Worker] ${err.message}` });
+        if (slot().proc) slot().proc = null;
+      });
+      slot().proc.on('close', code => {
+        if (workerStdoutBuffer) { consumeWorkerLine(workerStdoutBuffer); workerStdoutBuffer = ''; }
+        console.log(`[TG] loop process exited with code ${code}`);
+        broadcastEvent({ type: 'log', pipeline: 'telegram',
+          message: `[engine] TG worker exited (code ${code})` });
+        broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', exit_code: code });
+        slot().proc = null;
+      });
+      releaseStartTg();
+      sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine started.', config: slot().config });
+    });
+    return;
+  }
+
+  if (pathname === '/api/tg/stop' && req.method === 'POST') {
+    try {
+      if (slot().proc) {
+        const isWinStop = process.platform === 'win32';
+        if (!isWinStop) {
+          try { process.kill(-slot().proc.pid, 'SIGTERM'); }
+          catch (e) { try { slot().proc.kill('SIGTERM'); } catch (e2) {} }
+        } else {
+          try { slot().proc.kill(); } catch (e2) {}
+        }
+        slot().proc = null;
+      }
+      slot().config = null;
+      broadcastEvent({ type: 'loop_stopped', message: 'TG Classic engine stopped by user request.' });
+      sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopped.' });
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ERROR', error: 'Stop failed: ' + e.message }));
+    }
+    return;
+  }
+  // =============== end TG Classic ===============
+
   if ((pathname === '/api/meta-insta/start' || pathname === '/api/loop/start') && req.method === 'POST') {
-    if (activeLoopProcess || startInFlight) {
+    if (reapDeadEngine() || slot().inFlight) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ERROR', error: 'Meta creator is already actively running.' }));
       return;
     }
 
-    startInFlight = true;
-    const releaseStart = () => { startInFlight = false; };
+    slot().inFlight = true;
+    const releaseStart = () => { slot().inFlight = false; };
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('aborted', releaseStart);
@@ -791,7 +1261,7 @@ const server = http.createServer((req, res) => {
       // Optional fixed username (workspace field). Also env-only.
       const newUsername = String(opts.new_username || '').trim().slice(0, 64);
 
-      currentLoopConfig = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs };
+      slot().config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs };
 
       const args = [
         path.join(ROOT_DIR, 'worker.py'),
@@ -814,7 +1284,7 @@ const server = http.createServer((req, res) => {
 
       try {
         workerStdoutBuffer = '';
-        activeLoopProcess = spawn(PYTHON_BIN, args, {
+        slot().proc = spawn(PYTHON_BIN, args, {
           cwd: ROOT_DIR,
           detached: !isWin,
           windowsHide: true,
@@ -846,7 +1316,7 @@ const server = http.createServer((req, res) => {
         mode
       });
 
-      activeLoopProcess.stdout.on('data', data => {
+      slot().proc.stdout.on('data', data => {
         // Child-process stdout is a byte stream; a JSON event can be split
         // across chunks. Keep the partial line instead of dropping/corrupting
         // it during a high-volume parallel run.
@@ -856,7 +1326,7 @@ const server = http.createServer((req, res) => {
         for (const line of lines) consumeWorkerLine(line);
       });
 
-      activeLoopProcess.stderr.on('data', data => {
+      slot().proc.stderr.on('data', data => {
         const text = data.toString('utf-8').trim();
         if (!text) return;
         // Playwright's node driver spews this whenever a browser/driver socket
@@ -867,14 +1337,14 @@ const server = http.createServer((req, res) => {
         broadcastEvent({ type: 'log', message: `[STDERR] ${text}` });
       });
 
-      activeLoopProcess.on('error', spawnErr => {
+      slot().proc.on('error', spawnErr => {
         console.error(`[MetaCreator] Worker process error: ${spawnErr.message}`);
         broadcastEvent({ type: 'log', message: `[Worker] ${spawnErr.message}` });
         releaseStart();
-        if (activeLoopProcess) activeLoopProcess = null;
+        if (slot().proc) slot().proc = null;
       });
 
-      activeLoopProcess.on('close', code => {
+      slot().proc.on('close', code => {
         if (workerStdoutBuffer) {
           consumeWorkerLine(workerStdoutBuffer);
           workerStdoutBuffer = '';
@@ -882,8 +1352,8 @@ const server = http.createServer((req, res) => {
         console.log(`[MetaCreator] Loop process exited with code ${code}`);
         broadcastEvent({ type: 'loop_stopped', exit_code: code });
         broadcastEvent({ type: 'status', running: false });
-        activeLoopProcess = null;
-        startInFlight = false;
+        slot().proc = null;
+        slot().inFlight = false;
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -895,18 +1365,18 @@ const server = http.createServer((req, res) => {
 
   // 5. POST /api/meta-insta/stop (also /api/loop/stop)
   if ((pathname === '/api/meta-insta/stop' || pathname === '/api/loop/stop') && req.method === 'POST') {
-    if (startInFlight && !activeLoopProcess) {
+    if (slot().inFlight && !slot().proc) {
       res.writeHead(409, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ERROR', error: 'Start is still being initialized; try Stop again in a moment.' }));
       return;
     }
-    if (activeLoopProcess) {
-      killProcessGroup(activeLoopProcess, 'SIGINT');
-      const proc = activeLoopProcess;
+    if (slot().proc) {
+      killProcessGroup(slot().proc, 'SIGINT');
+      const proc = slot().proc;
       setTimeout(() => {
-        if (activeLoopProcess === proc) {
+        if (slot().proc === proc) {
           killProcessGroup(proc, 'SIGKILL');
-          activeLoopProcess = null;
+          slot().proc = null;
         }
       }, 3000);
     }
@@ -1274,9 +1744,9 @@ const server = http.createServer((req, res) => {
 // Graceful shutdown
 function handleShutdown() {
   console.log('\n[MetaCreator] Shutting down server...');
-  if (activeLoopProcess) {
-    killProcessGroup(activeLoopProcess, 'SIGKILL');
-    activeLoopProcess = null;
+  if (slot().proc) {
+    killProcessGroup(slot().proc, 'SIGKILL');
+    slot().proc = null;
   }
   server.close(() => {
     process.exit(0);

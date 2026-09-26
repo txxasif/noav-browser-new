@@ -24,6 +24,58 @@ except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from eng_constants import _META_AI_APEX, _META_AI_URL  # noqa: E402
 
 class EngineSignupMixin:
+    def _confirm_meta_details(self, p, tries: int = 4, timeout: int = 20) -> bool:
+        """Tap Confirm on 'Edit your Meta AI details' and VERIFY it advanced.
+
+        Observed 2026-09-26: every desktop slot sat on this screen for the whole
+        run, wasting the account. Two independent causes, both handled here:
+          1. the page body contains the word "Confirm" ("By tapping Confirm,
+             you'll create a Meta account"), so a role/name lookup can resolve to
+             the paragraph rather than the button — clicking text is a no-op;
+          2. React can swallow the first click, and the old code then did a
+             blind 2500ms sleep and continued regardless.
+        So: exact-label button first, then poll for the advance (invariant 19 —
+        never a blind sleep on an interactive screen) and retry. Returns True
+        only when the screen is actually gone.
+        """
+        import time as _t
+
+        def _on_details() -> bool:
+            try:
+                t = (p.inner_text("body") or "").lower()
+            except Exception:
+                return False
+            return "edit your meta ai details" in t or "name (optional)" in t
+
+        for attempt in range(max(1, int(tries or 1))):
+            clicked = False
+            for sel in ('button:text-is("Confirm")',
+                        'div[role="button"]:text-is("Confirm")',
+                        'button:has-text("Confirm")',
+                        'div[role="button"]:has-text("Confirm")'):
+                try:
+                    el = p.locator(sel).first
+                    if el.count() > 0 and el.is_visible():
+                        el.click(timeout=4000)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                clicked = bool(self._try_click(p, "Confirm", timeout=3000))
+            if not clicked:
+                self.log(f'[⚠️] Meta AI details: Confirm button not found '
+                         f'(attempt {attempt + 1}/{tries}).')
+            end = _t.time() + max(5, int(timeout or 20))
+            while _t.time() < end:
+                if not _on_details():
+                    self.log('[✅] Meta AI details: Confirm accepted — advanced.')
+                    return True
+                p.wait_for_timeout(500)
+            self.log(f'[⌨️] Meta AI details: still on the details screen after '
+                     f'Confirm (attempt {attempt + 1}/{tries}).')
+        return False
+
     @staticmethod
     def _sanitize_display_name(name: str, fallback: str = "Alex") -> str:
         """Strip non-display characters (math symbols like ×, emojis, digits, symbols) keeping valid name letters and spaces."""
@@ -397,8 +449,12 @@ class EngineSignupMixin:
                 except Exception as _exc:  # noqa: BLE001
                     self.log(f'[⚠️] Details avatar skipped: {_exc}')
 
-            self._try_click(p, "Confirm", timeout=8000)
-            p.wait_for_timeout(2500)
+            # This Confirm is the step that actually CREATES the account
+            # ("By tapping Confirm, you'll create a Meta account"). The old
+            # single _try_click + blind 2500ms left desktop slots parked on
+            # this screen. Click the exact label, then POLL until the screen
+            # advances, retrying.
+            self._confirm_meta_details(p)
 
             # Detect and dynamically resolve errors on Meta AI details screen ("Display Name Has Invalid Characters" / Username)
             for check_attempt in range(4):
@@ -544,13 +600,10 @@ class EngineSignupMixin:
         p.wait_for_timeout(6000)
         self.log('<font color="#00FF00"><b>[✔] Meta account confirmed.</b></font>')
 
-        # Immediate persistence: save Meta account credentials immediately upon confirmation
-        # so credentials are safe in SQLite, JSON, CSV and TXT even if downstream steps encounter issues.
-        try:
-            if hasattr(self, "save_ai_result"):
-                self.save_ai_result(status="MetaCreated")
-        except Exception as _save_err:
-            self.log(f'[⚠️] Early store notice: {_save_err}')
+        # Do not persist the account yet.  The MetaAuto-AI pipeline stores
+        # credentials only after ensure_meta_verified() has completed the
+        # checkpoint/selfie flow; keeping this method side-effect free prevents
+        # a pre-verification record from being reported as a successful account.
 
         # Post-confirm: settle the redirect, then verify human ONLY on an
         # actual checkpoint redirect. A clean landing on meta.ai logged-in

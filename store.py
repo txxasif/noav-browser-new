@@ -647,11 +647,9 @@ def sync_files() -> None:
         except Exception:
             pass
 
-    # 2. accounts.csv (atomic write) — lean Meta export: login essentials
-    # only (email, password, username). No disk paths (session_file), no
-    # IG dup (instagram_username), no pipeline flags (tg_*/nitro_*/coinsta_*).
+    # 2. accounts.csv (atomic write) — essentials: username, password, email, cookies
     try:
-        headers = ["email", "password", "username"]
+        headers = ["username", "password", "email", "cookies"]
         import csv
         tmp_csv = f"{ACCOUNTS_CSV}.tmp.{os.getpid()}_{int(time.time() * 1000)}"
         with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
@@ -670,14 +668,15 @@ def sync_files() -> None:
         except Exception:
             pass
 
-    # 3. accounts.txt (atomic write)
+    # 3. accounts.txt (atomic write) — format: uname|pass|email|cookie
     try:
         lines = []
         for r in recs:
             u = r.get("instagram_username") or r.get("username") or ""
             p = r.get("password") or ""
-            sec = r.get("twofa_secret") or ""
-            lines.append(f"{u}:{p}:{sec}")
+            email = r.get("email") or ""
+            c = r.get("cookies") or r.get("cookie") or ""
+            lines.append(f"{u}|{p}|{email}|{c}")
         content = "\n".join(lines) + "\n" if lines else ""
         tmp_txt = f"{ACCOUNTS_TXT}.tmp.{os.getpid()}_{int(time.time() * 1000)}"
         with open(tmp_txt, "w", encoding="utf-8") as f:

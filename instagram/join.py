@@ -13,6 +13,8 @@ try:
 except ImportError:  # pragma: no cover - top-level import path
     from instagram.helpers import IGDeadEnd  # type: ignore
 
+from ai_config import Urls  # noqa: E402
+
 
 # Valid fallback display names — IG rejects names > 29 UTF-16 units
 # ("Enter a name under 30 characters") and the Taskly first_name can be
@@ -39,6 +41,20 @@ def _ig_name_too_long(s: str) -> bool:
 class IgJoinMixin:
     """Meta-link card dispatch, join wizard & onboarding dismissal."""
 
+    # Instagram's "What's your mobile number?" phone wall: the join landed on
+    # the NATIVE signup branch (/accounts/signup/phone/) instead of the
+    # Meta-linked wizard. A "recover by redirecting to login" attempt was tried
+    # and REMOVED — measured 2026-09-23 (telegram_20260923_010221): 242 attempts,
+    # 0 found the Meta-link dialog, i.e. pure overhead. The wall is a trust
+    # signal, not a navigation one; abort immediately as before.
+    def _phone_wall_present(self, p) -> bool:
+        try:
+            if "what's your mobile number" in self._page_tail(p, 400).lower():
+                return True
+            return p.get_by_text("What's your mobile number", exact=False).count() > 0
+        except Exception:
+            return False
+
     def ig_click_meta_card(self):
         """Handle the Meta-link dialog and click the `<Name>, Meta Horizon` card."""
         p = self._ig_tab()
@@ -63,10 +79,37 @@ class IgJoinMixin:
             # Fast-fail checks: account rejected or phone wall -> quit immediately without waiting
             _tail = self._page_tail(p, 400).lower()
             if "can't find account" in _tail or p.get_by_text("Can't find account", exact=False).count() > 0:
-                self.log('[❌] Instagram: "Can\'t find account" dialog — Meta credentials not recognized. Quitting immediately.')
-                raise RuntimeError("Instagram: Can't find account (Meta credentials rejected)")
+                # Dynamic route: if the dialog offers Sign up / Create new account, click it to open the Meta link card!
+                clicked_signup = False
+                for loc in (
+                    p.get_by_role("button", name="Sign up"),
+                    p.get_by_text("Sign up", exact=True),
+                    p.locator('button:has-text("Sign up")'),
+                    p.locator('div[role="button"]:has-text("Sign up")'),
+                    p.locator('span:has-text("Sign up")'),
+                    p.get_by_role("button", name="Create new account"),
+                    p.get_by_text("Create new account", exact=True),
+                    p.locator('button:has-text("Create new account")'),
+                    p.locator('div[role="button"]:has-text("Create new account")'),
+                ):
+                    try:
+                        el = loc.first
+                        if el.count() > 0 and el.is_visible():
+                            try:
+                                el.click(timeout=3000)
+                            except Exception:
+                                el.click(force=True, timeout=3000)
+                            clicked_signup = True
+                            self.log('[➡️] Clicked "Sign up" on "Can\'t find account" modal to open Meta link card.')
+                            p.wait_for_timeout(3000)
+                            break
+                    except Exception:
+                        pass
+                if not clicked_signup:
+                    self.log('[❌] Instagram: "Can\'t find account" dialog — Meta credentials not recognized. Quitting immediately.')
+                    raise RuntimeError("Instagram: Can't find account (Meta credentials rejected)")
 
-            if "what's your mobile number" in _tail or p.get_by_text("What's your mobile number", exact=False).count() > 0:
+            if self._phone_wall_present(p):
                 self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting immediately.')
                 raise RuntimeError("Instagram: Mobile number required (What's your mobile number)")
 
@@ -296,7 +339,7 @@ class IgJoinMixin:
 
         # Fast-fail check: phone wall or account rejection -> quit immediately
         _tail = self._page_tail(p, 400).lower()
-        if "what's your mobile number" in _tail or p.get_by_text("What's your mobile number", exact=False).count() > 0:
+        if self._phone_wall_present(p):
             self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting immediately.')
             raise RuntimeError("Instagram: Mobile number required (What's your mobile number)")
         if "can't find account" in _tail or p.get_by_text("Can't find account", exact=False).count() > 0:
@@ -598,7 +641,7 @@ class IgJoinMixin:
                 ok = True
                 break
             tail = self._page_tail(p, 400).lower()
-            if "what's your mobile number" in tail or p.get_by_text("What's your mobile number", exact=False).count() > 0:
+            if self._phone_wall_present(p):
                 self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting immediately.')
                 raise RuntimeError("Instagram: Mobile number required (What's your mobile number)")
             if "can't find account" in tail or p.get_by_text("Can't find account", exact=False).count() > 0:
@@ -692,13 +735,35 @@ class IgJoinMixin:
         except Exception:
             return False
 
-    def ig_dismiss_onboarding(self):
-        """Dismiss post-login onboarding prompts ('Save info', 'Not now', 'Skip', Facebook friend sync)."""
+    def ig_dismiss_onboarding(self, follow: bool = True):
+        """Dismiss post-login onboarding prompts, meta_creator-style:
+
+        1. 'Save your password' / 'Save your login info' -> 'Not now'.
+        2. On the /accounts/registered/ onboarding cards ('Connect to Facebook',
+           'Add a profile photo') -> click the TOP-LEFT BACK button to enter the
+           feed directly. This is the whole point of the port: the old code
+           hammered "Skip" pass after pass on the same card (4+ identical Skip
+           taps — the most bot-like thing in the whole flow) and IG kept serving
+           the same card. Back leaves it in ONE tap, like a real user.
+        3. 'Add Instagram to your Home screen?' -> 'Cancel'.
+        4. On the feed -> follow ~2 suggested profiles (ig_follow_suggested).
+
+        Skip remains only for the 'Get the Instagram app' interstitial, where
+        Back is not offered.
+
+        ``follow=False`` suppresses step 4. The direct-login path
+        (``instagram/login.py``) passes False on purpose: that call happens
+        BEFORE the Meta card is joined, so the account has no feed and no
+        suggestions yet — following there would burn the one-shot follow pass
+        (``_ig_follow_done``) and the real post-join call would skip it.
+        """
         p = self._ig_tab()
         # Fast path: if it's already settled, do NOT run a single dismissal pass.
         try:
             if self._ig_settled(p):
                 self.log('[🏠] Instagram already settled — skipping onboarding passes.')
+                if follow:
+                    self.ig_follow_suggested()
                 return
         except Exception:
             pass
@@ -808,9 +873,80 @@ class IgJoinMixin:
 
             if has_bottom_nav and not has_onboarding_overlay and not has_modal:
                 self.log('[🏠] Bottom navigation detected with no onboarding overlay. Instagram session ready.')
-                return
+                break
 
             dismissed = False
+
+            # (A0) /accounts/registered/ onboarding cards ('Connect to Facebook',
+            # 'Add a profile photo'): click the TOP-LEFT BACK button to go
+            # straight to the feed. Runs BEFORE every Skip branch on purpose —
+            # the old flow answered this card with "Skip" up to 4 times in a
+            # row and IG just re-served it. Fallback is a direct IG_HOME load.
+            #
+            # A URL on /accounts/registered/ is definitive — Back regardless of
+            # nav. The TEXT markers additionally require no feed nav, because
+            # they also occur inside ordinary post captions and a text-only
+            # match made the flow click Back on the live feed and navigate away
+            # from a good session.
+            #
+            # The "Get the Instagram app" interstitial is EXCLUDED: it is served
+            # from the same /accounts/registered/ path but offers no Back — only
+            # Skip / "Open Instagram" — and branch (A) already handles it with a
+            # strictly-Skip tap (never "Open Instagram").
+            getapp = ("get the instagram app" in body_text or "open instagram" in body_text)
+            is_card = (not getapp) and (
+                "/accounts/registered" in cur_url
+                or (not has_bottom_nav and (
+                    "connect to facebook" in body_text
+                    or "find facebook friends" in body_text
+                    or "add a profile photo" in body_text)))
+            if is_card:
+                self.log('[⬅️] Onboarding card detected — clicking top-left Back (never Skip here)…')
+                clicked_back = False
+                # ORDER MATTERS: the real control is the top-left "<" chevron, so
+                # explicit Back semantics go first. `a[href="https://www.instagram.com/"]`
+                # is the header WORDMARK and is deliberately last — it navigates to
+                # the feed too, but it is not the button the operator means.
+                for back_sel in (
+                    '[aria-label="Back"]',
+                    'button[aria-label="Back"]',
+                    'a[aria-label="Back"]',
+                    'a[href="/"]',
+                    'a:has-text("Back")',
+                    'button:has-text("Back")',
+                    'svg[aria-label="Back"]',
+                    'a[href="https://www.instagram.com/"]',
+                ):
+                    try:
+                        b_el = p.locator(back_sel).first
+                        if b_el.count() > 0 and b_el.is_visible():
+                            if self._tap_or_click(p, b_el):
+                                self.log(f'[✔] Clicked top-left Back via "{back_sel}" — entering the feed.')
+                                clicked_back = True
+                                p.wait_for_timeout(2500)
+                                # A tap can land on a non-interactive node (a bare
+                                # svg) and report success while nothing navigates.
+                                # Only accept the Back if we actually left the card;
+                                # otherwise fall through to the direct load.
+                                if "/accounts/registered" in (p.url or ""):
+                                    self.log('[⚠️] Back did not leave the card — trying the next control…')
+                                    clicked_back = False
+                                break
+                    except Exception:
+                        pass
+                if not clicked_back:
+                    try:
+                        p.goto(Urls.IG_HOME, wait_until="domcontentloaded", timeout=15000)
+                        self.log('[⬅️] No working Back control — loaded the feed directly.')
+                        clicked_back = True
+                        p.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+                if clicked_back:
+                    # Reset the same-screen breaker: a new screen is a new pass.
+                    last_screen_key = ""
+                    same_screen_hits = 0
+                    continue
 
             # (A) "Get the Instagram app" interstitial screen (Screenshot 2)
             # Strictly click "Skip", never click "Open Instagram"
@@ -936,33 +1072,15 @@ class IgJoinMixin:
                     p.wait_for_timeout(400)
                     continue
 
-            # (D) Facebook connect / sync prompts — strictly skip
-            if "facebook" in body_text:
-                self.log('[+] Facebook connect prompt detected — actively skipping…')
-                for skip_sel in (
-                    'div[role="button"]:has-text("Skip")',
-                    'button:has-text("Skip")',
-                    'a:has-text("Skip")',
-                    'span:has-text("Skip")',
-                    '[aria-label="Skip"]',
-                    'div[role="button"]:has-text("Not now")',
-                    'button:has-text("Not now")',
-                ):
-                    try:
-                        btn = p.locator(skip_sel).first
-                        if btn.count() > 0 and btn.is_visible():
-                            self._tap_or_click(p, btn)
-                            self.log(f'[+] Dismissed Facebook prompt via "{skip_sel}".')
-                            p.wait_for_timeout(1500)
-                            dismissed = True
-                            break
-                    except Exception:
-                        pass
-                if dismissed:
-                    continue
+            # (D) Facebook connect / sync prompts — REMOVED 2026-09-25.
+            # It swept Skip/Not now over ANY page whose body merely mentioned
+            # "facebook" (feed captions, settings rows) and re-tapped the same
+            # registered card up to 4 times in a row. Branch (A0) now exits
+            # those cards with the top-left Back button, and (E) below still
+            # sweeps Skip/Not now/Cancel on genuine dialogs.
 
             # (E) Standard onboarding buttons
-            for label in ("Skip", "Not now", "Cancel", "Save", "Dismiss", "Done"):
+            for label in ("Not now", "Cancel", "Save", "Skip", "Dismiss", "Done"):
                 try:
                     b = p.locator(f'button:has-text("{label}"), div[role="button"]:has-text("{label}")').first
                     if b.count() > 0 and b.is_visible():
@@ -982,4 +1100,128 @@ class IgJoinMixin:
             if not dismissed:
                 break
 
+        # 5. On the feed -> follow ~2 suggested profiles (meta_creator step 4).
+        #    Runs on EVERY exit path, including the ones that `break` above, and
+        #    is best-effort: it never raises and never gates the flow.
+        if follow:
+            self.ig_follow_suggested()
         self.log('[🏠] Instagram session ready.')
+
+    def ig_follow_suggested(self, max_follows: int = 2):
+        """Follow ~2 suggested accounts on the home feed, right after login.
+
+        Ported verbatim-in-spirit from the verified meta_creator flow
+        (``meta_creator/instagram/join.py::ig_follow_suggested``): a real new
+        account follows a couple of people before it ever touches settings, and
+        driving a brand-new IG account STRAIGHT into Accounts Center is its
+        strongest automation tell (observed 2026-09-21: the AC route bounced to
+        /accounts/login/?__coig_login=1, API require_login). So this is the
+        warm-up that replaced the old feed-SCROLL settle — following, not
+        scrolling.
+
+        Selector strategy is meta_creator's: find `…:has-text("Follow")` and
+        require the label to be EXACTLY "Follow", so "Following" / "Follow back"
+        / "Unfollow" rows are never tapped. Best-effort by design (invariant
+        #20: no duplicate guards, no second gate) — it never raises and never
+        blocks the flow; a renamed rail just means 0 follows.
+
+        Tunables: INSTA_FOLLOW_AFTER_LOGIN=0 disables, INSTA_FOLLOW_COUNT
+        overrides the count (default 2).
+        """
+        if str(os.environ.get("INSTA_FOLLOW_AFTER_LOGIN", "1")).strip().lower() in (
+                "0", "false", "no", "off"):
+            self.log('[👥] Post-login follow pass disabled (INSTA_FOLLOW_AFTER_LOGIN=0).')
+            return 0
+        # ig_dismiss_onboarding() can be called twice per cycle (once at the end
+        # of the direct-login helper, once by the pipeline after the Meta card).
+        # The flag is set only once the pass is actually viable — a bail-out on
+        # "no sessionid" must NOT burn it, or the real post-join call would skip
+        # the follow entirely.
+        if getattr(self, "_ig_follow_done", False):
+            self.log('[👥] Follow pass already ran this cycle — skipping the duplicate.')
+            return 0
+        try:
+            max_follows = int(os.environ.get("INSTA_FOLLOW_COUNT", "") or max_follows or 2)
+        except Exception:
+            max_follows = 2
+        if max_follows <= 0:
+            return 0
+        try:
+            # `_ig_tab()` itself can raise (page/browser closed), so it lives
+            # INSIDE the try: this step is best-effort and must never abort the
+            # cycle (invariant #20).
+            p = self._ig_tab()
+            # Only act on a genuinely live, logged-in feed. A login wall or a
+            # blank page here is NOT this step's problem — return quietly so the
+            # Accounts Center entry reports the real reason with the real URL.
+            if "sessionid" not in self._ig_cookie_names():
+                self.log('[👥] No IG sessionid yet — skipping the follow pass.')
+                return 0
+            if "instagram.com" not in (p.url or ""):
+                self.log(f'[👥] Not on Instagram ({p.url}) — skipping the follow pass.')
+                return 0
+            self._ig_follow_done = True
+            p.wait_for_timeout(1500)
+
+            # Any lingering "Add to Home screen"-style dialog goes first.
+            for cancel_sel in ('button:has-text("Cancel")', 'div[role="button"]:has-text("Cancel")',
+                               '[aria-label="Cancel"]'):
+                try:
+                    c_btn = p.locator(cancel_sel).first
+                    if c_btn.count() > 0 and c_btn.is_visible():
+                        self._tap_or_click(p, c_btn)
+                        self.log('[+] Dismissed a lingering modal via Cancel (follow pass).')
+                        p.wait_for_timeout(1000)
+                        break
+                except Exception:
+                    pass
+
+            followed = 0
+            for _ in range(3):
+                if followed >= max_follows:
+                    break
+                tapped = False
+                for sel in ('button:has-text("Follow"):not(:has-text("Following"))',
+                            'div[role="button"]:has-text("Follow"):not(:has-text("Following"))',
+                            'a[role="button"]:has-text("Follow"):not(:has-text("Following"))'):
+                    try:
+                        btns = p.locator(sel)
+                        cnt = btns.count()
+                    except Exception:
+                        continue
+                    for i in range(cnt):
+                        if followed >= max_follows:
+                            break
+                        try:
+                            btn = btns.nth(i)
+                            if not btn.is_visible():
+                                continue
+                            # The exact-label test is the real filter: Playwright's
+                            # :has-text is a substring match, so "Follow" also
+                            # selects "Following"/"Follow back".
+                            if (btn.inner_text() or "").strip() != "Follow":
+                                continue
+                            btn.scroll_into_view_if_needed(timeout=2000)
+                            if not self._tap_or_click(p, btn):
+                                continue
+                            tapped = True
+                            followed += 1
+                            self.log(f'[👥] Followed suggested profile ({followed}/{max_follows}).')
+                            # Human cadence — not machine-stepped, and long enough
+                            # that IG flips the button to "Following" server-side
+                            # before the next tap.
+                            p.wait_for_timeout(random.uniform(1500, 2500))
+                            break
+                        except Exception:
+                            pass
+                    if tapped:
+                        break
+                if not tapped:
+                    # The suggested rail can render a beat after the feed does.
+                    p.wait_for_timeout(1500)
+
+            self.log(f'[👥] Follow pass complete: followed {followed} suggested account(s).')
+            return followed
+        except Exception as exc:
+            self.log(f'[⚠️] Note on follow suggested: {exc}')
+            return 0

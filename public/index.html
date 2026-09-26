@@ -3,11 +3,44 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nova Browser — Meta &amp; Instagram Creator</title>
+  <title>Nova Browser — Meta Account Creator</title>
   <!-- Icons: non-blocking (no render-blocking CDN round-trip; keeps the UI
        responsive even when offline). Google Fonts removed in favour of the
        system font stack (see styles.css) so first paint never waits on a CDN. -->
   <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
+  <!-- Tailwind (VENDORED locally - meta_auto_ai used the CDN, which leaves the
+       whole dashboard unstyled on an offline machine). Same config as meta_auto_ai. -->
+  <script src="js/tailwind.js"></script>
+  <script>
+    if (window.tailwind) {
+      tailwind.config = {
+        darkMode: 'class',
+        // CRITICAL: meta_creator already has a full hand-written stylesheet
+        // (public/styles.css). Tailwind's Preflight is a global CSS reset that
+        // would clobber it — observed: the Meta/IG Creator "Parallel"/"Target"
+        // inputs rendered as empty white boxes because Preflight + the forms
+        // plugin restyled every <input>. Disabling preflight keeps all the
+        // utility classes (bg-[#111726], rounded-xl, text-slate-400, ...) that
+        // the TG panel copies from meta_auto_ai, without touching the rest.
+        corePlugins: { preflight: false },
+        theme: {
+          extend: {
+            colors: {
+              brand: {
+                dark: '#0a0d14', card: '#111622', cardBorder: '#1c2438',
+                accent: '#3b82f6', highlight: '#06b6d4', terminal: '#07090e'
+              }
+            },
+            fontFamily: {
+              sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+              mono: ['JetBrains Mono', 'Fira Code', 'Menlo', 'monospace']
+            }
+          }
+        }
+      };
+    }
+  </script>
+
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" media="print" onload="this.media='all'">
   <noscript><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css"></noscript>
   <link rel="stylesheet" href="styles.css">
@@ -28,24 +61,34 @@
 
       <nav class="sidebar-nav">
         <div class="nav-section-title">SETTINGS</div>
-        <button class="nav-item" id="nav-item-global-pass" type="button" title="One password for every created account (Meta + Instagram)">
+        <button class="nav-item" id="nav-item-global-pass" type="button" title="One password for every created account">
           <i class="fa-solid fa-key" style="color: var(--accent-cyan);"></i>
           <span>Global Password</span>
           <span id="global-pass-status" class="nav-pill-status" style="margin-left: auto; font-size: 0.68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: rgba(148, 163, 184, 0.15); color: #94a3b8;">Not set</span>
         </button>
 
         <div class="nav-section-title">WORKSPACE</div>
-        <button class="nav-item active" data-view="view-meta-creator" title="Create Meta (Facebook) accounts only">
+        <button class="nav-item active" data-view="view-meta-creator" title="Create Meta accounts">
           <i class="fa-brands fa-meta" style="color: #0081fb;"></i>
           <span>Meta Creator</span>
           <span id="metainsta-badge-meta" class="nav-pill nav-pill--tool">0</span>
         </button>
-        <button class="nav-item" data-view="view-ig-creator" title="Create Meta accounts and join Instagram in the same session">
+        <button class="nav-item" data-view="view-ig-creator" title="Create Instagram accounts (via Meta signup)">
           <i class="fa-brands fa-instagram" style="color: #f472b6;"></i>
           <span>Instagram Creator</span>
           <span id="metainsta-badge-ig" class="nav-pill nav-pill--tool">0</span>
         </button>
 
+        <button class="nav-item" data-view="view-tg-classic" title="TG Classic: Meta → Instagram → Taskly submit">
+          <i class="fa-brands fa-telegram" style="color: #229ED9;"></i>
+          <span>TG Classic</span>
+          <span id="metainsta-badge-tg" class="nav-pill nav-pill--tool">0</span>
+        </button>
+        <div class="nav-section-title">HELP</div>
+        <button class="nav-item" data-view="view-guide" title="Telegram setup guide — create api_id / api_hash">
+          <i class="fa-solid fa-book-open" style="color: #06b6d4;"></i>
+          <span>Setup Guide</span>
+        </button>
         <div class="nav-section-title">LICENSE &amp; SECURITY</div>
         <button class="nav-item" id="nav-item-license" type="button" title="View / Activate License">
           <i class="fa-solid fa-shield-halved" style="color: #10b981;"></i>
@@ -86,6 +129,87 @@
         <section id="view-ig-creator" class="view-panel">
           <div class="creator-mount" data-kind="ig"></div>
         </section>
+        <!-- ================= VIEW: TG CLASSIC ================= -->
+        <section id="view-tg-classic" class="view-panel">
+          <!-- NOT class="creator-mount": nova-meta-insta.js claims every
+               .creator-mount and defaults unknown data-kind to "meta", which
+               rendered the Meta Creator UI inside this panel. -->
+          <div id="tg-classic-root"></div>
+        </section>
+
+        <!-- ================= VIEW: SETUP GUIDE ================= -->
+        <section id="view-guide" class="view-panel" aria-label="Telegram setup guide">
+          <div class="page-title-box">
+            <div class="page-title-row">
+              <div>
+                <h2><i class="fa-solid fa-book-open" style="color: var(--accent-cyan);"></i> Telegram Setup Guide</h2>
+                <p>One-time setup: create a free Telegram API app to get your <code>api_id</code> and <code>api_hash</code> for &ldquo;+ Add MTProto&rdquo;.</p>
+              </div>
+              <div class="page-title-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="guide-back-tg"><i class="fa-solid fa-arrow-left"></i> Back to TG Classic</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-panel" style="padding:1.35rem 1.5rem;">
+            <div class="creator-service" style="max-width:none;margin-bottom:1.1rem;">
+              <div class="creator-service-title"><i class="fa-solid fa-circle-info" style="color:var(--accent-cyan);"></i> Before you start</div>
+              <div class="creator-option-hint" style="line-height:1.6;">
+                <code>api_id</code> and <code>api_hash</code> identify the <b>application</b>, not the account &mdash;
+                one pair works for every Telegram account you add. Keep it private.
+              </div>
+            </div>
+
+            <div class="tsg-step">
+              <div class="tsg-step-text">
+                <h3><span class="tsg-step-num">1</span> Log in to my.telegram.org</h3>
+                <p>Open <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a> and enter your
+                  phone number in international format. Telegram sends the login code <b>inside the Telegram app</b>,
+                  not by SMS &mdash; then press <b>Next</b>.</p>
+              </div>
+              <a class="tsg-step-shot" href="guide/mtproto/1-login.png" target="_blank" rel="noopener" title="Open full size">
+                <img src="guide/mtproto/1-login.png" alt="my.telegram.org login screen with the phone number field"></a>
+            </div>
+
+            <div class="tsg-step">
+              <div class="tsg-step-text">
+                <h3><span class="tsg-step-num">2</span> Open API development tools</h3>
+                <p>On the &ldquo;Your Telegram Core&rdquo; page, click <b>API development tools</b>.</p>
+              </div>
+              <a class="tsg-step-shot" href="guide/mtproto/2-core.png" target="_blank" rel="noopener" title="Open full size">
+                <img src="guide/mtproto/2-core.png" alt="Your Telegram Core page with the API development tools link"></a>
+            </div>
+
+            <div class="tsg-step">
+              <div class="tsg-step-text">
+                <h3><span class="tsg-step-num">3</span> Create the application</h3>
+                <p>Fill <b>App title</b> (e.g. <code>My Meta</code>) and <b>Short name</b> (e.g. <code>mymeta</code>),
+                  leave <b>Description</b> empty, <b>leave the <code>URL</code> field empty</b> and choose
+                  <b>Platform &rarr; Desktop</b>. Then click <b>Create application</b> and copy the
+                  <code>api_id</code> and <code>api_hash</code> it shows.</p>
+                <div class="creator-option-hint" style="margin-top:.5rem;">
+                  <i class="fa-solid fa-triangle-exclamation" style="color:var(--accent-amber);"></i>
+                  Choosing another platform (e.g. Android) can make the sign-in fail.
+                </div>
+              </div>
+              <a class="tsg-step-shot" href="guide/mtproto/4-desktop.png" target="_blank" rel="noopener" title="Open full size">
+                <img src="guide/mtproto/4-desktop.png" alt="Application form filled in with the URL left empty and Platform set to Desktop"></a>
+            </div>
+          </div>
+
+          <div class="card-panel" style="margin-top:1rem;display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+            <div class="creator-engine-icon" style="background:linear-gradient(135deg,#ef4444,#b91c1c);box-shadow:none;">
+              <i class="fa-brands fa-youtube"></i>
+            </div>
+            <div style="flex:1;min-width:220px;">
+              <strong style="font-size:.9rem;">Video reference</strong>
+              <div class="creator-option-hint">How to get Telegram <code>api_id</code> &amp; <code>api_hash</code> &mdash; full walkthrough.</div>
+            </div>
+            <a class="btn btn-primary btn-sm" href="https://www.youtube.com/watch?v=3qjdNRR79E4" target="_blank" rel="noopener">
+              <i class="fa-solid fa-play"></i> Watch on YouTube</a>
+          </div>
+        </section>
+
       </main>
     </div>
   </div>
@@ -106,7 +230,7 @@
             <input type="password" id="input-global-password" class="form-control" autocomplete="new-password" placeholder="leave empty = auto" style="width: 100%;">
           </div>
           <div style="font-size: 0.75rem; color: var(--text-dim);">
-            Used for every account created after saving (Meta + Instagram). Leave empty to go back to auto-generated passwords.
+            Used for every account created after saving. Leave empty to go back to auto-generated passwords.
           </div>
         </div>
         <div class="modal-footer" style="padding: 1rem 1.5rem; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end; gap: 0.75rem;">
@@ -233,8 +357,102 @@
 
   <div id="toast-container" class="toast-shelf"></div>
 
+
+  <!-- ==================================================================== -->
+  <!-- MTProto (Telethon) login modal — phone -> code -> verify. No browser. -->
+  <!-- Mirrors meta_auto_ai's mtprotoModal, incl. the conditional Step 0 for -->
+  <!-- api_id/api_hash (shown only when data/tg_mtproto.json is missing).    -->
+  <!-- ==================================================================== -->
+  <!-- ==================================================================== -->
+  <!-- Add Telegram account (MTProto / Telethon) - no browser window.         -->
+  <!-- Phone -> code -> verify. Step 1 (api_id/api_hash) shows only when the  -->
+  <!-- credentials are missing; one pair serves every account.                -->
+  <!-- ==================================================================== -->
+  <div id="mtprotoModal" class="modal-overlay" aria-hidden="true" role="dialog" aria-modal="true">
+    <div class="modal-box" style="max-width:480px;padding:20px;">
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">
+        <i class="fa-solid fa-bolt" style="color:var(--accent-amber);font-size:15px;"></i>
+        <h3 class="panel-header" style="margin:0;font-size:15px;">Add Telegram account</h3>
+      </div>
+      <p class="creator-option-hint" style="margin:0 0 14px;">
+        Signs in over Telegram&rsquo;s own protocol (Telethon) &mdash; no browser window opens.
+      </p>
+
+      <div id="mtCredsWrap" style="display:none;background:rgba(245,158,11,.06);
+           border:1px solid rgba(245,158,11,.35);border-radius:var(--radius-md);
+           padding:12px 14px;margin-bottom:14px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+          <span class="badge-pill" style="background:var(--accent-amber);color:#1a1204;">STEP 1</span>
+          <strong style="font-size:12px;color:var(--text-main);">Telegram API credentials (free, once)</strong>
+        </div>
+        <ol style="margin:0 0 10px 16px;padding:0;font-size:12px;line-height:1.7;color:var(--text-dim);">
+          <li>Open <a href="https://my.telegram.org" target="_blank" rel="noopener" style="color:var(--accent-cyan);">my.telegram.org</a> and log in with the phone number.</li>
+          <li>Click <b style="color:var(--text-main);">API development tools</b>.</li>
+          <li>Fill <b style="color:var(--text-main);">App title</b> and <b style="color:var(--text-main);">Short name</b> (e.g. <code>My Meta</code> / <code>mymeta</code>).</li>
+          <li><b style="color:var(--text-main);">Leave <code>URL</code> empty</b> and set <b style="color:var(--text-main);">Platform</b> to <b style="color:var(--accent-cyan);">Desktop</b>.</li>
+          <li>Click <b style="color:var(--text-main);">Create application</b>, then copy the two values below. <b style="color:var(--text-main);">One pair works for every account</b> &mdash; it identifies the app, not you.</li>
+        </ol>
+
+        <button type="button" id="mtOpenGuide" class="btn btn-secondary btn-sm" style="margin-bottom:10px;">
+          <i class="fa-solid fa-book-open"></i> Open the full setup guide (screenshots + video)
+        </button>
+        <input id="mtApiId" class="form-control" inputmode="numeric" autocomplete="off" placeholder="api_id  (a number, e.g. 1234567)" style="margin-bottom:8px;">
+        <input id="mtApiHash" class="form-control" autocomplete="off" placeholder="api_hash  (32 characters)" style="margin-bottom:10px;">
+        <button type="button" id="mtSaveCreds" class="btn btn-primary btn-sm">Save credentials</button>
+        <div id="mtCredsStatus" class="creator-option-hint" style="margin-top:8px;"></div>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span class="badge-pill" style="background:var(--accent-purple);color:#fff;">STEP 2</span>
+        <strong style="font-size:12px;color:var(--text-main);">Add the account</strong>
+      </div>
+
+      <div class="creator-field" style="margin-bottom:10px;">
+        <label for="mtPhone">Phone number (with country code)</label>
+        <input id="mtPhone" class="form-control" type="tel" autocomplete="off" placeholder="+8801400732551">
+      </div>
+      <div class="creator-field" style="margin-bottom:12px;">
+        <label for="mtLabel">Label <span style="font-weight:400;color:var(--text-muted);">(optional)</span></label>
+        <input id="mtLabel" class="form-control" type="text" autocomplete="off" placeholder="e.g. TG #4">
+      </div>
+
+      <button type="button" id="mtSendCode" class="btn btn-primary btn-sm">
+        <i class="fa-solid fa-paper-plane"></i> Send code
+      </button>
+      <span id="mtStep" class="creator-option-hint" style="margin-left:8px;"></span>
+
+      <div id="mtCodeWrap" style="display:none;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-color);">
+        <p class="creator-option-hint" style="margin:0 0 10px;">
+          Telegram sends the code <b style="color:var(--text-main);">inside the Telegram app</b>
+          (from the &ldquo;Telegram&rdquo; service account) &mdash; not by SMS.
+        </p>
+        <div class="creator-field" style="margin-bottom:10px;">
+          <label for="mtCode">Login code</label>
+          <input id="mtCode" class="form-control" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" style="letter-spacing:.25em;">
+        </div>
+        <div class="creator-field" style="margin-bottom:12px;">
+          <label for="mtPassword">2FA password <span style="font-weight:400;color:var(--text-muted);">(only if enabled)</span></label>
+          <input id="mtPassword" class="form-control" type="password" autocomplete="off" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;">
+        </div>
+        <button type="button" id="mtVerify" class="btn btn-primary btn-sm">
+          <i class="fa-solid fa-check"></i> Verify &amp; add account
+        </button>
+      </div>
+
+      <div id="mtStatus" class="creator-option-hint" style="margin:14px 0 0;min-height:1rem;"></div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--border-color);">
+        <button type="button" id="mtEditCreds" class="btn btn-secondary btn-sm">API credentials</button>
+        <button type="button" id="mtCancel" class="btn btn-secondary btn-sm">Close</button>
+      </div>
+    </div>
+  </div>
+
+
   <script src="js/nova-core.js" defer></script>
   <script src="js/nova-license.js" defer></script>
   <script src="js/nova-meta-insta.js" defer></script>
+  <script src="js/nova-tg.js" defer></script>
 </body>
 </html>

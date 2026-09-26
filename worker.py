@@ -40,6 +40,7 @@ from ai_config import (
     run,
 )
 import store
+from pipelines.telegram import tg_worker  # coupled cycle (TG Classic)
 
 # Ensure Playwright browser points at bundled anti-detect browsers
 try:
@@ -50,18 +51,110 @@ except Exception:
 _session_count = 0
 _session_lock = threading.Lock()
 _stop_requested = threading.Event()
+# Alias used by the ported TG Classic code (coupled_loop + the throttle
+# helpers reference `_stop`, meta_auto_ai's name for the same event).
+# Aliasing means meta_creator's OWN shutdown path (_stop_requested.set())
+# also stops the coupled loop — one signal, two names. Without this the
+# worker died instantly: "name '_stop' is not defined".
+_stop = _stop_requested
+
+# ---- Globals required by the ported TG Classic code ----
+# coupled_loop + the throttle/wall helpers were ported from meta_auto_ai
+# and reference these module-level names. Without them the worker died at
+# startup: "name '_cooldown_lock' is not defined".
+_PHONE_WALL_MARKERS = ("mobile number required", "what's your mobile number")
+
+_THROTTLE_MARKERS = ("rate-limited", "rate limit", "rendered blank",
+                     "throttled", "bounced to instagram", "429", "1675004",
+                     "can't find account",
+                     # Accounts Center / session-loss signatures seen in the
+                     # 2026-09-20 run: IG bootstrap throttling and the
+                     # anti-automation contact-point challenge. Each cycle that
+                     # hits one of these should cool the whole pool down, not
+                     # feed another fresh Meta account into the same wall.
+                     "could not reach accounts center", "update_risky_contactpoint",
+                     "could not retrieve 2fa secret key", "ig login wall",
+                     # Fresh-account session throttle (observed 2026-09-21): IG
+                     # bounces settings/AC to /accounts/login/?__coig_login=1 and
+                     # the API answers require_login:"Please wait a few minutes".
+                     # This is the strongest velocity signal — cool the whole pool.
+                     "__coig_login", "require_login", "please wait a few minutes",
+                     # Risky-contact-point gate (IG demands a different email) —
+                     # a risk signal; cool the pool instead of hammering.
+                     "email_risky_contactpoint")
+
+_cooldown_lock = threading.Lock()
+
+_ig_cooldown_until = 0.0
+
+def _sleep_stop(secs) -> None:
+    """Stop-aware sleep in small slices."""
+    end = time.time() + max(0.0, float(secs))
+    while not _stop.is_set() and time.time() < end:
+        time.sleep(min(0.5, max(0.0, end - time.time())))
+
+
+
+
+def _low_end_enabled() -> bool:
+    return os.environ.get("INSTA_LOW_END", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _safe_concurrency(requested: int) -> int:
+    """Clamp Parallel for weak boxes only when INSTA_LOW_END=1.
+
+    Each headless slot is ~300MB + shared Whisper (~75-150MB). Safe slots
+    = (avail_MB - 800MB OS/Python) // 350MB, capped by CPU (1 slot per
+    ~2 CPUs on weak boxes), hard-capped 1-3 for low-end. Set
+    INSTA_NO_CLAMP=1 to keep the exact requested value.
+    """
+    req = max(1, min(int(requested), 50))
+    if not _low_end_enabled():
+        return req
+    if os.environ.get("INSTA_NO_CLAMP", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return req
+    safe = 3
+    try:
+        import multiprocessing
+        cpu = multiprocessing.cpu_count() or 4
+        safe = max(1, min(safe, max(1, cpu // 2)))
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail_mb = int(line.split()[1]) // 1024
+                    mem_slots = max(1, (avail_mb - 800) // 350)
+                    safe = max(1, min(safe, mem_slots))
+                    break
+    except Exception:
+        pass
+    if safe < req:
+        print(f"[*] Low-end preset (INSTA_LOW_END=1): clamping Parallel {req} -> {safe} "
+              f"(RAM/CPU safe; INSTA_NO_CLAMP=1 to override).")
+        emit_event({"type": "log", "message": f"[Low-end] Parallel clamped {req} -> {safe}."})
+    return max(1, min(req, safe))
 
 
 def _resolve_start_stagger_ms(value=None) -> int:
-    """Smooth the initial browser launch burst without changing Parallel."""
+    """Smooth the initial browser launch burst without changing Parallel.
+
+    Nova parity: Nova-Browser staggers creator threads by 1.5s
+    (core/metaInstaWorker.py:1205). The old Linux default 0 launched all
+    20 Chromiums at once (thundering herd). Default 1500ms per slot now.
+    Override with INSTA_START_STAGGER_MS=0 for the old burst behavior.
+    """
     if value is None:
         value = os.environ.get("INSTA_START_STAGGER_MS")
     if value is None or str(value).strip() == "":
-        value = 250 if os.name == "nt" else 0
+        value = 1500 if os.name != "nt" else 500
     try:
         value = int(value)
     except (TypeError, ValueError):
-        value = 250 if os.name == "nt" else 0
+        value = 1500 if os.name != "nt" else 500
     return max(0, min(value, 10000))
 
 
@@ -159,6 +252,34 @@ class AISlotWorker:
                 "status": "storing",
                 "detail": "Account confirmed! Storing...",
             })
+        elif "instagram: opening login" in clean_text.lower():
+            emit_event({
+                "type": "slot_event",
+                "slot_id": self.slot_id,
+                "status": "login",
+                "detail": "Opening Instagram login...",
+            })
+        elif "meta profile card" in clean_text.lower():
+            emit_event({
+                "type": "slot_event",
+                "slot_id": self.slot_id,
+                "status": "linking",
+                "detail": "Connecting Meta card to Instagram...",
+            })
+        elif "instagram: joining" in clean_text.lower() or "joining with" in clean_text.lower():
+            emit_event({
+                "type": "slot_event",
+                "slot_id": self.slot_id,
+                "status": "joining",
+                "detail": "Joining Instagram...",
+            })
+        elif "post-registration onboarding" in clean_text.lower():
+            emit_event({
+                "type": "slot_event",
+                "slot_id": self.slot_id,
+                "status": "onboarding",
+                "detail": "Finalizing onboarding & follow...",
+            })
 
         emit_event(evt)
 
@@ -194,7 +315,7 @@ class AISlotWorker:
 
 
 def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "") -> tuple[bool, str]:
-    """Execute one Meta Account Creation cycle (`meta` = Meta only, `meta-ig` = Meta + Instagram join)."""
+    """Execute one Meta Account Creation cycle."""
     from runner import MetaInstaRunner
 
     cycle_started = time.monotonic()
@@ -205,6 +326,11 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
         captcha_mode=captcha_mode,
         new_password=new_password or None,
         new_username=new_username or None,
+        # Meta/Instagram Creator is its own pipeline. Without this the runner
+        # inherits MetaBaseMixin's default target="telegram", so every Meta/IG
+        # account landed in the Telegram ledger and the TG Classic tab counted
+        # accounts it never created (meta_auto_ai isolates pipelines by target).
+        target="meta",
     )
 
     emit_event({
@@ -215,11 +341,10 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
     })
 
     try:
-        # Phase: Meta creation (parked as MetaCreated), plus the Instagram
-        # join when mode == "meta-ig" (parked as Created with IG session).
-        meta_only = (mode != "meta-ig")
+        # Full Meta -> Instagram creation flow (always proceed to Instagram join unless explicitly meta-only)
+        meta_only = (mode == "meta-only")
         rec_id = runner.create_account(twofa=False, meta_only=meta_only)
-        worker.emit(f"✅ Successfully created {'Meta→IG' if not meta_only else 'Meta'} account: {runner.email}")
+        worker.emit(f"✅ Successfully created {'Meta' if meta_only else 'Instagram'} account: @{runner.ig_username or runner.username or runner.email}")
         duration_ms = int((time.monotonic() - cycle_started) * 1000)
         emit_event({
             "type": "slot_event",
@@ -355,6 +480,159 @@ def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: i
             time.sleep(0.5)
 
 
+
+# ============================================================================
+# TG Classic — coupled per-task loop (Meta -> TG task -> IG -> submit)
+# Ported from meta_auto_ai/worker.py. Meta/IG half is shared code; only
+# the TG task acquisition + submit gate are telegram-specific.
+# ============================================================================
+def _wait_ig_cooldown() -> None:
+    """Block while a pipeline-wide IG cooldown is active (stop-aware)."""
+    while not _stop.is_set():
+        with _cooldown_lock:
+            remaining = _ig_cooldown_until - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 1.0))
+def _note_phone_wall(slot_id) -> bool:
+    """Record a phone-wall hit (split mode).
+
+    Returns True when the breaker trips — the caller should then take the
+    shared cooldown (the wall looks IP-wide, not account-specific).
+    """
+    global _phone_wall_streak
+    with _cooldown_lock:
+        _phone_wall_streak += 1
+        n = _phone_wall_streak
+        tripped = n >= IG_WALL_BREAKER_N
+        if tripped:
+            _phone_wall_streak = 0
+    if tripped:
+        emit_event({"type": "log", "slot_id": slot_id,
+                    "message": f"[throttle] {n} Instagram phone-walls in a row — looks IP-wide, cooling the pool (breaker {IG_WALL_BREAKER_N})"})
+        return True
+    emit_event({"type": "log", "slot_id": slot_id,
+                "message": f"[wall] Instagram phone wall {n}/{IG_WALL_BREAKER_N} — skipping this account; other slots keep working"})
+    return False
+def _note_ig_throttle(slot_id, detail="") -> int:
+    """Record a throttle hit and extend the shared cooldown deadline."""
+    global _ig_cooldown_until
+    with _cooldown_lock:
+        fails = getattr(coupled_loop, "_throttle_fails", 0) + 1
+        coupled_loop._throttle_fails = fails
+        backoff = min(60 * (2 ** min(fails - 1, 3)), 600)
+        _ig_cooldown_until = max(_ig_cooldown_until, time.time() + backoff)
+    emit_event({"type": "log", "slot_id": slot_id,
+                "message": f"[throttle] IG cooldown {backoff}s (streak {fails}) — ALL slots pause"})
+    print(f"[throttle] IG cooldown {backoff}s (streak {fails}) — ALL slots pause", flush=True)
+    return backoff
+def _clear_ig_throttle() -> None:
+    global _phone_wall_streak
+    coupled_loop._throttle_fails = 0
+    _phone_wall_streak = 0
+def _looks_throttled(detail) -> bool:
+    """True when a cycle failure smells like platform throttling (back off)."""
+    low = str(detail or "").lower()
+    if any(m in low for m in _THROTTLE_MARKERS):
+        return True
+    # Legacy: with IG_WALL_SPLIT=0 a phone wall still cools the whole pool.
+    if not IG_WALL_SPLIT:
+        return any(m in low for m in _PHONE_WALL_MARKERS)
+    return False
+def _is_phone_wall(detail) -> bool:
+    """True when the failure is Instagram's "What's your mobile number?" gate."""
+    low = str(detail or "").lower()
+    return any(m in low for m in _PHONE_WALL_MARKERS)
+_phone_wall_streak = 0
+
+TG_DEFAULT_TASK = "Create Inst (No mail)"
+
+
+def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
+                 tg_bot="taskly", captcha_mode="extension", mail_provider="mailtd",
+                 add_email=False, emu_ig=False, emu_devices=3, emu_apk=None):
+    """Coupled per-task loop: ONE browser does Meta → TG task → IG → submit.
+
+    N slots run in parallel (each opens its own Meta/IG browser up front);
+    the 2 TG profiles serialize only the TG-task + IG half via short,
+    stop-aware lease waits. Each completed task closes its browser and
+    releases its lease before the next cycle opens a fresh one.
+
+    Each cycle runs in a FRESH thread: strict mode leaves failed browsers
+    OPEN, and a second Playwright driver in the same thread collides with
+    the orphaned one (greenlet "Sync API inside asyncio loop" death spiral
+    spawning a profile dir every few seconds). A joined per-cycle thread
+    bounds that damage.
+    """
+    def _once():
+        # Each cycle runs in its own thread → close that thread's SQLite
+        # connection on exit so FDs don't churn over a long run.
+        try:
+            return _once_inner()
+        finally:
+            try:
+                import db as _db
+                _db.close_local_connection()
+            except Exception:
+                pass
+
+    def _once_inner():
+        with _session_lock:
+            global _session_count
+            if target and _session_count >= target:
+                return "done"
+            _session_count += 1
+        try:
+            ok, detail = tg_worker.run_tg_coupled_cycle(
+                AISlotWorker, slot_id=slot_id, is_headless=is_headless,
+                tg_task=task, tg_bot=tg_bot,
+                captcha_mode=captcha_mode, mail_provider=mail_provider,
+                add_email=add_email, emu_ig=emu_ig,
+                emu_devices=emu_devices, emu_apk=emu_apk,
+                stop_event=_stop)
+            err_text = "" if ok else str(detail or "")
+        except Exception as exc:
+            ok, err_text = False, str(exc)
+            emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error", "detail": f"Error: {exc}"})
+        if not ok:
+            if err_text.strip().lower() == "stopped":
+                with _session_lock:
+                    _session_count = max(0, _session_count - 1)
+                return "stopped"
+            with _session_lock:
+                _session_count = max(0, _session_count - 1)
+            if IG_WALL_SPLIT and _is_phone_wall(err_text):
+                # Per-account/region gate: skip this account without pausing the
+                # pool. Only cool everyone if the breaker trips (IP-wide).
+                if _note_phone_wall(slot_id):
+                    _note_ig_throttle(slot_id, err_text)
+                    return "throttled"
+                if IG_WALL_SLOT_BACKOFF:
+                    _sleep_stop(IG_WALL_SLOT_BACKOFF)
+                return "ok"
+            if _looks_throttled(err_text):
+                # Pipeline-wide pause: extend the SHARED deadline; the top-of-loop
+                # gate makes every slot wait, so a fresh Meta account isn't fed
+                # into the same wall.
+                _note_ig_throttle(slot_id, err_text)
+                return "throttled"
+        _clear_ig_throttle()
+        return "ok"
+
+    while not _stop.is_set():
+        _wait_ig_cooldown()
+        holder = {}
+        t = threading.Thread(target=lambda: holder.setdefault("r", _once()), daemon=True)
+        t.start()
+        while t.is_alive():
+            t.join(timeout=1.0)
+        if holder.get("r") in ("done", "stopped"):
+            break
+        for _ in range(int(delay * 2)):
+            if _stop.is_set():
+                break
+            time.sleep(0.5)
+
 def main():
     parser = argparse.ArgumentParser(description="MetaAuto Linux — Dedicated Meta Account Creator")
     parser.add_argument("--concurrency", type=int, default=1, help="Number of concurrent worker slots")
@@ -363,16 +641,29 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Run in headless browser mode")
     parser.add_argument("--mail", type=str, default="mailtd", choices=("mailtd",), help="Mailbox provider (mail.td only)")
     parser.add_argument("--captcha", type=str, default="extension", choices=Urls.CAPTCHA_MODES, help="Captcha solving mode")
-    parser.add_argument("--mode", type=str, default="meta", choices=["meta", "meta-ig"], help="Creation mode: Meta account only, or Meta + Instagram join")
+    parser.add_argument("--mode", type=str, default="meta", choices=["meta", "meta-ig", "meta-only"], help="Creation mode: Meta account only, or Meta + Instagram join")
+    parser.add_argument("--coupled", action="store_true",
+                        help="TG Classic: one browser per task (Meta -> TG task -> IG -> submit)")
+    parser.add_argument("--twofa", action="store_true", help="Enable 2FA in the IG half")
+    parser.add_argument("--tg-task", type=str, default=TG_DEFAULT_TASK, help="Taskly task name")
+    parser.add_argument("--tg-bot", type=str, default="taskly", choices=("taskly","paygo"), help="Task bot")
+    parser.add_argument("--add-email", action="store_true",
+                        help="telegram coupled: after password+2FA, add a fresh mail.td email in Accounts Center")
+    parser.add_argument("--tg-profile", type=str, default=None, help="Force one Telegram profile id")
     parser.add_argument("--start-stagger-ms", type=int, default=None,
                         help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
 
     args = parser.parse_args()
 
-    concurrency = max(1, min(args.concurrency, 50))
+    concurrency = _safe_concurrency(args.concurrency)
     target = max(0, args.target)
     delay = max(1, args.delay)
     headless = args.headless
+    if _low_end_enabled() and not headless:
+        print("[*] Low-end preset: headed mode costs ~30% more RAM/CPU — use Headless for max speed.")
+    if _low_end_enabled() and args.captcha == "extension":
+        print("[*] Low-end tip: --captcha audio uses headless-shell (~100MB lighter/slot than "
+              "full Chromium for the Visual AI extension) and Vosk-first STT.")
     start_stagger_ms = _resolve_start_stagger_ms(args.start_stagger_ms)
 
     # Global password (META_NEW_PASSWORD env from server.js): same password
@@ -412,15 +703,32 @@ def main():
         print(f"[License] Check error: {exc}")
         sys.exit(1)
 
-    # Keep the user-selected concurrency exactly as requested.  The launcher
-    # applies low-memory browser flags and cleans up completed profiles; the
-    # worker does not impose a second RAM policy.
-    print(f"[*] Concurrency policy: user-selected value {concurrency} will be used without RAM clamping.")
+    # Concurrency policy: exact user value by default; only INSTA_LOW_END=1
+    # clamps (see _safe_concurrency). The launcher applies low-memory
+    # browser flags and cleans up completed profiles.
+    print(f"[*] Concurrency policy: Parallel={concurrency} (low-end clamp "
+          f"{'on' if _low_end_enabled() else 'off'}; INSTA_FAST_MODE={os.environ.get('INSTA_FAST_MODE', '1')}).")
     print(f"[*] Startup stagger: {start_stagger_ms}ms per slot (Parallel unchanged).")
 
     def sig_handler(signum, frame):
         _stop_requested.set()
         emit_event({"type": "log", "message": "Stop signal received, shutting down gracefully..."})
+        # TG Classic parity (auto_ai worker._sig_handler): drop warm bot owners
+        # and free any lease so a restart is not blocked. Best-effort — a
+        # Windows TerminateProcess never reaches this, which is why the coupled
+        # startup below also self-heals with tg_manager.reset_all().
+        try:
+            from tg_bot import PooledTelegramBot
+            from mtproto_bot import MtprotoPooledBot
+            PooledTelegramBot.drop_all()
+            MtprotoPooledBot.drop_all()
+        except Exception:
+            pass
+        try:
+            from tg_accounts import tg_manager
+            tg_manager.reset_all()
+        except Exception:
+            pass
 
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
@@ -438,21 +746,36 @@ def main():
 
     print(f"[*] Meta Account Creator initialized: concurrency={concurrency}, target={target}, headless={headless}, mode={args.mode}, global_pw={'on' if global_password else 'off'}, fixed_user={'on' if global_username else 'off'}")
 
+    # --coupled runs TG Classic (Meta -> TG task -> IG -> submit) instead of the
+    # plain Meta creator. The existing slot_loop path is untouched, so omitting
+    # --coupled keeps the previous behaviour exactly.
+    _loop = coupled_loop if getattr(args, "coupled", False) else slot_loop
+    # Each loop takes a DIFFERENT kwarg set. Passing the union raised
+    # "coupled_loop() got an unexpected keyword argument 'mode'" inside the
+    # ThreadPoolExecutor, so the worker died before opening a browser and the
+    # UI just sat at IDLE with no tab. Build the kwargs per loop.
+    _shared = dict(is_headless=headless, target=target, delay=delay,
+                   mail_provider=args.mail, captcha_mode=args.captcha)
+    if _loop is slot_loop:
+        _shared.update(mode=args.mode, new_password=global_password,
+                       new_username=global_username, start_stagger_ms=start_stagger_ms)
+    else:
+        # coupled_loop drives Meta -> TG task -> IG -> submit; credentials come
+        # from the leased profile, and there is no fixed username/password.
+        _shared.update(task=args.tg_task, tg_bot=args.tg_bot, add_email=args.add_email)
+    # Self-heal TG leases. The Windows Stop button kills the worker with
+    # TerminateProcess, so the coupled cycle's `finally: tg_manager.release`
+    # never runs and the profile stays `busy` until LEASE_TTL (20 min). Reset
+    # stale leases here so the next start can lease immediately.
+    if _loop is coupled_loop:
+        try:
+            from tg_accounts import tg_manager
+            tg_manager.reset_all()
+        except Exception:
+            pass
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [
-            executor.submit(
-                slot_loop,
-                slot_id=i + 1,
-                is_headless=headless,
-                target=target,
-                delay=delay,
-                mail_provider=args.mail,
-                captcha_mode=args.captcha,
-                mode=args.mode,
-                new_password=global_password,
-                new_username=global_username,
-                start_stagger_ms=start_stagger_ms,
-            )
+            executor.submit(_loop, slot_id=i + 1, **_shared)
             for i in range(concurrency)
         ]
         for f in futures:
@@ -464,6 +787,16 @@ def main():
     emit_event({"type": "loop_stopped", "message": "All slots finished."})
     print("[*] Meta Account Creator stopped.")
 
+
+
+# Globals required by the ported TG Classic code. NOTE: these MUST be
+# assigned BEFORE the __main__ call below — running as a script executes
+# top-to-bottom, so globals placed after `main()` would not exist when the
+# coupled threads start ("NameError: IG_WALL_SPLIT is not defined").
+_HEADLESS = {"value": False}
+IG_WALL_SPLIT = os.environ.get("IG_WALL_SPLIT", "1").strip().lower() not in ("0", "false", "no")
+IG_WALL_BREAKER_N = max(1, int(os.environ.get("IG_WALL_BREAKER_N", "6") or 6))
+IG_WALL_SLOT_BACKOFF = max(0.0, float(os.environ.get("IG_WALL_SLOT_BACKOFF", "5") or 0))
 
 if __name__ == "__main__":
     main()

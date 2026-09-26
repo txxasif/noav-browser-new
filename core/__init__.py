@@ -26,6 +26,7 @@ from ig_flow import InstagramFlowMixin  # noqa: E402
 from .license_mgr import LicenseManager  # noqa: E402
 from .base import MetaBaseMixin  # noqa: E402
 from .captcha import CaptchaMixin  # noqa: E402
+from .telegram import TgMixin  # noqa: E402
 from .lifecycle import LifecycleMixin  # noqa: E402
 from .mailbox import MailboxMixin  # noqa: E402
 from .signup import SignupMixin  # noqa: E402
@@ -36,6 +37,7 @@ class MetaInstaRunner(
     MailboxMixin,
     SignupMixin,
     CaptchaMixin,
+    TgMixin,
     MetaBaseMixin,
     InstagramFlowMixin,
     run._MetaInstagramRunner,

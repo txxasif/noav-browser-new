@@ -155,7 +155,12 @@ TG_BOTS = {
         "id": "paygo",
         "name": "PayGoBot",
         "peer_id": "8249657346",
-        "username": "PayGoBot",
+        # MTProto resolves this @handle (the web path uses peer_id/url). The
+        # old "PayGoBot" handle now belongs to a DIFFERENT, silent bot
+        # (id 210540698) — resolving it returned no menu, so balance checks and
+        # MTProto PayGo submits hit the wrong chat. The real bot (peer
+        # 8249657346, display "PayGoBot") is @PayGoeasy_bot.
+        "username": "PayGoeasy_bot",
         "url": "https://web.telegram.org/a/#8249657346",
         "task_keyword": "Create Inst",
         # Strict: ONLY 🔥 Create Inst (2FA)
@@ -166,8 +171,8 @@ TG_BOTS = {
         },
     },
 }
-TG_DEFAULT_BOT = "both"
-TG_BOT_CHOICES = ("both", "taskly", "paygo")
+TG_DEFAULT_BOT = "taskly"
+TG_BOT_CHOICES = ("taskly", "paygo")
 
 
 def emit_event(evt: dict) -> None:

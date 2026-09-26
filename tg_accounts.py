@@ -409,6 +409,52 @@ class TGAccountManager:
             self.save()
             self._cv.notify_all()
 
+    def leased_ids(self):
+        """Ids + session/profile keys currently leased to a live cycle.
+
+        The warm bot pools (``PooledTelegramBot`` / ``MtprotoPooledBot``) must
+        never reap or drop these owners: a long IG phase (2FA grind,
+        scraping-warning recovery) holds no pool traffic for tens of minutes,
+        so idle-time eviction would murder a LIVE lease mid-task (observed
+        2026-09-24: mem-shed ``drop_all`` killed Slot #5's tg_5 owner at
+        03:56, its 05:12 ``submit_2fa_key`` then died unpacking the shutdown
+        sentinel). Returns every key shape the pools use: record ``id``,
+        ``session_file`` and ``profile_dir``.
+        """
+        with self._cv:
+            self._reload()
+            keys = set()
+            for a in self.accounts:
+                if a.get("status") == "busy":
+                    for k in (a.get("id"), a.get("session_file"),
+                              a.get("profile_dir")):
+                        if k:
+                            keys.add(str(k))
+                            try:
+                                keys.add(os.path.basename(str(k)))
+                            except Exception:
+                                pass
+            return keys
+
+    def heartbeat(self, tg_id):
+        """Refresh a live lease so LEASE_TTL never reclaims it mid-cycle.
+
+        Long IG phases (90-min 2FA grind observed 2026-09-24) otherwise exceed
+        the 20-min dead-worker reclaim and a second slot leases the SAME
+        profile — two cycles then interleave commands on one pool owner and
+        steal each other's replies. Best-effort; never raises.
+        """
+        try:
+            with self._cv:
+                self._reload()
+                for a in self.accounts:
+                    if a.get("id") == tg_id and a.get("status") == "busy":
+                        a["leased_at"] = time.time()
+                        self.save()
+                        break
+        except Exception:
+            pass
+
     def disable(self, tg_id, reason=None):
         """Take a profile out of rotation without deleting it.
 
@@ -546,11 +592,34 @@ class TGAccountManager:
             self._cv.notify_all()
             return True
 
+    def set_enabled(self, tg_id, enabled):
+        """Flip the per-profile task switch.
+
+        acquire() already skips ``enabled is False``, so a disabled profile is
+        simply never leased — it stays logged in and keeps its session, it just
+        stops receiving tasks. Refused while leased: disabling a profile mid-task
+        would let acquire() hand the same profile to a second worker.
+        """
+        with self._cv:
+            self._reload()
+            rec = next((a for a in self.accounts if a.get("id") == tg_id), None)
+            if rec is None:
+                raise KeyError(f"unknown Telegram profile: {tg_id}")
+            if rec.get("status") == "busy":
+                raise RuntimeError(f"{tg_id} is busy (leased by a worker); stop the engine first")
+            rec["enabled"] = bool(enabled)
+            self.save()
+            return rec.get("enabled")
+
     def remove(self, tg_id):
         with self._cv:
             self._reload()
             rec = next((a for a in self.accounts if a.get("id") == tg_id), None)
-            if rec is not None and rec.get("status") == "busy":
+            if rec is None:
+                # Report honestly — silently "succeeding" on an unknown id made a
+                # typo/typo'd API call look like a successful delete.
+                raise KeyError(f"unknown Telegram profile: {tg_id}")
+            if rec.get("status") == "busy":
                 raise RuntimeError(f"{tg_id} is busy (leased by a worker); stop the engine first")
             self.accounts = [a for a in self.accounts if a.get("id") != tg_id]
             self.save()

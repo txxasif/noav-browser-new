@@ -102,6 +102,21 @@ def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(value, maximum))
 
 
+def _low_end_enabled() -> bool:
+    """True for weak boxes (INSTA_LOW_END=1): tighter RAM/CPU preset.
+
+    Low-end = ~4GB RAM / <=4 CPU / HDD. Each headless Chromium is
+    ~150-350MB, so the saving comes from: 1 renderer process (not 3),
+    256MB V8 heap (not 512), no background throttling work, no crash
+    logging. Pair with --captcha audio (headless-shell, ~100MB lighter
+    per slot than the full Chromium needed for the Visual AI extension)
+    and Parallel 2-3.
+    """
+    return os.environ.get("INSTA_LOW_END", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
 def _pc_mode_enabled() -> bool:
     """Use the MetaAuto-AI PC-Mobile contract unless explicitly disabled."""
     raw = os.environ.get("PC_MODE", os.environ.get("META_PROFILE_MODE", "1"))
@@ -280,8 +295,12 @@ class EngineLaunchMixin:
         # SwiftShader anyway), a capped V8 heap and a renderer limit keep each
         # browser small; WebGL is still spoofed by the anti-detect init script.
         if os.environ.get("INSTA_LOW_MEM", "1") != "0":
-            renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 3, 1, 8)
-            v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 512, 128, 2048)
+            if _low_end_enabled():
+                renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 1, 1, 8)
+                v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 256, 128, 2048)
+            else:
+                renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 3, 1, 8)
+                v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 512, 128, 2048)
             args += [
                 "--disable-gpu",
                 "--disable-gpu-compositing",
@@ -290,6 +309,13 @@ class EngineLaunchMixin:
                 f"--js-flags=--max-old-space-size={v8_heap_mb}",
                 f"--renderer-process-limit={renderer_limit}",
             ]
+            if _low_end_enabled():
+                args += [
+                    "--disable-background-timer-throttling",
+                    "--disable-renderer-backgrounding",
+                    "--disable-logging",
+                    "--disable-crash-reporter",
+                ]
         # Suppress the "Chrome for Testing v… is only for automated testing"
         # infobar (CfT's "user education UI"). CfT reads a JSON config via
         # --chrome-for-testing-config; keys are camelCase (verified against

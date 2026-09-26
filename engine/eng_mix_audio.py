@@ -130,14 +130,33 @@ class EngineAudioMixin:
 
     def _recaptcha_frames(self, page):
         anchor = bframe = None
-        for f in page.frames:
-            u = (f.url or "").lower()
+        try:
+            frames = [page] + list(page.frames)
+        except Exception:
+            frames = [page]
+        seen = set()
+        frames = [f for f in frames if not (id(f) in seen or seen.add(id(f)))]
+        for f in frames:
+            try:
+                u = (f.url or "").lower()
+            except Exception:
+                u = ""
             if "recaptcha" not in u:
                 continue
             if "anchor" in u:
                 anchor = f
             if "bframe" in u:
                 bframe = f
+        # URL names vary between Chromium builds and can be absent behind a
+        # cross-origin fbsbx wrapper. Detect the anchor by its stable DOM id.
+        if anchor is None:
+            for f in frames:
+                try:
+                    if f.locator("#recaptcha-anchor").count() > 0:
+                        anchor = f
+                        break
+                except Exception:
+                    continue
         return anchor, bframe
 
     def _recaptcha_present(self, page):
@@ -191,7 +210,7 @@ class EngineAudioMixin:
                     if cb.count() > 0:
                         self._human_click_recaptcha(page, cb, timeout=6000)
                         page.wait_for_timeout(2000)
-                        if anchor.locator("#recaptcha-anchor").get_attribute("aria-checked") == "true":
+                        if self._recaptcha_anchor_checked(anchor):
                             self.log('<font color="#00FF00"><b>[✔] reCAPTCHA passed (no image challenge).</b></font>')
                             return True
                         break
@@ -204,7 +223,7 @@ class EngineAudioMixin:
         anchor, bframe = self._recaptcha_frames(page)
         if anchor is not None:
             try:
-                if anchor.locator("#recaptcha-anchor").get_attribute("aria-checked") == "true":
+                if self._recaptcha_anchor_checked(anchor):
                     self.log('<font color="#00FF00"><b>[✔] reCAPTCHA passed (no image challenge).</b></font>')
                     return True
             except Exception:
@@ -215,7 +234,7 @@ class EngineAudioMixin:
             if anchor is not None:
                 try:
                     cb = anchor.locator("#recaptcha-anchor")
-                    if cb.count() > 0 and cb.get_attribute("aria-checked") != "true":
+                    if cb.count() > 0 and not self._recaptcha_anchor_checked(anchor):
                         cb.click(force=True, timeout=4000)
                         page.wait_for_timeout(2500)
                         anchor, bframe = self._recaptcha_frames(page)
@@ -223,7 +242,7 @@ class EngineAudioMixin:
                     pass
 
         if bframe is None:
-            if anchor is not None and anchor.locator("#recaptcha-anchor").get_attribute("aria-checked") == "true":
+            if anchor is not None and self._recaptcha_anchor_checked(anchor):
                 return True
             self.log('[⚠️] reCAPTCHA challenge popup did not appear.')
             return False
@@ -244,7 +263,7 @@ class EngineAudioMixin:
 
             _a, bframe = self._recaptcha_frames(page)
             if bframe is None:
-                if anchor is not None and anchor.locator("#recaptcha-anchor").get_attribute("aria-checked") == "true":
+                if anchor is not None and self._recaptcha_anchor_checked(anchor):
                     self.log('<font color="#00FF00"><b>[✔] reCAPTCHA solved!</b></font>')
                     return True
                 return False
@@ -355,7 +374,7 @@ class EngineAudioMixin:
                     pass
                 page.wait_for_timeout(3000)
                 _a, bframe = self._recaptcha_frames(page)
-                if bframe is None or (anchor is not None and anchor.locator("#recaptcha-anchor").get_attribute("aria-checked") == "true"):
+                if bframe is None or (anchor is not None and self._recaptcha_anchor_checked(anchor)):
                     self.log('<font color="#00FF00"><b>[✔] reCAPTCHA solved (audio).</b></font>')
                     return True
             except Exception as exc:

@@ -417,7 +417,10 @@ class IgLoginMixin:
 
         # 5. Dismiss "Save your login info?"
         self._try_click(p, "Save info", role="button", timeout=3000) or self._try_click(p, "Not now", role="button", timeout=3000)
-        self.ig_dismiss_onboarding()
+        # follow=False: this runs BEFORE the Meta card is joined, so there is no
+        # feed and no suggested accounts yet. The post-join call (tg_worker /
+        # core/lifecycle.py) is where the follow pass belongs.
+        self.ig_dismiss_onboarding(follow=False)
 
         logged_in = "sessionid" in self._ig_cookie_names()
         if not logged_in:

@@ -231,10 +231,18 @@ def _get_shared_whisper_model(log_fn=None):
             from faster_whisper import WhisperModel
         except Exception:
             return None
+        # Low-end preset: tiny (~75MB, 2-3x faster on weak CPU) instead of
+        # base (~150MB). Override with INSTA_WHISPER_MODEL=base/small/...
+        try:
+            _low = os.environ.get("INSTA_LOW_END", "0").strip().lower() in (
+                "1", "true", "yes", "on")
+        except Exception:
+            _low = False
+        model_name = (os.environ.get("INSTA_WHISPER_MODEL") or "").strip() or ("tiny" if _low else "base")
         try:
             if log_fn:
                 log_fn('[🌐] Loading Whisper speech model into memory (cached locally on disk)...')
-            _SHARED_WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+            _SHARED_WHISPER_MODEL = WhisperModel(model_name, device="cpu", compute_type="int8")
             if log_fn:
                 log_fn('[✅] Whisper speech model ready in memory.')
             return _SHARED_WHISPER_MODEL

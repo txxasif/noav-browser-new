@@ -1,13 +1,13 @@
 /* Nova Browser — Premium Theme & Modern Dashboard CSS */
 
 :root {
-  --bg-canvas: #070a13;
-  --bg-sidebar: #0a0f1d;
-  --bg-header: #0d1424;
-  --bg-card: #10182c;
-  --bg-card-hover: #152038;
-  --bg-input: #080d1a;
-  --bg-overlay: rgba(4, 7, 15, 0.82);
+  --bg-canvas: #0D1117;
+  --bg-sidebar: #090C10;
+  --bg-header: #090C10;
+  --bg-card: #12171F;
+  --bg-card-hover: #171d26;
+  --bg-input: #0D1117;
+  --bg-overlay: rgba(22, 27, 34, 0.85);
 
   --border-color: rgba(255, 255, 255, 0.08);
   --border-accent: rgba(99, 102, 241, 0.4);
@@ -15,7 +15,7 @@
 
   --text-main: #f9fafb;
   --text-dim: #94a3b8;
-  --text-muted: #64748b;
+  --text-muted: #8b98a9;
 
   --accent-purple: #6366f1;
   --accent-purple-glow: rgba(99, 102, 241, 0.35);
@@ -53,10 +53,10 @@
   --bg-header: #ffffff;
   --bg-card: #ffffff;
   --bg-card-hover: #f8fafc;
-  --bg-input: #f8fafc;
+  --bg-input: #f1f5f9;
   --bg-overlay: rgba(15, 23, 42, 0.6);
 
-  --border-color: #e2e8f0;
+  --border-color: #cbd5e1;
   --border-accent: rgba(99, 102, 241, 0.3);
 
   --text-main: #0f172a;
@@ -1894,16 +1894,9 @@ body {
 /* =========================================================
    RESPONSIVE (desktop first — no change above 1024px)
    ========================================================= */
-@media (max-width: 1024px) {
-  .sidebar { width: 72px; padding: 1rem 0.5rem; }
-  .sidebar .brand-title-box,
-  .sidebar .nav-item span,
-  .sidebar .nav-section-title,
-  .sidebar .user-card-info,
-  .sidebar .nav-pill,
-  .sidebar .nav-pill-status { display: none; }
-  .nav-item { justify-content: center; }
-  .header-search-box { width: 220px; }
+@media (max-width: 640px) {
+  .sidebar { width: 210px; padding: 0.85rem 0.6rem; }
+  .header-search-box { width: 160px; }
 }
 
 @media (max-width: 768px) {
@@ -2089,6 +2082,100 @@ body {
 }
 .creator-hint { font-size: 0.78rem; color: var(--text-dim); }
 
+/* TG Classic — Creator Settings. A balanced responsive grid where every
+   column is label -> control -> hint, so inputs, switches and info tiles all
+   sit on one vertical grid (the old ad-hoc 3-col inline grid left the switch
+   and read-only columns floating/misaligned). */
+.tg-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
+}
+/* Override the shared 100px numeric width so columns line up. */
+.tg-settings-grid .creator-field input[type="number"],
+.tg-settings-grid .form-control { width: 100%; }
+.tg-settings-check {
+  display: flex; align-items: center; gap: 0.55rem;
+  min-height: 2.375rem;
+}
+.tg-settings-check .switch { flex: none; }
+.tg-settings-info {
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  min-height: 2.375rem; padding: 0.35rem 0.7rem;
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.tg-settings-info-val { font-size: 0.82rem; font-weight: 600; color: var(--text-main); }
+.tg-settings-info-sub { font-size: 0.68rem; color: var(--text-dim); }
+
+/* Telegram Profiles — one pooled login per row. */
+.tg-profile-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 8px; padding: 10px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.tg-profile-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tg-profile-avatar {
+  width: 32px; height: 32px; flex: none; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; color: #29a9e0;
+  background: linear-gradient(135deg, rgba(34, 158, 217, 0.18), rgba(99, 102, 241, 0.14));
+  border: 1px solid rgba(34, 158, 217, 0.3);
+}
+.tg-profile-info { min-width: 0; }
+.tg-profile-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tg-profile-title strong { font-size: 0.85rem; color: var(--text-main); }
+.tg-profile-meta {
+  font-size: 0.68rem; color: var(--text-dim); margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tg-profile-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* Setup Guide page (view-guide): each step is a row with text beside its
+   screenshot; stacks on narrow windows. */
+.tsg-step {
+  display: grid;
+  grid-template-columns: minmax(260px, 420px) 1fr;
+  gap: 1.25rem;
+  align-items: start;
+  padding: 1.15rem 0;
+  border-top: 1px solid var(--border-color);
+}
+.tsg-step:first-of-type { border-top: 0; padding-top: 0; }
+.tsg-step h3 {
+  font-size: 0.95rem; font-weight: 700; color: var(--text-main);
+  display: flex; align-items: center; gap: 0.5rem; margin: 0 0 0.45rem;
+}
+.tsg-step-num {
+  width: 24px; height: 24px; flex: none; border-radius: var(--radius-full);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.75rem; font-weight: 800; color: #04121a;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+}
+.tsg-step-text p { margin: 0; font-size: 0.84rem; line-height: 1.65; color: var(--text-dim); }
+.tsg-step-text a { color: var(--accent-cyan); text-decoration: none; }
+.tsg-step-text a:hover { text-decoration: underline; }
+.tsg-step-shot { display: block; text-decoration: none; }
+.tsg-step-shot img {
+  width: 100%; display: block;
+  border: 1px solid var(--border-color); border-radius: var(--radius-sm);
+  transition: border-color 0.15s ease;
+}
+.tsg-step-shot:hover img { border-color: var(--accent-cyan); }
+@media (max-width: 820px) {
+  .tsg-step { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 1100px) {
+  .tg-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 620px) {
+  .tg-settings-grid { grid-template-columns: 1fr; }
+}
+
 .creator-results-tools {
   display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
 }
@@ -2136,6 +2223,27 @@ body {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ===================================================================
+   FOCUS RING INVARIANT (UI/UX directive #6)
+   Every interactive element gets a visible 2px ring with 2px offset.
+   :focus-visible only, so mouse users don't see it on click.
+   =================================================================== */
+:where(a, button, input, select, textarea, [tabindex], [role="button"], .nav-item):focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* INVARIANT 7 (motion safety): honour the OS "reduce motion" setting. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
 }

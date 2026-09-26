@@ -24,6 +24,7 @@ SYNC_DIRS = [
     "core",
     "engine",
     "instagram",
+    "pipelines",   # TG Classic: pipelines/telegram/* (tg_worker/tg_coupled/tg_cycles/tg_support)
     "public",
     "extensions",
     "selfies",
@@ -43,6 +44,16 @@ SYNC_ROOT_FILES = [
     "selfie.png",
     "package.json",
     "requirements.txt",
+    # ---- TG Classic (Meta -> IG -> Taskly/PayGo submit) ----
+    "tg_bot.py",            # Telegram Web bot + PooledTelegramBot
+    "tg_accounts.py",       # pool registry + lease manager (tg_manager)
+    "tg_fingerprint.py",    # per-profile device identity (invariant 25)
+    "tg_login.py",          # interactive Telegram-Web login
+    "tg_login_mtproto.py",  # MTProto/Telethon login (stdin JSON; no argv leak)
+    "mtproto_bot.py",       # Telethon backend, PooledTelegramBot surface
+    "tg_balance.py",        # Taskly + PayGo balance reader
+    "tg_toggle.py",         # enable/disable + remove a pooled profile
+    "warm_pool.py",         # warm browser pool used by tg_cycles
 ]
 
 ANTI_AI_JS = """/**
@@ -366,9 +377,15 @@ def build_portable_zip():
                     continue
                 if file in (
                     "MetaCreator-Windows-Portable.zip", "MetaCreator-Windows-Patch.zip",
-                    "build_windows_dist.py", "BUILD_RUNBOOK.md", "telegram.py",
+                    "build_windows_dist.py", "BUILD_RUNBOOK.md",
                     "accounts.txt", "data.db", "test_store.db", "update.zip"
                 ):
+                    continue
+                # Legacy ROOT telegram.py only. This used to be a bare
+                # "telegram.py" entry, which excluded by BASENAME and therefore
+                # silently dropped core/telegram.py — the TgMixin that TG
+                # Classic needs — so the shipped app lost its TG backend.
+                if file == "telegram.py" and os.path.abspath(root) == os.path.abspath(ROOT_WIN):
                     continue
 
                 abs_path = os.path.join(root, file)
@@ -467,9 +484,13 @@ def build_patch_zip():
                     continue
                 if file in (
                     "MetaCreator-Windows-Portable.zip", "MetaCreator-Windows-Patch.zip",
-                    "build_windows_dist.py", "BUILD_RUNBOOK.md", "telegram.py",
+                    "build_windows_dist.py", "BUILD_RUNBOOK.md",
                     "accounts.txt", "data.db", "test_store.db", "update.zip"
                 ):
+                    continue
+                # Legacy ROOT telegram.py only — see the Portable loop for why a
+                # bare "telegram.py" entry broke core/telegram.py (TgMixin).
+                if file == "telegram.py" and os.path.abspath(root) == os.path.abspath(ROOT_WIN):
                     continue
 
                 abs_path = os.path.join(root, file)
@@ -501,6 +522,41 @@ def build_patch_zip():
     return patch_path, size_mb, sha256
 
 
+def ensure_python_deps():
+    """Install runtime Python deps into the shipped Windows interpreter.
+
+    The build syncs SOURCE but never installed packages, so a fresh Windows tree
+    had no telethon -> `import telethon` failed on the target machine and every
+    MTProto login (the whole TG Classic tab) was dead. telethon and its deps
+    (pyaes, rsa) are PURE PYTHON (no compiled extensions), so they install from
+    Linux straight into _internal/Lib/site-packages and work on Windows.
+    """
+    sp = os.path.join(ROOT_WIN, "_internal", "Lib", "site-packages")
+    if not os.path.isdir(sp):
+        log("WARN", f"_internal site-packages not found at {sp} — skipping dep install")
+        return
+    needed = ("telethon", "pyaes", "rsa")
+    missing = [n for n in needed if not os.path.isdir(os.path.join(sp, n))]
+    if not missing:
+        log("OK", f"Python deps present in shipped runtime ({', '.join(needed)})")
+        return
+    log("DEPS", f"Installing missing Python deps into shipped runtime: {', '.join(missing)}")
+    try:
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade",
+             "--target", sp] + list(needed),
+            check=True, timeout=900,
+        )
+        still = [n for n in needed if not os.path.isdir(os.path.join(sp, n))]
+        if still:
+            log("ERROR", f"Python deps still missing after install: {', '.join(still)}")
+        else:
+            log("OK", f"Python deps installed into shipped runtime ({', '.join(needed)})")
+    except Exception as exc:
+        log("ERROR", f"Could not install Python deps ({exc}). MTProto/TG Classic will not work on Windows.")
+
+
 def main():
     print("=" * 70)
     print("  Meta Creator — Build & Packaging Workflow")
@@ -508,6 +564,7 @@ def main():
     print("=" * 70)
 
     sync_sources()
+    ensure_python_deps()   # telethon/pyaes/rsa into the SHIPPED runtime
     validate_installer_sources()
     validate_runtimes()
     validate_license_parity()

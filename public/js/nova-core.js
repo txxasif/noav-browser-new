@@ -93,6 +93,15 @@ function initThemeNav() {
       if (targetPanel) targetPanel.classList.add('active');
     });
   });
+
+  // Guide page → back to TG Classic
+  const guideBack = document.getElementById('guide-back-tg');
+  if (guideBack) {
+    guideBack.addEventListener('click', () => {
+      const tgNav = document.querySelector('.nav-item[data-view="view-tg-classic"]');
+      if (tgNav) tgNav.click();
+    });
+  }
 }
 
 function initModalDismiss() {
