@@ -361,18 +361,19 @@ def _register_inspector(runner, log=None, headless=False) -> bool:
     (cap ``INSPECT_BROWSER_CAP``). Returns True when the browser was retained,
     False when it was closed.
 
-    Headless parity: before a headless browser is closed, the evidence a visible
-    window would have shown is captured to ``logs/evidence/`` (screenshot + HTML
-    + URL), so a headless failure is just as diagnosable as a headed one.
+    Headless == visible parity: before the browser is closed we capture the
+    evidence a retained window would have shown (screenshot + HTML + URL) to
+    ``logs/evidence/`` — in BOTH modes. Previously evidence was captured only
+    when headless, so with the default (``INSPECT_KEEP_VISIBLE=0``) a *visible*
+    run was actually LESS diagnosable than a headless one.
     """
     if runner is None:
         return False
     if not _inspector_keeps(headless):
-        if headless:
-            try:
-                _capture_failure_evidence(runner, log)
-            except Exception:
-                pass
+        try:
+            _capture_failure_evidence(runner, log)
+        except Exception:
+            pass
         _force_close(runner, log)
         return False
     try:

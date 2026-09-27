@@ -54,6 +54,9 @@ SYNC_ROOT_FILES = [
     "tg_balance.py",        # Taskly + PayGo balance reader
     "tg_toggle.py",         # enable/disable + remove a pooled profile
     "warm_pool.py",         # warm browser pool used by tg_cycles
+    "tg_tasks.py",          # per-bot task registry (strict pick guards)
+    "tg_flows.py",          # per-flow step pipelines (data-driven cycle steps)
+    "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
 ]
 
 ANTI_AI_JS = """/**
@@ -346,7 +349,7 @@ def validate_license_parity():
         raise RuntimeError("HWID parity check failed.")
 
 
-def build_portable_zip():
+def build_portable_zip(protect_mode: bool = True):
     log("ZIP", "Building MetaCreator-Windows-Portable.zip...")
     os.makedirs(DIST_DIR, exist_ok=True)
     zip_path = os.path.join(DIST_DIR, "MetaCreator-Windows-Portable.zip")
@@ -373,7 +376,10 @@ def build_portable_zip():
                 )]
 
             for file in files:
-                if file.endswith((".pyc", ".pyo", ".log", ".DS_Store", ".md", ".markdown", ".c", ".cpp", ".h", ".rst")):
+                if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown", ".c", ".cpp", ".h", ".rst")):
+                    continue
+                # Sourceless bytecode (protection) ships; only stale __pycache__ is dropped.
+                if file.endswith(".pyc") and "__pycache__" in root:
                     continue
                 if file in (
                     "MetaCreator-Windows-Portable.zip", "MetaCreator-Windows-Patch.zip",
@@ -426,6 +432,10 @@ def build_portable_zip():
             "MetaCreator/extensions/Captcha/dist/ort-wasm-simd.wasm",
             "MetaCreator/extensions/Captcha/models/yolov5-seg.ort",
         ]
+        if protect_mode:
+            # Protected build ships sourceless bytecode, not .py.
+            required_in_zip = [n[:-3] + ".pyc" if n.endswith(".py") else n
+                               for n in required_in_zip]
         forbidden_provider_files = [
             n for n in names
             if n in ("MetaCreator/mail_providers.py", "MetaCreator/mem_guard.py", "MetaCreator/core/mail_fish.py")
@@ -480,7 +490,9 @@ def build_patch_zip():
                 )]
 
             for file in files:
-                if file.endswith((".pyc", ".pyo", ".log", ".DS_Store", ".md", ".markdown")):
+                if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown")):
+                    continue
+                if file.endswith(".pyc") and "__pycache__" in root:
                     continue
                 if file in (
                     "MetaCreator-Windows-Portable.zip", "MetaCreator-Windows-Patch.zip",
@@ -568,7 +580,18 @@ def main():
     validate_installer_sources()
     validate_runtimes()
     validate_license_parity()
-    zip_path, size_mb, sha256 = build_portable_zip()
+
+    # Code protection (default ON): sourceless Python bytecode + obfuscated
+    # server.js. Runs AFTER the .py-expecting validators and BEFORE zipping.
+    # `--no-protect` produces a readable dev build.
+    protect_mode = "--no-protect" not in sys.argv
+    if protect_mode:
+        import protect_dist
+        protect_dist.protect(ROOT_WIN, ROOT_LIN)
+    else:
+        log("PROTECT", "--no-protect: shipping readable source (dev build).")
+
+    zip_path, size_mb, sha256 = build_portable_zip(protect_mode)
     patch_path, patch_size_mb, patch_sha256 = build_patch_zip()
 
     print("=" * 70)

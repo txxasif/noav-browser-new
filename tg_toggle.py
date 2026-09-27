@@ -7,6 +7,7 @@ inside the long-running Node server.
 
   tg_toggle.py --id tg_1 --enabled 1     # enable
   tg_toggle.py --id tg_1 --enabled 0     # disable (acquire() will skip it)
+  tg_toggle.py --id tg_1 --name "Asif BL" --phone 8801400732551  # edit fields
   tg_toggle.py --id tg_1 --remove        # delete profile + dir
   tg_toggle.py --all 1                   # enable/disable every profile
 Prints ONE JSON line ({"ok":bool,...}) so the caller can relay it.
@@ -23,6 +24,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--id", default=None)
     ap.add_argument("--enabled", default=None, help="1/0")
+    ap.add_argument("--name", default=None, help="display name")
+    ap.add_argument("--phone", default=None, help="phone number")
     ap.add_argument("--remove", action="store_true")
     ap.add_argument("--all", default=None, help="1/0 for every profile")
     a = ap.parse_args()
@@ -47,11 +50,18 @@ def main():
             tg_manager.remove(a.id)
             return {"ok": True, "removed": a.id}
 
+        out = {"ok": True, "id": a.id}
+        if a.name is not None or a.phone is not None:
+            out.update(tg_manager.update_profile(a.id, name=a.name, phone=a.phone))
+
         if a.enabled is None:
-            return {"ok": False, "error": "nothing to do (--enabled or --remove)"}
+            if a.name is None and a.phone is None:
+                return {"ok": False, "error": "nothing to do (--enabled, --name/--phone or --remove)"}
+            return out
         want = str(a.enabled).strip().lower() not in ("0", "false", "no", "")
         val = tg_manager.set_enabled(a.id, want)
-        return {"ok": True, "id": a.id, "enabled": bool(val)}
+        out["enabled"] = bool(val)
+        return out
     except KeyError as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:

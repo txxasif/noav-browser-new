@@ -1021,9 +1021,21 @@ class TelegramTasklyBot:
 
     def choose_task(self, task=TG_DEFAULT_TASK):
         """📋 Tasks → choose the task from the reply keyboard with full auto-recovery."""
-        # Per-bot label mapping (e.g. PayGo calls it "Create Inst (2FA)").
+        # Per-bot label mapping (aliases are same-bot only — tg_tasks.py
+        # refuses cross-bot tasks outright, never remaps them).
         task = TG_BOTS.get(self.bot_target, {}).get("task_aliases", {}).get(task, task)
         clean_task = task.split("(")[0].strip()
+        # Strict availability guard (tg_tasks registry): a task the bot does
+        # not offer (e.g. "No mail" on PayGo, "Cookies" on Taskly) returns
+        # False HERE — before any picker below can click a different task.
+        try:
+            from tg_tasks import resolve as _resolve_task
+            _tid, _spec = _resolve_task(self.bot_target, task)
+            if _tid is None:
+                self.log(f"[tg] ❌ {_spec} (task={task!r}, bot={self.bot_target})")
+                return False
+        except ImportError:
+            pass
 
         # 1. Verify bot chat is open
         if not self.open_bot():

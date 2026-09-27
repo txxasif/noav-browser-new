@@ -647,32 +647,47 @@ body {
 }
 
 .profile-status-badge {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   font-weight: 700;
-  padding: 0.25rem 0.65rem;
+  padding: 0.2rem 0.6rem;
   border-radius: var(--radius-full);
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.profile-status-badge::before {
+  content: "";
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; flex: none;
 }
 
 .badge-active {
-  background: rgba(16, 185, 129, 0.15);
+  background: rgba(16, 185, 129, 0.12);
   color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.35);
-  box-shadow: 0 0 12px rgba(16, 185, 129, 0.25);
-  animation: pulseGreen 2.2s infinite var(--ease-spring);
+  border-color: rgba(16, 185, 129, 0.3);
 }
 
 .badge-inactive {
   background: rgba(255, 255, 255, 0.05);
-  color: var(--text-muted);
+  color: var(--text-dim);
+  border-color: var(--border-color);
 }
 
-@keyframes pulseGreen {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.45); }
-  50% { box-shadow: 0 0 12px 2px rgba(16, 185, 129, 0.6); }
+.badge-rose {
+  background: rgba(244, 63, 94, 0.1);
+  color: #fda4af;
+  border-color: rgba(244, 63, 94, 0.3);
+}
+
+.badge-warn {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--accent-amber);
+  border-color: rgba(245, 158, 11, 0.3);
 }
 
 /* Specs List inside Card */
@@ -1437,10 +1452,17 @@ body {
 }
 
 .badge-pill {
-  font-size: 0.7rem;
-  padding: 0.15rem 0.45rem;
+  font-size: 0.65rem;
+  padding: 0.15rem 0.5rem;
   border-radius: var(--radius-full);
   font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  border: 1px solid var(--border-color);
 }
 .badge-pill.bg-emerald { background: rgba(16, 185, 129, 0.2); color: #34d399; }
 .badge-pill.bg-rose { background: rgba(239, 68, 68, 0.2); color: #f87171; }
@@ -2109,30 +2131,80 @@ body {
 .tg-settings-info-val { font-size: 0.82rem; font-weight: 600; color: var(--text-main); }
 .tg-settings-info-sub { font-size: 0.68rem; color: var(--text-dim); }
 
-/* Telegram Profiles — one pooled login per row. */
+/* Telegram Profiles — pooled-login cards (mirrors meta_auto_ai poolCard:
+   line 1 = name + id + mode pill + status pill, line 2 = phone number). */
 .tg-profile-row {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  margin-top: 8px; padding: 10px 12px;
-  background: var(--bg-input);
+  margin-top: 8px; padding: 8px 12px;
+  background: #0b101c;
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  border-radius: 10px;
+  transition: border-color 0.15s ease;
 }
-.tg-profile-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tg-profile-row:hover { border-color: #475569; }
+.tg-profile-row.is-off { opacity: 0.5; }
+.tg-profile-row.is-busy { border-color: rgba(245, 158, 11, 0.35); }
+.tg-profile-main { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
 .tg-profile-avatar {
-  width: 32px; height: 32px; flex: none; border-radius: 9px;
+  width: 32px; height: 32px; flex: none; border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 15px; color: #29a9e0;
-  background: linear-gradient(135deg, rgba(34, 158, 217, 0.18), rgba(99, 102, 241, 0.14));
-  border: 1px solid rgba(34, 158, 217, 0.3);
+  font-size: 15px; color: #26a5e4;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(37, 99, 235, 0.2));
+  border: 1px solid rgba(56, 189, 248, 0.25);
 }
-.tg-profile-info { min-width: 0; }
-.tg-profile-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.tg-profile-title strong { font-size: 0.85rem; color: var(--text-main); }
-.tg-profile-meta {
-  font-size: 0.68rem; color: var(--text-dim); margin-top: 2px;
+.tg-profile-info { min-width: 0; flex: 1; }
+.tg-profile-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tg-profile-title strong {
+  font-size: 0.75rem; font-weight: 600; color: #fff;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.tg-profile-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.tg-profile-id {
+  font-size: 10px; color: #475569; font-family: var(--font-mono);
+  flex: none;
+}
+.tg-mode-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; font-weight: 500; line-height: 1.4;
+  padding: 2px 6px; border-radius: 6px; border: 1px solid;
+  white-space: nowrap; flex: none;
+}
+.tg-mode-pill i { font-size: 9px; }
+.tg-mode-mtproto {
+  background: rgba(99, 102, 241, 0.1); color: #a5b4fc;
+  border-color: rgba(99, 102, 241, 0.3);
+}
+.tg-mode-web {
+  background: rgba(255, 255, 255, 0.06); color: var(--text-dim);
+  border-color: var(--border-color);
+}
+.tg-profile-meta {
+  font-size: 10px; color: #64748b; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tg-profile-phone { font-family: var(--font-mono); color: #cbd5e1; }
+.tg-profile-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.tg-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; flex: none;
+  font-size: 13px; border-radius: 8px; border: 1px solid var(--border-color);
+  background: rgba(30, 41, 59, 0.8); color: var(--text-dim);
+  cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
+}
+.tg-icon-btn:hover:not(:disabled) { background: #334155; color: var(--text-main); }
+.tg-icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.tg-icon-btn-indigo {
+  background: rgba(99, 102, 241, 0.1); color: #a5b4fc;
+  border-color: rgba(99, 102, 241, 0.3);
+}
+.tg-icon-btn-indigo:hover:not(:disabled) { background: rgba(99, 102, 241, 0.2); color: #c7d2fe; }
+.tg-icon-btn-danger { background: transparent; border-color: transparent; color: #475569; }
+.tg-icon-btn-danger:hover:not(:disabled) {
+  background: rgba(244, 63, 94, 0.1); color: #fb7185;
+  border-color: rgba(244, 63, 94, 0.25);
+}
+.tg-icon-btn:focus-visible {
+  outline: 2px solid var(--accent-cyan); outline-offset: 2px;
+}
 
 /* Setup Guide page (view-guide): each step is a row with text beside its
    screenshot; stacks on narrow windows. */

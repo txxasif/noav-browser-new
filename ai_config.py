@@ -41,9 +41,11 @@ def get_random_selfie() -> str:
 
 # Self-contained: AI_DIR + bundled ENGINE_DIR only. No sibling-project paths.
 sys.path.insert(0, AI_DIR)
-if not (os.path.isdir(ENGINE_DIR) and os.path.isfile(os.path.join(ENGINE_DIR, "run.py"))):
+if not (os.path.isdir(ENGINE_DIR) and (
+        os.path.isfile(os.path.join(ENGINE_DIR, "run.py"))
+        or os.path.isfile(os.path.join(ENGINE_DIR, "run.pyc")))):
     raise ImportError(
-        f"bundled engine not found: {os.path.join(ENGINE_DIR, 'run.py')}"
+        f"bundled engine not found: {os.path.join(ENGINE_DIR, 'run.py')} (or run.pyc)"
     )
 sys.path.insert(0, ENGINE_DIR)
 
@@ -145,10 +147,12 @@ TG_BOTS = {
         "username": "tasklyBux_bot",
         "url": "https://web.telegram.org/a/#8661341341",
         "task_keyword": "Create Inst",
-        "tasks": ["Create Inst (2FA)", "Create Inst (No mail)"],
+        "tasks": ["📱 Create Inst (2FA)", "🔥 Create Inst (No mail)"],
         "task_aliases": {
-            "Create Inst (2FA)": "Create Inst (2FA)",
-            "Create Inst (No mail)": "Create Inst (No mail)",
+            "Create Inst (2FA)": "📱 Create Inst (2FA)",
+            "📱 Create Inst (2FA)": "📱 Create Inst (2FA)",
+            "Create Inst (No mail)": "🔥 Create Inst (No mail)",
+            "🔥 Create Inst (No mail)": "🔥 Create Inst (No mail)",
         },
     },
     "paygo": {
@@ -163,11 +167,24 @@ TG_BOTS = {
         "username": "PayGoeasy_bot",
         "url": "https://web.telegram.org/a/#8249657346",
         "task_keyword": "Create Inst",
-        # Strict: ONLY 🔥 Create Inst (2FA)
-        "tasks": ["Create Inst (2FA)"],
+        # PayGo Tasks submenu (learned live 2026-09-27): the ONLY category is
+        # "🍪 Cookies ($0.0200)", which opens "📱 Create Inst (Cookies)
+        # ($0.0200)". The old "🔥 Create Inst (2FA)" button is GONE — the
+        # strict 2FA-only config below was stale and every PayGo pick failed.
+        # Flow (probed live): Start → same First name/Login/Password creds →
+        # "🍪 Please send the account Cookie:" (min 100 chars; a 209-char
+        # sessionid/ds_user_id/csrftoken/mid/ig_did header passes the format
+        # gate) → "👉 Press the button to confirm registration" →
+        # "✅ Account registered" (same register gate as 2FA tasks).
+        # Offered tasks are the single source of truth in tg_tasks.py.
+        # "Create Inst (No mail)" is Taskly-ONLY; PayGo offers ONLY Cookies.
+        # There are deliberately NO cross-bot remaps here: asking a bot for
+        # a task it does not offer must fail loud, never silently run a
+        # different task. Labels mirror the bot buttons (see tg_tasks.py).
+        "tasks": ["📱 Create Inst (Cookies)"],
         "task_aliases": {
-            "Create Inst (No mail)": "Create Inst (2FA)",
-            "Create Inst (2FA)": "Create Inst (2FA)",
+            "📱 Create Inst (Cookies)": "📱 Create Inst (Cookies)",
+            "Create Inst (Cookies)": "📱 Create Inst (Cookies)",
         },
     },
 }

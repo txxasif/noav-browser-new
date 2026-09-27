@@ -74,12 +74,34 @@ def _amount(text: str):
         return None
 
 
-def _new_incoming(bot, before_id, timeout):
-    """First NEW bot (incoming) message after ``before_id``.
+def _is_balance_reply(text: str) -> bool:
+    """True only if ``text`` is a bot balance answer, not an unrelated push.
+
+    Both bots answer the Balance tap with a fixed "💰 Your balance: $X" shape,
+    so require that marker AND a parsable amount. Anything else (a promo push,
+    a task expiry, a referral notice) is not a balance and must not be
+    scraped by ``_amount``.
+    """
+    if not text or "balance" not in text.lower():
+        return False
+    return _amount(text) is not None
+
+
+def _new_incoming(bot, before_id, timeout, accept=None):
+    """Newest NEW bot (incoming) message after ``before_id`` that ``accept``s.
 
     Returns ``(text, message_id, buttons)``; ``(None, None, [])`` on timeout.
     Outgoing echoes (our own ``Balance`` message) are skipped so we never show
     the button we just tapped as the "answer".
+
+    ``accept`` (optional predicate) guards against unsolicited bot traffic.
+    Telegram interleaves promo pushes and task-expiry notices with our own
+    replies, and accepting the FIRST incoming message with any text produced a
+    fabricated amount — observed 2026-09-27: tg_3's PayGo balance was reported
+    as $6.00 when the true value is $0.0000, because a different message landed
+    between the tap and the reply. Same defect class as ``start_task`` reading
+    stale credentials out of chat history. With ``accept`` set we keep polling
+    until a matching message arrives instead of returning the first text.
     """
     deadline = time.time() + max(0.0, timeout)
     while True:
@@ -88,9 +110,12 @@ def _new_incoming(bot, before_id, timeout):
             if mid <= before_id or getattr(m, "out", False):
                 continue
             txt = (getattr(m, "text", "") or "").strip()
-            if txt:
-                btns, _ = bot._buttons(limit=3)
-                return txt, mid, btns
+            if not txt:
+                continue
+            if accept is not None and not accept(txt):
+                continue
+            btns, _ = bot._buttons(limit=3)
+            return txt, mid, btns
         if time.time() >= deadline:
             return None, None, []
         time.sleep(0.4)
@@ -115,7 +140,8 @@ def check_bot(tg_id, target, timeout=20.0):
             return out
         before = bot._last_id()
         bot._send(key)                      # reply-keyboard button == plain text
-        text, _mid, after_btns = _new_incoming(bot, before, timeout)
+        text, _mid, after_btns = _new_incoming(bot, before, timeout,
+                                               accept=_is_balance_reply)
         if not text:
             out["error"] = "no reply to Balance (timeout)"
             out["messages"] = bot._recent_texts(2)

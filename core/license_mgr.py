@@ -7,8 +7,8 @@ both runtimes.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
-import hmac as hmac_mod
 import json
 import os
 import platform
@@ -26,10 +26,22 @@ LICENSE_DEFAULT_SERVER_URL = "https://nova-license.ahasiffff.workers.dev"
 LICENSE_REQUEST_TIMEOUT_S = 10
 LICENSE_MICRO_CACHE_MINUTES = 3
 LICENSE_GRACE_PERIOD_HOURS = 72
-LICENSE_FALLBACK_HMAC_SECRET = (
-    os.environ.get("HMAC_SECRET")
-    or "8F19B23E86FBFF4984993F89AEF3D883183451F127C69A8A0359861B3149D0BC"
-)
+# Asymmetric license verification (RSA-2048 / PKCS#1 v1.5 / SHA-256).
+# The Cloudflare Worker signs each license with its PRIVATE key (Worker secret);
+# this client only verifies with the PUBLIC key below. No signing secret ships,
+# so a locally forged cache can never validate.
+LICENSE_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3gjzxA5Jf/zQTMkFaBKX
+UzkJONNB6AAZ7jjdGwnQgn4NqHOosPgMipfGVNiBQtCwy4ic6Qhuj7WgSqDe8k6K
+ztT9Shc+CJkK9xSIe5OeEz21Y3Wad9dAOYqmT9llDIxSP69Rle67k4NuwBYvIbdk
+aWO30TYhLAk1IRp5DkfXCNlyu/QBfHUPEvr/FF5gRMVVTQhQyD2Dxr6T4lL4Him3
+dy6/fxZhNxyBKH935X8WNd9nI1Knqj2Lt0rqLcqiIZPI8MuB9yXZrv87iOZKH+M6
+J2USAxZVGYPzn1JzwWzQ1YWSLSuBqabxuF6i77hfpdXinEHkBA/icuYbphq20p1d
+kQIDAQAB
+-----END PUBLIC KEY-----
+"""
+# Dev override (META_DEV_MODE/SKIP_LICENSE env) is disabled in shipped builds.
+LICENSE_ALLOW_DEV_OVERRIDE = False
 
 IGNORED_INTERFACE_PATTERNS = [
     re.compile(p, re.IGNORECASE)
@@ -234,7 +246,6 @@ class LicenseManager:
         )
         self.config_file = os.path.join(self.license_dir, "license_config.json")
         self.grace_hours = LICENSE_GRACE_PERIOD_HOURS
-        self.hmac_secret = LICENSE_FALLBACK_HMAC_SECRET
         self.is_validating = False
         self.remote_api_base = self.get_remote_api_url()
 
@@ -325,45 +336,31 @@ class LicenseManager:
         with urllib.request.urlopen(req, timeout=LICENSE_REQUEST_TIMEOUT_S) as res:
             return {"status_code": res.status, "data": json.loads(res.read().decode("utf-8"))}
 
-    def _derived_hmac_secret(self) -> str | None:
-        try:
-            seed = self._local_seed()
-            if seed:
-                return hashlib.sha256(
-                    f"nova-hmac||{seed}||{get_stable_os_id()}".encode("utf-8")
-                ).hexdigest()
-        except Exception:
-            pass
-        return None
-
-    def _hmac_body(self, obj: dict) -> str:
+    def _license_body(self, obj: dict) -> str:
         return (
             f"{obj.get('license_key')}||{obj.get('status')}||"
             f"{obj.get('expires_at') or 'LIFETIME'}||"
             f"{obj.get('last_validated_at')}||{obj.get('hwid')}"
         )
 
-    def calculate_hmac(self, obj: dict) -> str:
-        derived = self._derived_hmac_secret()
-        secret = (derived or self.hmac_secret).encode("utf-8")
-        return hmac_mod.new(
-            secret,
-            self._hmac_body(obj).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+    def verify_signature(self, obj: dict) -> bool:
+        """Verify a SERVER-signed license with the shipped PUBLIC key.
 
-    def verify_hmac(self, obj: dict) -> bool:
+        RSA-2048 / PKCS#1 v1.5 / SHA-256 (the ``rsa`` package auto-detects the
+        hash from the signature). The client never signs, so a locally forged
+        cache can never validate.
+        """
         if not obj or not obj.get("signature"):
             return False
-        if obj["signature"] == self.calculate_hmac(obj):
-            return True
         try:
-            legacy = hmac_mod.new(
-                self.hmac_secret.encode("utf-8"),
-                self._hmac_body(obj).encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
-            return obj["signature"] == legacy
+            import rsa  # pure-python; shipped in _internal/site-packages
+            pub = rsa.PublicKey.load_pkcs1_openssl_pem(LICENSE_PUBLIC_KEY.encode("utf-8"))
+            rsa.verify(
+                self._license_body(obj).encode("utf-8"),
+                base64.b64decode(obj["signature"]),
+                pub,
+            )
+            return True
         except Exception:
             return False
 
@@ -373,7 +370,7 @@ class LicenseManager:
                 with open(self.cache_file, "r", encoding="utf-8") as f:
                     cache = json.load(f)
                 if cache and cache.get("signature"):
-                    if self.verify_hmac(cache):
+                    if self.verify_signature(cache):
                         return cache
                     print("[LicenseManager] TAMPER DETECTED: Cache signature mismatch. Clearing corrupted cache.")
                     self.clear_cache()
@@ -385,7 +382,7 @@ class LicenseManager:
         try:
             os.makedirs(os.path.dirname(self.cache_file), mode=0o700, exist_ok=True)
             _chmod_private(os.path.dirname(self.cache_file), 0o700)
-            obj["signature"] = self.calculate_hmac(obj)
+            # Signature is server-issued — store as received, never (re)sign.
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(obj, f, indent=2)
             _chmod_private(self.cache_file, 0o600)
@@ -402,7 +399,9 @@ class LicenseManager:
     def validate_or_activate(
         self, input_key: str | None = None, force_remote: bool = False
     ) -> dict:
-        if os.environ.get("META_DEV_MODE") == "1" or os.environ.get("SKIP_LICENSE") == "1":
+        if LICENSE_ALLOW_DEV_OVERRIDE and (
+            os.environ.get("META_DEV_MODE") == "1" or os.environ.get("SKIP_LICENSE") == "1"
+        ):
             return {
                 "status": "ACTIVE",
                 "isValid": True,
@@ -482,15 +481,25 @@ class LicenseManager:
                 data = (res or {}).get("data") or {}
                 lic = data.get("license") or {}
 
-                if data.get("isValid") and lic.get("status") == "ACTIVE":
-                    lic["hwid"] = hwid
-                    lic["last_validated_at"] = _utcnow().isoformat()
+                _server_active = bool(data.get("isValid") and lic.get("status") == "ACTIVE")
+                if _server_active and self.verify_signature(lic):
+                    # Server signed hwid + last_validated_at; store as received.
                     self.save_cache(lic)
                     return {
                         "status": "ACTIVE",
                         "message": data.get("message") or "License validated successfully.",
                         "isValid": True,
                         "license": lic,
+                        "hwid": hwid,
+                    }
+                if _server_active:
+                    self.clear_cache()
+                    return {
+                        "status": "UNTRUSTED_SIGNATURE",
+                        "message": ("The license server did not return a valid signature. The "
+                                    "licensing authority must be updated (deploy the signing key) "
+                                    "before activation can succeed."),
+                        "isValid": False,
                         "hwid": hwid,
                     }
 
@@ -538,16 +547,13 @@ class LicenseManager:
             legacy_hwid = None
 
         if cache.get("hwid") and cache["hwid"] not in (current_hwid, legacy_hwid):
-            if self.verify_hmac(cache):
-                cache["hwid"] = current_hwid
-                self.save_cache(cache)
-            else:
-                return {
-                    "status": "HWID_MISMATCH",
-                    "message": "Hardware fingerprint mismatch.",
-                    "isValid": False,
-                    "hwid": current_hwid,
-                }
+            # Signed for the original HWID; it cannot be re-signed client-side.
+            return {
+                "status": "HWID_MISMATCH",
+                "message": "Hardware fingerprint mismatch.",
+                "isValid": False,
+                "hwid": current_hwid,
+            }
 
         exp = cache.get("expires_at")
         if exp not in (None, "", "LIFETIME", "NEVER"):

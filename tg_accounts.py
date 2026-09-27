@@ -611,6 +611,27 @@ class TGAccountManager:
             self.save()
             return rec.get("enabled")
 
+    def update_profile(self, tg_id, name=None, phone=None):
+        """Edit identifying fields (display name / phone number).
+
+        Runtime state is untouched. Refused while leased, same as
+        set_enabled/remove — mutating a busy profile mid-task would
+        confuse the worker that leased it.
+        """
+        with self._cv:
+            self._reload()
+            rec = next((a for a in self.accounts if a.get("id") == tg_id), None)
+            if rec is None:
+                raise KeyError(f"unknown Telegram profile: {tg_id}")
+            if rec.get("status") == "busy":
+                raise RuntimeError(f"{tg_id} is busy (leased by a worker); stop the engine first")
+            if name is not None:
+                rec["name"] = str(name).strip()
+            if phone is not None:
+                rec["phone"] = str(phone).strip()
+            self.save()
+            return {"id": tg_id, "name": rec.get("name"), "phone": rec.get("phone")}
+
     def remove(self, tg_id):
         with self._cv:
             self._reload()

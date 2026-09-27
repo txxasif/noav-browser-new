@@ -31,7 +31,7 @@
 
 10. **Meta/IG/TG are NOT resource-independent.** They share Chromium, the RAM budget, and `data/accounts.json`. The slots fix *labelling*, not contention. `meta_auto_ai` shares its `telegram` engine slot deliberately.
 
-11. **TG pool enable/disable** — `tg_accounts.acquire()` skips `enabled is False`. `set_enabled()` **refuses while leased** (disabling mid-task would let a second worker lease the same profile and corrupt both sessions). `remove()` raises on an unknown id.
+11. **TG pool enable/disable** — `tg_accounts.acquire()` skips `enabled is False`. `set_enabled()` **refuses while leased** (disabling mid-task would let a second worker lease the same profile and corrupt both sessions). `remove()` raises on an unknown id. **Multi-account safeguards** (do not remove): `tg_manager.leased_ids()` must list every busy record's `id`/`session_file`/`profile_dir` (+ basenames) so `MtprotoPooledBot._reap_idle`/`drop_all(skip_leased=True)` never murder a live lease; `tg_manager.heartbeat()` must refresh `leased_at` so the 20-min `LEASE_TTL` reclaim can't hand a busy profile to a second slot. Both were port-drift omissions that killed tasks with ≥2 profiles.
 
 12. **Two-phase data parity** — write `data/accounts.json`, `data/accounts.csv`, `accounts.txt`.
 
@@ -41,6 +41,31 @@
 
 15. **Reuse the shared primitives.** The TG panel uses `btn btn-primary` / `btn btn-danger` (`fa-play`/`fa-stop`, **exactly one visible** — Start when idle, Stop when running), `panel-header` + `log-container`, and the `.switch` component. Do not invent per-panel button styles.
 
+16. **Release ships PROTECTED code (Nova parity).** `build_windows_dist.py` calls `protect_dist.py` after validation, before zipping:
+    - **Python** → every app `.py` is compiled to **sourceless `.pyc`** (`optimize=2`) and the `.py` deleted. `ai_config.py` is the **only** `.py` kept (Update.ps1 greps it for the `MAIL_PROVIDERS` marker).
+    - **JavaScript** → `server.js`, `core/licenseManager.js`, `core/updateManager.js`, `core/licenseConfig.js` get the anti-AI directive + honeypot decoys, then `javascript-obfuscator` (strong profile: control-flow flattening, dead-code injection, base64 string-array, split strings, self-defending). The **dashboard** (`public/js/nova-core.js`, `nova-license.js`, `nova-meta-insta.js`, `nova-tg.js`) is obfuscated with a **conservative** profile (`renameGlobals: false`, no self-defending) so DOM wiring and cross-file globals keep working. Deliberately NOT obfuscated: `public/js/tailwind.js` (vendored) and `extensions/Captcha/*` (already a minified `onnxruntime-web` bundle that uses `eval`/`Function`; obfuscating it risks breaking captcha solving).
+    - The 4 scripts Node spawns by name are rewritten in `server.js`: `worker.pyc`, `tg_balance.pyc`, `tg_toggle.pyc`, `tg_login_mtproto.pyc`.
+    - Verify: no app `.py` left (but `ai_config.py`), key `.pyc` present, `node --check server.js` OK, sourceless-import smoke OK. `--no-protect` = readable dev build.
+    - `protect_dist.py` is **build-only, never shipped**. Bytecode is **CPython-minor-locked** — obfuscate/compile with the same Python as `_internal/python314.dll` (build venv is 3.14). PyArmor (stronger, keeps `.py` names) is the paid upgrade path; the free `pyarmor-trial` is **not** shippable.
+
+17. **Installer/updater must stay extension-agnostic.** Because protected builds ship `.pyc`, `windows_dist/installer/setup.iss` uses `.py*` Source wildcards and `windows_dist/Update.ps1` accepts `.py` **or** `.pyc` (`$required` loop + the `worker\.pyc?` process regex). Any new root module added to a protected build must follow the same pattern.
+
+18. **Licensing is ASYMMETRIC — the client only ever verifies.** The Cloudflare Worker signs each license with an RSA-2048 private key (Worker secret `LICENSE_SIGNING_KEY`, PKCS#8 PEM); clients verify with the shipped **public** key (`core/licenseConfig.js`, `core/license_mgr.py`). Details:
+    - Canonical signed string (must match across Worker + Node + Python): `` `${license_key}||${status}||${expires_at||'LIFETIME'}||${last_validated_at}||${hwid}` ``.
+    - Node verifies via `crypto.verify('sha256', …)`; Python via the pure-python `rsa` package (already shipped in `_internal`). Both **reject forged/old-HMAC caches**.
+    - The client **never signs** (`saveLicenseCache`/`save_cache` store the server signature as-is) and **must not mutate** signed fields (`hwid`, `last_validated_at`).
+    - `fallbackHmacSecret` / `getDerivedHmacSecret` / `calculateHmacSignature` are **removed** — never reintroduce a signing secret client-side.
+    - Dev env override (`META_DEV_MODE`/`SKIP_LICENSE`) is gated behind `allowDevOverride` / `LICENSE_ALLOW_DEV_OVERRIDE` = **false** in shipped builds.
+    - **Deploy order is mandatory: redeploy the Worker (with the signing secret) BEFORE shipping a new client**, or activation fails closed. Existing users re-activate online once.
+    - Generate/rotate keys: `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out worker/license/.signing_key.pem` (gitignored) → `wrangler secret put LICENSE_SIGNING_KEY` → paste the matching public key into both clients.
+    - Pitfall: `ai_config.py` verifies the engine entry exists and **must accept `run.py` or `run.pyc`** (protected builds compile it).
+
+19. **No raw Telethon-sync calls on the browser thread.** Playwright's sync API in-process makes `telethon.sync` methods return UNawaited coroutines (`connect()` never connects, `get_messages()` yields nothing) with zero exceptions — every downstream read fails as "no Balance key". Proven 2026-09-27 (154 fast-failing leases). Balance probes run in a dedicated thread; bot commands run on the `MtprotoPooledBot` owner thread. Never "fix" by calling raw `MtprotoTasklyBot`/`tg_balance.check_bot` from cycle code.
+
+20. **`tg_tasks.py` is the per-bot task registry (single source of truth).** Each bot lists ONLY the tasks it offers with exact button paths + `2fa`/`cookie` flow tags. `resolve()` returns `(None, reason)` for unoffered tasks and every picker MUST refuse — no cross-bot alias remaps, no fuzzy fallback to another task (that burned money/TTL on wrong jobs). Current catalog (labels mirror bot buttons incl. logos): Taskly = `🔥 Create Inst (No mail)` + `📱 Create Inst (2FA)`; PayGo = `📱 Create Inst (Cookies)` ONLY (its 2FA button vanished 2026-09-27; `No mail` never existed there). Dashboard Task dropdown is bot-first (rebuilds on Mining-bot change). Injecting a future task = one dict entry.
+
+21. **`tg_flows.py` is the per-flow STEP registry (single source of truth).** A task's `flow` tag selects an ordered step list; the runner walks `steps_of(flow)` after the shared preamble (Meta → lease → task → creds). Adding a flow/step = one dict entry + one callable. **`cookie` flow has NO email and NO 2FA/password steps** (`["ig_join","cookie_export","submit_cookie"]`) — a cookie task verifies via the exported IG cookie, so the old post-follow email-link step only parked a fresh account in Accounts Center for ~90s; `add_email` is ignored for this flow. `2fa` flow = `["email_link","2fa","password","extra_email","register"]` (the `tg_coupled` runner). New root modules (`tg_tasks.py`, `tg_flows.py`, `run_cookie_cycle.py`) MUST be in `build_windows_dist.py` `SYNC_ROOT_FILES` or they silently do not ship (invariant 4).
+
 # 📚 Knowledge Base
 
 Project memory lives in Obsidian at **`01 Projects/Meta Creator/`**:
@@ -49,14 +74,18 @@ Project memory lives in Obsidian at **`01 Projects/Meta Creator/`**:
 |---|---|
 | `Meta Creator — Architecture, Windows Packaging & Security Specification.md` | Master blueprint, licensing, HWID, the TG Classic port, all fixes + verification status |
 | `Windows Build & Release Playbook.md` | Build pipeline, the three shipping bugs, offline assets, release checklist |
+| `TG Tasks/TG Task — Create Inst 2FA (current).md` | The 2FA flow (Meta → creds → IG + email/password/2FA → register) |
+| `TG Tasks/TG Task — Create Inst Cookies (new).md` | The PayGo cookie flow (IG cookie export → submit, no 2FA leg) + first Submitted record |
 | `Competitor Analysis — sell-toolnew.md` | Competitor teardown |
 
 UI/UX governance: `30 System/AI/UI_UX_DESIGN_SYSTEM.md` + `10 Maps/UI & UX Design Intelligence MOC.md`.
 
 # ⚠️ Known open issues
 
-- **No `meta → ig → tg` cycle has ever completed** (Linux or Windows). TG-side code is verified by inspection + one script-run reaching `No Telegram profile is logged in`.
-- **Teardown race** — `Page.wait_for_timeout: Target page, context or browser has been closed` (8×) is a *secondary* error from cleanup closing the browser mid-poll; it overwrites the true error and corrupts failure data. **Fix this first.**
+- **First `meta → ig → tg` cycle completed 2026-09-27** (Linux): PayGo Cookies task via `run_cookie_cycle.py` — record `ai_1790519573384_92`, status Submitted, `verdict=accepted`. Full 2FA coupled cycle (`run_tg_coupled_cycle`) is still unverified end-to-end.
+- **Teardown race** — `Page.wait_for_timeout: Target page, context or browser has been closed` is a *secondary* error from cleanup closing the browser mid-poll; it overwrites the true error and corrupts failure data. No longer the first fix (a cycle completed through it), but still open.
 - **88% phone wall** — 235/267 STRICT-stops are `Mobile number required`. Untouched by any TG work. If the log shows `[⏱️] Meta provisioned — accountId=…` and *then* the wall, the race hypothesis is disproven; the fix is a non-temp mail domain.
 - `warm_pool.py` is the highest-risk import (mutable browser state — see `meta_auto_ai` invariant 36).
+- **Protected build is not Windows-tested yet.** The sourceless `.pyc` + obfuscated `server.js` path is verified on Linux (import smoke, `node --check`, live server run) but must be smoke-tested on Windows before selling: extract the ZIP → `Run.bat` → start TG Classic → confirm the worker spawns (`worker.pyc`), the engine boots, and a task completes. Also test the Inno installer and an in-place `Update.bat` (both rewired for `.pyc`).
+- **Leaked secret rotation required.** The old HMAC secret `8F19B2…D0BC` was shipped in `core/licenseConfig.js` and is now compromised. The asymmetric scheme removes it, but you MUST redeploy the Worker with `LICENSE_SIGNING_KEY` and publish the new client **together** — otherwise every activation fails closed. Existing users re-activate online once (old HMAC caches are rejected by design).
 <!-- END:framework-agent-rules -->

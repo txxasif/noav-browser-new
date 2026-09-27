@@ -215,12 +215,17 @@ async function checkLicenseStatusOnLoad() {
         userExpiry.textContent = 'Click to activate';
       }
 
-      if (statusText === 'EXPIRED' || statusText === 'REVOKED' || statusText === 'HWID_MISMATCH') {
-        setLicenseAlertBox(data.message || `License error: ${statusText}`, 'error');
-        openLicenseModal();
+      // No valid license → gate the app on load. Show the activation modal for
+      // EVERY invalid state, including plain UNLICENSED (no key / no cache),
+      // not just EXPIRED/REVOKED/HWID_MISMATCH.
+      if (data && data.message) {
+        setLicenseAlertBox(data.message, 'error');
+      } else if (statusText === 'UNLICENSED') {
+        setLicenseAlertBox('No active license. Enter your license key to activate.', 'error');
       } else {
         setLicenseAlertBox('', 'none');
       }
+      openLicenseModal();
     }
   } catch (e) {
     console.warn('[License Manager] Initial check error:', e.message);

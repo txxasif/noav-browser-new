@@ -26,7 +26,7 @@ function Stop-CreatorProcesses {
         $exe = [string]$proc.ExecutablePath
         $cmd = [string]$proc.CommandLine
         $inside = ($exe -and $exe.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase))
-        $appCommand = ($cmd -and $cmd -match '(?i)(server\.js|worker\.py|Run\.bat|Run-Console\.bat|run_dev\.bat|open_dash\.bat|open_chrome\.bat)')
+        $appCommand = ($cmd -and $cmd -match '(?i)(server\.js|worker\.pyc?|Run\.bat|Run-Console\.bat|run_dev\.bat|open_dash\.bat|open_chrome\.bat)')
         if ($inside -or $appCommand) {
             try { Stop-Process -Id $pidValue -Force -ErrorAction SilentlyContinue } catch {}
         }
@@ -180,9 +180,17 @@ try {
         if (Test-Path -LiteralPath $path) { throw "Could not remove retired provider file: $legacy" }
     }
 
-    foreach ($required in @('ai_config.py', 'core\mailbox.py', 'engine\eng_mix_mail.py', 'worker.py', 'runner.py', 'Update.bat', 'Update.ps1')) {
+    foreach ($required in @('ai_config.py', 'Update.bat', 'Update.ps1')) {
         if (-not (Test-Path -LiteralPath (Join-Path $root $required) -PathType Leaf)) {
             throw "Updated file is missing: $required"
+        }
+    }
+    # Compiled modules ship as sourceless .pyc in protected builds; accept either.
+    foreach ($base in @('core\mailbox', 'engine\eng_mix_mail', 'worker', 'runner')) {
+        $py  = Join-Path $root ($base + '.py')
+        $pyc = Join-Path $root ($base + '.pyc')
+        if (-not (Test-Path -LiteralPath $py -PathType Leaf) -and -not (Test-Path -LiteralPath $pyc -PathType Leaf)) {
+            throw "Updated file is missing: $base (.py/.pyc)"
         }
     }
     $config = Get-Content -LiteralPath (Join-Path $root 'ai_config.py') -Raw -Encoding UTF8

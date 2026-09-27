@@ -28,17 +28,17 @@ export default {
 
     // 1. CLIENT API: ACTIVATE
     if (path === '/api/license/activate' && request.method === 'POST') {
-      return handleActivate(db, await request.json());
+      return handleActivate(db, await request.json(), env);
     }
 
     // 2. CLIENT API: VALIDATE
     if (path === '/api/license/validate' && request.method === 'POST') {
-      return handleValidate(db, await request.json());
+      return handleValidate(db, await request.json(), env);
     }
 
     // 3. CLIENT API: TRIAL
     if (path === '/api/license/trial' && request.method === 'POST') {
-      return handleTrial(db, await request.json());
+      return handleTrial(db, await request.json(), env);
     }
 
     // 4. ADMIN AUTHENTICATION

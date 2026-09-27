@@ -19,6 +19,33 @@ class IGDeadEnd(Exception):
     parking a broken record."""
 
 
+def select_all_safe(page, locator) -> None:
+    """Clear a field WITHOUT the whole-page highlight bug.
+
+    Press Control+A only when the locator is the focused INPUT/TEXTAREA. A
+    Bloks/React wrapper div with tabindex also passes a bare `activeElement ===
+    el` check, and Control+A on it selects the ENTIRE DOCUMENT — the blue
+    "everything highlighted" screen where the form never takes the value and
+    the submit is a no-op (observed 2026-09-27 on the IG login + onboarding
+    name/username screens). Otherwise, clear any stray selection instead.
+    """
+    try:
+        ok = bool(locator.evaluate(
+            "el => document.activeElement === el && "
+            "(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')"))
+    except Exception:
+        ok = False
+    try:
+        if ok:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        else:
+            page.evaluate("() => { const s = window.getSelection && window.getSelection(); "
+                          "if (s && s.rangeCount) s.removeAllRanges(); }")
+    except Exception:
+        pass
+
+
 class IgHelpersMixin:
     """Tab lifecycle, sheet suppression, render guard, session handshake."""
 
@@ -55,6 +82,12 @@ class IgHelpersMixin:
             try:
                 btn = p.locator(sel).first
                 if btn.count() > 0 and btn.is_visible():
+                    try:
+                        # Below-the-fold buttons must be scrolled in first or the
+                        # tap lands on nothing (the "stalled login sheet").
+                        btn.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
                     try:
                         btn.tap(timeout=3000)
                         return True
@@ -865,14 +898,40 @@ class IgHelpersMixin:
                 }
 
                 // (A) "Get the Instagram app" interstitial screen (Screenshot 2)
-                // Never click "Open Instagram"; strictly click "Skip"
+                // Prefer the TOP-LEFT BACK control (exits straight to the feed);
+                // never click "Open Instagram". Skip is the fallback.
                 if (bodyText.includes("get the instagram app") || bodyText.includes("turn on notifications, read comments and discover reels")) {
+                    for (const el of document.querySelectorAll('[aria-label="Back"], button[aria-label="Back"], a[aria-label="Back"], svg[aria-label="Back"]')) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            fireClick(el);
+                            cleanBackdrops();
+                            return 'clicked_back_get_app';
+                        }
+                    }
                     for (const el of document.querySelectorAll('a, button, div[role="button"], span')) {
                         const t = (el.innerText || el.textContent || '').trim().toLowerCase();
                         if (t === 'skip') {
                             fireClick(el);
                             cleanBackdrops();
                             return 'clicked_skip_get_app';
+                        }
+                    }
+                }
+
+                // (A2) "Add phone number" prompt — OPTIONAL (it renders a Skip
+                // link). Previously nothing handled this screen: the generic
+                // fallback only tried `button`/`a`, so when IG renders Skip as a
+                // plain div/span the flow sat on the screen for whole passes.
+                // Click Skip the moment the screen is up, matching any element.
+                if (bodyText.includes("add phone number")
+                        || bodyText.includes("adding your number will help")) {
+                    for (const el of document.querySelectorAll('a, button, div[role="button"], span, div[tabindex]')) {
+                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if (t === 'skip') {
+                            fireClick(el);
+                            cleanBackdrops();
+                            return 'clicked_skip_add_phone';
                         }
                     }
                 }
@@ -979,6 +1038,29 @@ class IgHelpersMixin:
                 self.log(f'[+] _dismiss_ig_sheets: JS action "{js_res}".')
                 p.wait_for_timeout(400)
                 dismissed = True
+                # A synthetic dispatch can be IGNORED by IG's React handlers,
+                # yet the JS still returns a success string. Previously that set
+                # dismissed=True and SKIPPED the real Playwright click below, so
+                # the promo stayed on screen until a later pass — this is why
+                # phone-Skip / Home-screen-Cancel / Save-login "Not now" felt
+                # slow. If the promo is still present, fall through to the real
+                # click instead of trusting the synthetic one.
+                try:
+                    _tail_now = (p.inner_text("body") or "").lower()
+                except Exception:
+                    _tail_now = ""
+                still_up = (
+                    ("add phone number" in _tail_now and js_res == "clicked_skip_add_phone")
+                    or ("home screen" in _tail_now and js_res == "clicked_cancel_home_screen")
+                    or (("save your login info" in _tail_now or "save login info" in _tail_now)
+                        and js_res in ("clicked_not_now_save_login", "clicked_save_login"))
+                    or (("get the instagram app" in _tail_now or "open instagram" in _tail_now)
+                        and js_res in ("clicked_skip_get_app", "clicked_back_get_app"))
+                )
+                if still_up:
+                    self.log(f'[⚠️] _dismiss_ig_sheets: "{js_res}" did not clear the '
+                             'promo — retrying with a real click…')
+                    dismissed = False
         except Exception:
             pass
 

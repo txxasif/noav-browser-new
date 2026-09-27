@@ -26,8 +26,17 @@ the worker uses (see ``tg_bot.PooledTelegramBot``)::
 
     start() / open(), logged_in(), open_bot(), choose_task(task),
     start_task(), submit_2fa_key(key, allow_local_fallback=...),
+    submit_cookie(cookie, timeout=...),
     mark_registered(), reset_to_main_menu(timeout=...), cancel_task(),
     close(ok=...)
+
+THREADING INVARIANT (observed 2026-09-27): Telethon-sync calls made on a
+thread that runs Playwright return UNawaited coroutines — ``connect()``
+never connects, ``get_messages()`` yields nothing — so every downstream
+read fails as "no Balance key" with zero exceptions. Never call raw
+``MtprotoTasklyBot``/``tg_balance.check_bot`` on the browser thread;
+use ``MtprotoPooledBot`` (owner thread) or a dedicated thread with a
+clean event loop.
 
 Verdict classification is reused verbatim from ``tg_bot.classify_report_reply``
 (rejection-first, NEW reply only) — only the transport changes.
@@ -343,15 +352,7 @@ class MtprotoTasklyBot:
 
     # -- lifecycle ------------------------------------------------------
     def start(self, **_kw):
-        if self._client is None:
-            self._client = _make_client(self.tg_id, self.session_path)
-        if not self._client.is_connected():
-            self._client.connect()
-        if not self._client.is_user_authorized():
-            raise RuntimeError(
-                f"Telegram session is not logged in ({os.path.basename(self.session_path)}) "
-                f"— session lost. Run: tg_login_mtproto.py --id {self.tg_id}")
-        self.open_bot()
+        self._ensure_conn()
         self.log(f"[tg] Telegram MTProto session ready for {self.bot_name} "
                  f"({os.path.basename(self.session_path)}).")
         return self
@@ -382,6 +383,35 @@ class MtprotoTasklyBot:
             pass
 
     # -- low level ------------------------------------------------------
+    def _ensure_conn(self):
+        """Lazily connect the Telethon client and resolve the bot entity.
+
+        The owner loop (``_mtproto_owner_loop``) builds ``MtprotoTasklyBot``
+        on the FIRST command it receives — which is NOT always ``start()``.
+        The browser original always had a live page by that point; here
+        ``_client`` starts as ``None``, so any command issued first
+        (``cancel_task``, ``reset_to_main_menu``, ``choose_task``, …) hit
+        ``'NoneType' object has no attribute 'get_messages'``, and because
+        ``_messages`` swallows exceptions into an empty list it degraded
+        SILENTLY into "no buttons" / "no messages" rather than an error
+        (observed 2026-09-27 on a fresh pool: ``cancel_task`` and
+        ``reset_to_main_menu`` both no-op'd with only a log note).
+
+        Raises on a lost session so the ``session lost`` marker reaches
+        ``_boot_bot``/``_is_tg_session_lost`` instead of a phantom "no reply".
+        """
+        if self._client is None:
+            self._client = _make_client(self.tg_id, self.session_path)
+        if not self._client.is_connected():
+            self._client.connect()
+        if not self._client.is_user_authorized():
+            raise RuntimeError(
+                f"Telegram session is not logged in ({os.path.basename(self.session_path)}) "
+                f"— session lost. Run: tg_login_mtproto.py --id {self.tg_id}")
+        if self._entity is None:
+            self.open_bot()
+        return self._client
+
     def open_bot(self):
         """Resolve the target bot entity (MTProto has no 'open chat' step)."""
         if self._client is None:
@@ -397,6 +427,7 @@ class MtprotoTasklyBot:
 
     def _messages(self, limit=10, min_id=0):
         """Bot chat messages, NEWEST first."""
+        self._ensure_conn()
         try:
             return list(self._client.get_messages(self._entity, limit=limit,
                                                   min_id=min_id) or [])
@@ -405,6 +436,7 @@ class MtprotoTasklyBot:
             return []
 
     def _send(self, text):
+        self._ensure_conn()
         self._client.send_message(self._entity, str(text))
         return True
 
@@ -515,46 +547,89 @@ class MtprotoTasklyBot:
         return False
 
     def _pick_task_button(self, btns, task, clean):
-        cands = [b for b in btns if clean.lower() in b.lower()]
-        if not cands:
+        """Legacy fuzzy picker — kept for interface parity only.
+
+        New code must use :mod:`tg_tasks` (strict per-bot registry) via
+        :meth:`choose_task`. This stays as a thin registry wrapper so any
+        external caller keeps working without the old silent-fallback
+        behavior (it returns None instead of a wrong task).
+        """
+        try:
+            from tg_tasks import resolve, match_level
+        except ImportError:
             return None
-        if self.bot_target == "taskly":
-            pref = [b for b in cands if "no mail" in b.lower()]
-        elif self.bot_target == "paygo":
-            pref = [b for b in cands if "2fa" in b.lower()]
-        else:
-            pref = []
-        pool = pref or [b for b in cands if b.lower().startswith(task.lower())] or cands
-        return pool[0]
+        task_id, levels = resolve(self.bot_target, task)
+        if task_id is None:
+            return None
+        for level in levels:
+            hit = match_level(btns, level)
+            if hit:
+                return hit
+        return None
+
+    def _await_level(self, level, timeout=8.0):
+        """Poll the live keyboard until ``level`` matches (registry matcher)."""
+        try:
+            from tg_tasks import match_level
+        except ImportError:
+            return None
+        deadline = time.time() + max(0.0, timeout)
+        while True:
+            btns, _m = self._buttons()
+            hit = match_level(btns, level)
+            if hit:
+                return hit
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.5)
 
     def choose_task(self, task=TG_DEFAULT_TASK):
-        task = TG_BOTS.get(self.bot_target, {}).get("task_aliases", {}).get(task, task)
-        clean = task.split("(")[0].strip()  # "Create Inst"
+        """Walk the registry button path for this bot — strict, no fallback.
+
+        ``tg_tasks.resolve`` maps the requested task for THIS bot only. An
+        unknown task, or a task the bot does not offer (e.g. "No mail" on
+        PayGo, "Cookies" on Taskly), returns False WITHOUT touching any
+        other button — the old alias-remap/fuzzy fallbacks that silently
+        started the wrong task are gone. Stock gaps (task temporarily
+        absent) poll each level briefly, then fail loud with the missing
+        level so the cycle cancels instead of improvising.
+        """
+        try:
+            from tg_tasks import resolve, LABELS
+        except ImportError:
+            self.log("[tg] tg_tasks registry unavailable — refusing to pick")
+            return False
+        task_id, levels = resolve(self.bot_target, task)
+        if task_id is None:
+            self.log(f"[tg] ❌ {levels} (task={task!r}, bot={self.bot_target})")
+            return False
+        want = LABELS.get(task_id, task)
         for _try in range(2):
-            btns, _m = self._buttons()
-            pick = self._pick_task_button(btns, task, clean)
-            if not pick:
-                # No task list on screen yet — press "Tasks" and WAIT for the
-                # list (the bot's reply is asynchronous).
-                tbtn = next((b for b in btns if "task" in b.lower()), None)
-                if tbtn:
-                    self._send(tbtn)
-                    deadline = time.time() + 8.0
-                    while time.time() < deadline and not pick:
-                        time.sleep(0.5)
-                        b2, _m2 = self._buttons()
-                        pick = self._pick_task_button(b2, task, clean)
-            if pick:
+            self.reset_to_main_menu()
+            navigated = []
+            failed = None
+            for depth, level in enumerate(levels):
+                pick = self._await_level(level, timeout=8.0)
+                if not pick:
+                    failed = depth
+                    break
                 self._send(pick)
-                self.log(f"[tg] Selected task: {pick}")
-                # The bot answers with the task preview, whose keyboard carries
-                # "▶️ Start". Do NOT return until it is there, or start_task
-                # will read the stale keyboard and post a literal "Start".
+                navigated.append(pick)
+                time.sleep(1.2)
+            if failed is None:
+                for p in navigated:
+                    self.log(f"[tg] Selected task: {p}")
+                # The bot answers with the task preview, whose keyboard
+                # carries "▶️ Start". Do NOT return until it is there, or
+                # start_task will read the stale keyboard and post a
+                # literal "Start".
                 if not self._wait_for_button("start", timeout=10):
                     self.log("[tg] ⚠️ task selected but no Start key appeared yet")
                 return True
-            self.reset_to_main_menu()
-        self.log(f"[tg] task '{task}' not found.")
+            self.log(f"[tg] '{want}' not available right now "
+                     f"(level {failed + 1}/{len(levels)} missing; "
+                     f"had: {navigated or 'main menu'}) — not substituting.")
+        self.log(f"[tg] task '{want}' not found.")
         return False
 
     def start_task(self):
@@ -699,6 +774,72 @@ class MtprotoTasklyBot:
             return self.one_time_code
         except Exception:
             raise RuntimeError("Telegram bot did not return a one-time code")
+
+    def submit_cookie(self, cookie: str, timeout: float = 20.0):
+        """Send the IG cookie header string for a PayGo Cookies task.
+
+        Returns ``(ok, reply)``: ``ok`` is True when the bot moved past the
+        cookie prompt — i.e. it asked to confirm registration (the
+        ``mark_registered`` gate next) or reported acceptance. A format
+        rejection ("too short", "invalid") returns ``(False, reply)`` so the
+        caller can abort instead of tapping register on a dead task.
+
+        Learned live 2026-09-27 on PayGoBot "📱 Create Inst (Cookies)":
+        after Start the bot says "🍪 Please send the account Cookie:";
+        a 209-char ``sessionid/ds_user_id/csrftoken/mid/ig_did`` header got
+        "👉 Press the button to confirm registration or cancel the task:"
+        with [✅ Account registered, ❌ Cancel]; a short string got
+        "❌ Cookie is too short (minimum 100 characters)".
+        """
+        clean = str(cookie or "").strip()
+        if len(clean) < 100:
+            return False, "cookie too short (<100 chars) — not sent"
+        before_id = self._last_id()
+        self._send(clean)
+        self.log(f"[tg] Cookie submitted to {self.bot_name} ({len(clean)} chars); waiting for verdict…")
+        deadline = time.time() + max(5.0, timeout)
+        reply = ""
+        while time.time() < deadline:
+            time.sleep(0.5)
+            for m in self._messages(limit=4):
+                if getattr(m, "out", False):
+                    continue
+                if int(getattr(m, "id", 0) or 0) <= before_id:
+                    continue
+                txt = (getattr(m, "text", "") or "").strip()
+                if not txt:
+                    continue
+                reply = txt
+                low = txt.lower()
+                if any(k in low for k in ("too short", "invalid cookie", "incorrect",
+                                          "wrong", "rejected", "send the account cookie")) \
+                        and "confirm registration" not in low:
+                    # Still the cookie prompt (or an explicit rejection) —
+                    # keep waiting a little in case the verdict follows,
+                    # but remember the rejection.
+                    if any(k in low for k in ("too short", "invalid", "rejected")):
+                        self.log(f"[tg] cookie rejected: {txt[:160]}")
+                        return False, txt
+                    continue
+                if ("confirm registration" in low or "account registered" in low
+                        or "report has been received" in low
+                        or "under review" in low or "please wait" in low):
+                    self.log(f"[tg] cookie accepted → {txt[:160]}")
+                    return True, txt
+            # Fallback: the register key appearing means the cookie passed.
+            try:
+                btns, _ = self._buttons(limit=3)
+                if any("regist" in (b or "").lower() or "confirm" in (b or "").lower()
+                       for b in btns):
+                    self.log("[tg] cookie accepted (register key visible).")
+                    return True, reply or "register key visible"
+            except Exception:
+                pass
+        self.log(f"[tg] no cookie verdict yet; last reply: {reply[:160]}")
+        # Unknown-but-not-rejected: let the caller try mark_registered; a
+        # dead task fails loudly there instead of here.
+        return ("confirm registration" in reply.lower()
+                or "account registered" in reply.lower()), reply
 
     def mark_registered(self):
         """Send the register/confirm key and classify ONLY the NEW reply."""
@@ -952,6 +1093,9 @@ class MtprotoPooledBot:
 
     def submit_2fa_key(self, key, allow_local_fallback=True):
         return self._call("submit_2fa_key", key, allow_local_fallback=allow_local_fallback)
+
+    def submit_cookie(self, cookie, timeout=20.0):
+        return self._call("submit_cookie", cookie, timeout=timeout)
 
     def mark_registered(self):
         return self._call("mark_registered")

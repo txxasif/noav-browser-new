@@ -23,6 +23,11 @@
   }
   function $(id) { return document.getElementById(id); }
 
+  // Cookie tasks (PayGo "Create Inst (Cookies)") verify via the exported IG
+  // cookie and have NO 2FA/password/email step (see tg_flows.py). The
+  // "Extra email" toggle therefore does not apply to them.
+  function isCookieTask(task) { return /cookie/i.test(String(task || '')); }
+
   // Toasts — used for operator-actionable conditions (e.g. a pooled account
   // that never joined the selected bot, so its task can never be claimed).
   function toast(msg, kind, ms) {
@@ -174,15 +179,19 @@
           tgField('Target goal',
             '<input id="tg-target" class="form-control" type="number" min="0" value="0">',
             '0 = run until stopped') +
-          tgField('Task name',
-            '<input id="tg-task" class="form-control" value="Create Inst (No mail)">',
-            'Submitted for every completed account') +
           tgField('Mining bot',
-            '<select id="tg-bot" class="form-control">' +
-              '<option value="taskly">Taskly Bot</option>' +
-              '<option value="paygo">PayGo Bot</option>' +
-            '</select>',
-            'Each completed account is submitted to this bot only.') +
+            '<div style="display:flex;align-items:center;gap:.5rem;">' +
+              '<img id="tg-bot-logo" src="img/bot_logo/taskly.png" alt="Taskly Bot logo" ' +
+                'width="30" height="30" style="border-radius:50%;flex:0 0 auto;object-fit:cover;">' +
+              '<select id="tg-bot" class="form-control" style="flex:1;">' +
+                '<option value="taskly">Taskly Bot</option>' +
+                '<option value="paygo">PayGo Bot</option>' +
+              '</select>' +
+            '</div>',
+            'Bot first — the Task list below shows only this bot\u2019s tasks.') +
+          tgField('Task name',
+            '<select id="tg-task" class="form-control"></select>',
+            'Only this bot\u2019s tasks — chosen by Mining bot first') +
           tgSwitch('Visible window', 'tg-vis-sw', true, 'tg-vis-lbl', 'Visible',
             'On = a real browser window opens. Off = background.') +
           tgSwitch('Extra email after 2FA + password', 'tg-adde-sw', true, 'tg-adde-lbl', 'On',
@@ -230,7 +239,7 @@
   // leasing a Telegram profile, so an empty/disabled/logged-out pool must be
   // refused here — otherwise we burn a Meta account and only then hit
   // "No Telegram profile is logged in".
-  function poolState(rows) {
+  function poolPreflight(rows) {
     var list = rows || [];
     var enabled = list.filter(function (p) { return p.enabled !== false; });
     return {
@@ -245,11 +254,18 @@
     var bot = ($('tg-bot') || {}).value || 'taskly';
     var botName = bot === 'paygo' ? 'PayGo' : 'Taskly';
     if (btn) btn.disabled = true;
-    fetch('/api/tg/status').then(function (r) { return r.ok ? r.json() : null; })
+    // no-store: the pool is a live read. A cached (stale/empty) status here used
+    // to block Start with "no profile in the pool" while the card above showed
+    // a Ready profile.
+    fetch('/api/tg/status', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (btn) btn.disabled = false;
         if (!s) throw new Error('status unavailable');
-        var st = poolState(s.pool && s.pool.accounts);
+        var list = (s.pool && s.pool.accounts) || null;
+        // Fall back to the pool the refresh loop last saw if this read came back
+        // empty — never block Start on one empty read.
+        if (!list || !list.length) list = state.pool || [];
+        var st = poolPreflight(list);
         if (!st.total) {
           toast('No Telegram account is connected. Click "+ Add MTProto" to log one in, then start.', 'error', 14000);
           append('! start blocked \u2014 no Telegram profile in the pool');
@@ -260,18 +276,21 @@
           toast('No connected Telegram account for ' + botName + '. Log in (or re-enable) a profile, then start.', 'error', 14000);
           append('! start blocked \u2014 no logged-in Telegram profile for ' + botName);
         } else {
+          var task = ($('tg-task') || {}).value || '🔥 Create Inst (No mail)';
+          // Cookie tasks have no email step (tg_flows.py) — force add_email off.
+          var effAddEmail = isCookieTask(task) ? false : addEmail;
           append('> start (' + st.connected + ' connected \u00b7 ' + botName +
                  ', parallel=' + (($('tg-conc') || {}).value || '?') +
                  ', target=' + (($('tg-target') || {}).value || '?') +
                  ', ' + (state.cfg.headless ? 'background' : 'visible') +
-                 ', add_email=' + addEmail + ')');
+                 ', add_email=' + effAddEmail + ')');
           post('/api/tg/start', {
             concurrency: parseInt(($('tg-conc') || {}).value || 5, 10),
             target: parseInt(($('tg-target') || {}).value || 0, 10),
             headless: state.cfg.headless,
-            tg_task: ($('tg-task') || {}).value || 'Create Inst (No mail)',
+            tg_task: task,
             tg_bot: bot,
-            add_email: addEmail,
+            add_email: effAddEmail,
           });
         }
       })
@@ -285,6 +304,68 @@
   function wire() {
     if ($('tg-start')) $('tg-start').addEventListener('click', startEngine);
     if ($('tg-stop')) $('tg-stop').addEventListener('click', function () { post('/api/tg/stop', {}); });
+    // Bot-first task list (mirrors tg_tasks.py — each bot offers ONLY its
+    // own tasks; Cookies is PayGo-only, No mail/2FA are Taskly-only).
+    // Rebuilt on every Mining-bot change so an unoffered task can never
+    // even be selected, let alone submitted.
+    var TASKS_BY_BOT = {
+      taskly: [
+        ['🔥 Create Inst (No mail)', '🔥 Create Inst (No mail) — 2FA flow'],
+        ['📱 Create Inst (2FA)', '📱 Create Inst (2FA) — 2FA flow'],
+      ],
+      paygo: [
+        ['📱 Create Inst (Cookies)', '📱 Create Inst (Cookies) — PayGo cookie flow'],
+      ],
+    };
+    function renderTaskOptions(bot) {
+      var t = $('tg-task');
+      if (!t) return;
+      var list = TASKS_BY_BOT[bot] || TASKS_BY_BOT.taskly;
+      var keep = t.value;
+      var html = '';
+      for (var i = 0; i < list.length; i++) {
+        html += '<option value="' + esc(list[i][0]) + '">' + esc(list[i][1]) + '</option>';
+      }
+      t.innerHTML = html;
+      // Keep the previous choice only if this bot actually offers it;
+      // otherwise default to the bot's first task.
+      var valid = false;
+      for (var j = 0; j < list.length; j++) { if (list[j][0] === keep) valid = true; }
+      t.value = valid ? keep : list[0][0];
+    }
+    // Cookie tasks have no email step (tg_flows.py) — grey out + disable the
+    // toggle so the operator is not misled; it is also ignored server-side.
+    function applyFlowGuards() {
+      var task = ($('tg-task') || {}).value || '';
+      var cookie = isCookieTask(task);
+      var sw = $('tg-adde-sw');
+      var lbl = $('tg-adde-lbl');
+      var field = sw ? sw.closest('.creator-field') : null;
+      if (sw) {
+        sw.disabled = cookie;
+        sw.title = cookie
+          ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
+          : '';
+      }
+      if (field) field.style.opacity = cookie ? '0.5' : '1';
+      if (lbl) lbl.textContent = cookie ? 'Not used' : (addEmail ? 'On' : 'Off');
+    }
+    renderTaskOptions((($('tg-bot') || {}).value || 'taskly'));
+    applyFlowGuards();
+    // Bot-aware task default: PayGo only offers the Cookies task now (the old
+    // 2FA button is gone from its menu), Taskly runs the 2FA/No-mail flow.
+    // Manual override still possible via the Task dropdown.
+    if ($('tg-bot')) $('tg-bot').addEventListener('change', function () {
+      var b = ($('tg-bot') || {}).value || 'taskly';
+      var logo = $('tg-bot-logo');
+      if (logo) {
+        logo.src = 'img/bot_logo/' + (b === 'paygo' ? 'paygo' : 'taskly') + '.png';
+        logo.alt = (b === 'paygo' ? 'PayGo' : 'Taskly') + ' Bot logo';
+      }
+      renderTaskOptions(b);
+      applyFlowGuards();
+    });
+    if ($('tg-task')) $('tg-task').addEventListener('change', applyFlowGuards);
     if ($('tg-vis-sw')) $('tg-vis-sw').addEventListener('change', function () { setWindow(!$('tg-vis-sw').checked); });
     if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; if ($('tg-adde-lbl')) $('tg-adde-lbl').textContent = addEmail ? 'On' : 'Off'; });
     if ($('tg-refresh')) $('tg-refresh').addEventListener('click', refresh);
@@ -392,53 +473,101 @@
     tgAction('/api/tg/accounts/remove', { id: id }, id + ' removed');
   }
 
-  /* ---------------- pool ---------------- */
+  /* Pool state for one profile CARD (mirrors meta_auto_ai's poolState).
+     Named profileState — NOT poolState: the Start preflight already owns that
+     name above. Two same-named declarations meant the later one won, so the
+     preflight silently got this function's shape (total === undefined) and
+     blocked every start. */
+  function profileState(p) {
+    if (p.status === 'busy') return { key: 'busy', label: 'In use', cls: 'badge-warn' };
+    if (p.enabled === false) return { key: 'disabled', label: 'Disabled', cls: 'badge-inactive' };
+    if (!p.logged_in) return { key: 'nosess', label: 'No session', cls: 'badge-rose' };
+    return { key: 'idle', label: 'Ready', cls: 'badge-active' };
+  }
+
+  function tgEdit(id) {
+    var cur = null;
+    for (var i = 0; i < state.pool.length; i++) {
+      if (state.pool[i].id === id) { cur = state.pool[i]; break; }
+    }
+    cur = cur || {};
+    var name = window.prompt('Display name for ' + id + ':', cur.name || cur.label || '');
+    if (name === null) return;
+    var phone = window.prompt('Phone number for ' + id + ':', cur.phone || '');
+    if (phone === null) return;
+    tgAction('/api/tg/accounts/update', { id: id, name: name, phone: phone }, id + ' updated');
+  }
+
+  function tgBalanceOne(id) {
+    append('> balance ' + id + ' (Taskly + PayGo)');
+    fetch('/api/tg/mtproto/balance', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) {
+          toast((j && j.error) || ('balance failed for ' + id), 'error', 12000);
+          append('! balance ' + id + ': ' + ((j && j.error) || 'failed'));
+          return;
+        }
+        var parts = ((j && j.bots) || []).map(function (b) {
+          return (b.name || b.target) + ' ' + (b.ok ? (b.balance || '?') : ('\u26a0 ' + (b.error || 'n/a')));
+        });
+        append('= ' + id + ': ' + (parts.join(' | ') || 'ok'));
+      })
+      .catch(function (e) { append('! balance ' + id + ': ' + e); });
+  }
+
   function renderPool(rows) {
     state.pool = rows || [];
     var el = $('tg-pool'), sum = $('tg-pool-sum');
     var ready = state.pool.filter(function (p) { return p.logged_in; }).length;
     var busy = state.pool.filter(function (p) { return p.status === 'busy'; }).length;
-    if (sum) sum.textContent = ready + ' / ' + state.pool.length + ' \u00b7 ' + ready +
-      ' ready \u00b7 ' + busy + ' in use';
+    if (sum) sum.textContent = state.pool.length + (state.pool.length === 1 ? ' profile' : ' profiles') +
+      ' \u00b7 ' + ready + ' ready \u00b7 ' + busy + ' in use';
     if (!el) return;
     if (!state.pool.length) {
       el.innerHTML = '<div class="creator-option-hint">No profiles yet. Use <b>+ Add MTProto</b> above.</div>';
       return;
     }
     el.innerHTML = state.pool.map(function (p) {
-      var label = p.label || p.id;
-      // Don't repeat the id when the label already contains it (e.g. "TG tg_1").
-      var showId = String(label) !== String(p.id) && String(label).indexOf(String(p.id)) === -1;
-      var busy = p.status === 'busy';
-      var statusPill = !p.logged_in
-        ? '<span class="profile-status-badge badge-inactive">Not logged in</span>'
-        : busy
-          ? '<span class="profile-status-badge" style="background:rgba(245,158,11,.18);color:var(--accent-amber);border:1px solid rgba(245,158,11,.35);">In use</span>'
-          : '<span class="profile-status-badge badge-active">Ready</span>';
-      var metaBits = [];
-      if (p.phone) metaBits.push(esc(p.phone));
-      metaBits.push(esc(busy ? 'in use' : (p.status || 'idle')));
-      metaBits.push((p.tasks_done || 0) + ' tasks');
-      return '<div class="tg-profile-row">' +
+      var st = profileState(p);
+      // Prefer the editable display name ("Asif BL"); fall back to the stored
+      // auto-label minus its trailing mode suffix ("TG tg_1 · MTProto").
+      var display = p.name ||
+        String(p.label || p.id).replace(/\s*[·|]\s*(mtproto|web)\s*$/i, '').trim() || String(p.id);
+      var isMt = (p.mode || 'mtproto') === 'mtproto';
+      var modePill = isMt
+        ? '<span class="tg-mode-pill tg-mode-mtproto" title="Logged in over MTProto (Telethon) \u2014 no browser"><i class="fa-solid fa-bolt"></i>MTProto</span>'
+        : '<span class="tg-mode-pill tg-mode-web" title="Logged in via Telegram Web (browser)"><i class="fa-solid fa-globe"></i>Web</span>';
+      var busyLock = p.status === 'busy';
+      var off = p.enabled === false;
+      var sub = p.phone
+        ? '<span class="tg-profile-phone">' + esc(p.phone) + '</span>'
+        : '<span>' + esc(p.status || 'idle') + ' \u00b7 ' + (p.tasks_done || 0) + ' tasks</span>';
+      var dis = busyLock ? ' disabled title="Release the profile first"' : '';
+      return '<div class="tg-profile-row' + (off ? ' is-off' : '') + (busyLock ? ' is-busy' : '') + '">' +
         '<div class="tg-profile-main">' +
           '<span class="tg-profile-avatar"><i class="fa-brands fa-telegram"></i></span>' +
           '<div class="tg-profile-info">' +
             '<div class="tg-profile-title">' +
-              '<strong>' + esc(label) + '</strong>' +
-              (showId ? '<span class="badge-pill">' + esc(p.id) + '</span>' : '') +
-              '<span class="badge-pill">' + esc((p.mode || 'web').toUpperCase()) + '</span>' +
-              statusPill +
+              '<strong>' + esc(display) + '</strong>' +
+              '<span class="tg-profile-id">' + esc(p.id) + '</span>' +
+              modePill +
+              '<span class="profile-status-badge ' + st.cls + '" title="' + esc(st.label) + '">' + esc(st.label) + '</span>' +
             '</div>' +
-            '<div class="tg-profile-meta">' + metaBits.join(' \u00b7 ') + '</div>' +
+            '<div class="tg-profile-meta">' + sub + '</div>' +
           '</div>' +
         '</div>' +
         '<div class="tg-profile-actions">' +
-          '<span class="creator-option-hint">' + (p.enabled ? 'Enabled' : 'Disabled') + '</span>' +
-          '<label class="switch" title="' + (p.enabled ? 'Disable \u2014 stops receiving tasks' : 'Enable for tasks') + '">' +
-            '<input type="checkbox" data-tg-enable="' + esc(p.id) + '"' + (p.enabled ? ' checked' : '') + '>' +
+          '<label class="switch" title="' + (off ? 'Disabled \u2014 click to enable for tasks' : 'Enabled \u2014 click to disable for tasks') + '">' +
+            '<input type="checkbox" data-tg-enable="' + esc(p.id) + '"' + (off ? '' : ' checked') + '>' +
             '<span class="slider"></span>' +
           '</label>' +
-          '<button type="button" class="btn btn-sm btn-danger" data-tg-del="' + esc(p.id) + '"' +
+          '<button type="button" class="tg-icon-btn" data-tg-edit="' + esc(p.id) + '"' +
+            ' title="Edit name / phone"><i class="fa-solid fa-pencil"></i></button>' +
+          '<button type="button" class="tg-icon-btn tg-icon-btn-indigo" data-tg-bal="' + esc(p.id) + '"' + dis +
+            ' title="Get balance (Taskly + PayGo)"><i class="fa-solid fa-wallet"></i></button>' +
+          '<button type="button" class="tg-icon-btn tg-icon-btn-danger" data-tg-del="' + esc(p.id) + '"' + dis +
             ' title="Remove this profile and its session"><i class="fa-solid fa-trash-can"></i></button>' +
         '</div>' +
       '</div>';
@@ -447,6 +576,12 @@
     if (el.querySelectorAll) {
       el.querySelectorAll('[data-tg-enable]').forEach(function (b) {
         b.addEventListener('change', function () { tgToggle(b.dataset.tgEnable, b.checked); });
+      });
+      el.querySelectorAll('[data-tg-edit]').forEach(function (b) {
+        b.addEventListener('click', function () { tgEdit(b.dataset.tgEdit); });
+      });
+      el.querySelectorAll('[data-tg-bal]').forEach(function (b) {
+        b.addEventListener('click', function () { tgBalanceOne(b.dataset.tgBal); });
       });
       el.querySelectorAll('[data-tg-del]').forEach(function (b) {
         b.addEventListener('click', function () { tgRemove(b.dataset.tgDel); });
@@ -491,7 +626,7 @@
 
   function refresh() {
     if (!root) return;
-    fetch('/api/tg/status').then(function (r) { return r.ok ? r.json() : null; })
+    fetch('/api/tg/status', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) { setStatus(false, null); return; }
         setStatus(!!s.running, s.ig_mode);

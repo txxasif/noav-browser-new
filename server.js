@@ -78,6 +78,8 @@ function readTgPool() {
     return (Array.isArray(rows) ? rows : Object.values(rows)).map(a => ({
       id: a.id,
       label: a.label || a.name || a.id,
+      name: a.name || null,
+      phone: a.phone || null,
       mode: a.mode || 'web',
       enabled: a.enabled !== false,
       proxy: a.proxy || null,
@@ -201,15 +203,26 @@ function sendJson(req, res, obj, statusCode) {
   try {
     const body = Buffer.from(JSON.stringify(obj));
     const ae = String((req && req.headers && req.headers['accept-encoding']) || '');
+    // Every API response is no-store: these are live reads of the engine/pool
+    // and MUST never be served from the browser cache. Without this, a cached
+    // (stale or empty) /api/tg/status could paint a populated pool while the
+    // Start preflight read the cached empty copy and blocked with
+    // "no Telegram profile in the pool".
+    const baseHeaders = {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    };
     if (ae.includes('gzip') && body.length > 1024) {
       try {
         const gz = zlib.gzipSync(body);
-        res.writeHead(statusCode || 200, { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' });
+        res.writeHead(statusCode || 200, Object.assign({}, baseHeaders, { 'Content-Encoding': 'gzip', 'Vary': 'Accept-Encoding' }));
         res.end(gz);
         return;
       } catch (e) {}
     }
-    res.writeHead(statusCode || 200, { 'Content-Type': 'application/json' });
+    res.writeHead(statusCode || 200, baseHeaders);
     res.end(body);
   } catch (e) {
     res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -871,6 +884,23 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (pathname === '/api/tg/accounts/update' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const id = String(b.id || '').trim();
+      if (!id) { sendJson(req, res, { ok: false, error: 'id required' }, 400); return; }
+      const args = ['--id', id];
+      if (b.enabled !== undefined) args.push('--enabled', b.enabled ? '1' : '0');
+      if (b.name !== undefined) args.push('--name', String(b.name));
+      if (b.phone !== undefined) args.push('--phone', String(b.phone));
+      if (args.length <= 2) { sendJson(req, res, { ok: false, error: 'nothing to update' }, 400); return; }
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_toggle.py', args, 60000);
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 400);
+    });
+    return;
+  }
   if (pathname === '/api/tg/pool/enable_all' && req.method === 'POST') {
     let body = '';
     req.on('data', c => { body += c; });
@@ -1039,7 +1069,7 @@ const server = http.createServer((req, res) => {
     req.on('aborted', releaseStartTg);
     req.on('end', async () => {
       let opts = { concurrency: 3, target: 0, delay: 4, headless: true,
-                   captcha: 'extension', tg_task: 'Create Inst (No mail)',
+                   captcha: 'extension', tg_task: '🔥 Create Inst (No mail)',
                    tg_bot: 'taskly', add_email: false, twofa: true };
       try { if (body) opts = Object.assign(opts, JSON.parse(body)); } catch (e) {}
 
@@ -1063,7 +1093,7 @@ const server = http.createServer((req, res) => {
       const delay = Math.max(1, parseInt(opts.delay || 4, 10) || 4);
       const headless = opts.headless !== false;
       const captcha = opts.captcha || 'extension';
-      const tgTask = String(opts.tg_task || 'Create Inst (No mail)').slice(0, 80);
+      const tgTask = String(opts.tg_task || '🔥 Create Inst (No mail)').slice(0, 80);
       const tgBot = ['taskly', 'paygo'].includes(String(opts.tg_bot))
         ? String(opts.tg_bot) : 'taskly';
       const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
@@ -1097,6 +1127,9 @@ const server = http.createServer((req, res) => {
       ];
       if (opts.twofa !== false) args.push('--twofa');
       if (opts.add_email === true || opts.add_email === 'true') args.push('--add-email');
+      // PayGo Cookies task runs a different engine flow (no 2FA leg: Meta ->
+      // TG creds -> IG join + follow -> cookie export -> cookie submit).
+      if (/cookie/i.test(tgTask)) args.push('--cookie');
       if (headless) args.push('--headless');
 
       console.log(`[MetaCreator] Starting TG Classic: ${PYTHON_BIN} ${args.join(' ')}`);

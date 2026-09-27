@@ -60,23 +60,36 @@ class EngineMetaMixin:
             return False
 
     def _meta_signup_control(self, page):
-        """Return the visible Meta signup control, if the page has hydrated."""
-        dialog_selector = (
+        """Return the visible Meta signup CONTROL (a real button / link / role).
+
+        Do NOT include a bare ``div:has-text("Sign up")`` alternative. The
+        dialog is itself a ``<div>`` whose text contains "Sign up", and
+        Playwright resolves a comma selector's ``.first`` in DOM order — so the
+        match was the DIALOG CONTAINER (an ancestor), not the button. The funnel
+        then "clicked" the container (a no-op), waited ~7s for an auth step that
+        never came, returned False, and only the fallback in ``meta_signup``
+        finally clicked the real button. Verified live via MCP on meta.ai
+        (2026-09-27): the dialog holds a real ``<button>Sign up</button>``
+        (77x36) plus a header button (72x32).
+        """
+        control_selector = (
+            'button:text-is("Sign up"), '
+            '[role="button"]:text-is("Sign up"), '
+            'a:text-is("Sign up"), '
             'button:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
             '[role="button"]:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
-            'a:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
-            'div:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook"))'
+            'a:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook"))'
         )
         try:
             dialog = page.locator('div[role="dialog"]').first
             if dialog.count() > 0 and dialog.is_visible():
-                sign_btn = dialog.locator(dialog_selector).first
+                sign_btn = dialog.locator(control_selector).first
                 if sign_btn.count() > 0 and sign_btn.is_visible():
                     return sign_btn
         except Exception:
             pass
         try:
-            sign_btn = page.locator(dialog_selector).first
+            sign_btn = page.locator(control_selector).first
             if sign_btn.count() > 0 and sign_btn.is_visible():
                 return sign_btn
         except Exception:
@@ -167,12 +180,17 @@ class EngineMetaMixin:
                     if dialog.count() > 0 and dialog.is_visible():
                         # NEVER match "Sign up with Instagram/Facebook": those
                         # are different products and navigating to them is the
-                        # "Sign up bounces to instagram.com" bug.
+                        # "Sign up bounces to instagram.com" bug. Also NO bare
+                        # `div:has-text("Sign up")`: the dialog is itself a div
+                        # containing the text, and DOM-order `.first` returns the
+                        # container (a no-op click) instead of the button.
                         sign_btn = dialog.locator(
+                            'button:text-is("Sign up"), '
+                            '[role="button"]:text-is("Sign up"), '
+                            'a:text-is("Sign up"), '
                             'button:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
                             '[role="button"]:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
-                            'a:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
-                            'div:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook"))'
+                            'a:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook"))'
                         ).first
                         if sign_btn.count() > 0 and sign_btn.is_visible():
                             try:

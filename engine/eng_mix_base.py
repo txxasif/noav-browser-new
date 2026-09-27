@@ -184,13 +184,27 @@ class EngineBaseMixin:
             focused = False
             try:
                 locator.focus(timeout=2000)
-                focused = bool(locator.evaluate("el => document.activeElement === el"))
+                # Only a REAL text field may receive Control+A. A Bloks/React
+                # wrapper div with tabindex also satisfies `activeElement === el`,
+                # but Control+A on it selects the WHOLE DOCUMENT — the blue
+                # "everything highlighted" login screen (observed 2026-09-27),
+                # and the field never receives the value so Log in stays dead.
+                focused = bool(locator.evaluate(
+                    "el => document.activeElement === el && "
+                    "(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')"))
             except Exception:
                 focused = False
             if focused:
                 page.keyboard.press("Control+A")
                 page.keyboard.press("Backspace")
                 page.wait_for_timeout(50)
+            else:
+                # Never leave a stray document-wide selection behind.
+                try:
+                    page.evaluate("() => { const s = window.getSelection && window.getSelection(); "
+                                  "if (s && s.rangeCount) s.removeAllRanges(); }")
+                except Exception:
+                    pass
             try:
                 locator.fill("")
             except Exception:

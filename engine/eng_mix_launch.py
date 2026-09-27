@@ -449,6 +449,23 @@ class EngineLaunchMixin:
             # headless shell, so the Visual AI captcha extension loads headless.
             launch_kwargs["channel"] = "chromium"
 
+        # -- Headless parity assertion (INSTA_HEADLESS_STRICT, default ON) -----
+        # Ported from meta_auto_ai: Headless must behave 100% like Visible for
+        # anything that touches Instagram. The one way it can silently differ is
+        # the Visual AI extension failing to load (the extension-less headless
+        # shell, or a fallback launch that dropped `channel`) while the run
+        # quietly proceeds on the weaker Audio STT solver — which Google then
+        # rate-limits ("automated queries"). _verify_headless_parity() below
+        # PROVES the extension's MV3 service worker is alive, and refuses to
+        # start (or relaunches pinned to full Chromium) otherwise.
+        # INSTA_HEADLESS_STRICT=0 restores the old silent-fallback behaviour.
+        _strict_headless = bool(
+            is_headless_launch
+            and have_ext
+            and str(os.environ.get("INSTA_HEADLESS_STRICT", "1")).strip().lower()
+            not in ("0", "false", "no", "off")
+        )
+
         # Resilient multi-engine launch: bundled Chromium is standard and has 100% unpacked extension support.
         # Fall back to Chrome/Edge if bundled Chromium is missing or fails.
         launched = False
@@ -530,6 +547,10 @@ class EngineLaunchMixin:
                     w.context = w.playwright.chromium.launch_persistent_context(**launch_kwargs)
                 except Exception as exc:
                     self.log(f'[❌] Browser launch failed after fallback: {exc}')
+        # Headless must run identical to Visible: PROVE the Visual AI extension
+        # actually loaded, or refuse (INSTA_HEADLESS_STRICT, default ON).
+        if _strict_headless:
+            self._verify_headless_parity(ext_dir, launch_kwargs, w)
         # Block third-party ads/analytics/trackers at the network layer. Cuts
         # page weight, memory and load time during signup. Env-gated:
         # INSTA_BLOCK_TRACKERS=0 disables (for A/B). Only well-known
@@ -589,4 +610,78 @@ class EngineLaunchMixin:
             pass
         self.page = w.context.pages[0] if w.context.pages else w.context.new_page()
         w.page = self.page
+
+    # ------------------------------------------------------------------ #
+    # Headless parity: prove headless == visible, or refuse to run
+    # (ported from meta_auto_ai/engine/eng_mix_launch.py)
+    # ------------------------------------------------------------------ #
+    def _verify_headless_parity(self, ext_dir, launch_kwargs, w):
+        """PROVE the Visual AI captcha extension actually loaded, or fail.
+
+        The extension is a Manifest V3 extension whose only runtime artefact is
+        a service worker. When it loads, that worker appears in
+        ``context.service_workers``; when the extension-less headless shell (or
+        a fallback launch that dropped ``channel``) is used, it is silently
+        absent and the run proceeds on the weaker Audio STT solver. This turns
+        that silent downgrade into a hard, named failure.
+        """
+        ext_name = ("JA Captcha (Visual AI)" if "Captcha" in str(ext_dir)
+                    else "reCAPTCHA Solver")
+
+        def _worker_alive(deadline=12.0):
+            # MV3 workers can start lazily, so poke a page to trigger
+            # activation, then poll briefly before declaring it dead.
+            try:
+                pg = (w.context.pages[0] if w.context.pages
+                      else w.context.new_page())
+                try:
+                    pg.goto("about:blank", timeout=15000)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            end = time.time() + deadline
+            while time.time() < end:
+                try:
+                    if w.context.service_workers:
+                        return True
+                except Exception:
+                    pass
+                time.sleep(0.5)
+            return False
+
+        if _worker_alive():
+            self.log(f'[🧩] Headless parity OK — {ext_name} service worker is live '
+                     f'(identical captcha solver to Visible).')
+            return True
+
+        # Not alive. One rescue attempt: relaunch pinned to full Chromium, since
+        # the headless shell is the only reason the worker would be missing.
+        self.log(f'[❌] Headless parity FAILED: {ext_name} did not load '
+                 f'(channel={launch_kwargs.get("channel")!r}). Refusing to start '
+                 f'a session on the weaker Audio STT solver.')
+        try:
+            w.context.close()
+        except Exception:
+            pass
+        kw = dict(launch_kwargs)
+        kw["channel"] = "chromium"
+        try:
+            w.context = w.playwright.chromium.launch_persistent_context(**kw)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Headless parity: {ext_name} did not load and the new-headless "
+                f"relaunch failed ({exc}). Headless cannot run identical to "
+                f"Visible here. Install the full Chromium build "
+                f"(`playwright install chromium`) or run visible (dashboard "
+                f"'Visible' / headless=0). To accept the weaker Audio STT solver "
+                f"instead, set INSTA_HEADLESS_STRICT=0.") from exc
+        if _worker_alive():
+            self.log('[🧩] Headless parity OK after new-headless relaunch.')
+            return True
+        raise RuntimeError(
+            f"Headless parity: {ext_name} still did not load after relaunching "
+            f"with channel='chromium'. Headless cannot run identical to Visible "
+            f"on this machine. Run visible, or set INSTA_HEADLESS_STRICT=0 to "
+            f"accept Audio STT.")
 

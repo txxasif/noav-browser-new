@@ -550,7 +550,8 @@ TG_DEFAULT_TASK = "Create Inst (No mail)"
 
 def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
                  tg_bot="taskly", captcha_mode="extension", mail_provider="mailtd",
-                 add_email=False, emu_ig=False, emu_devices=3, emu_apk=None):
+                 add_email=False, emu_ig=False, emu_devices=3, emu_apk=None,
+                 cookie=False):
     """Coupled per-task loop: ONE browser does Meta → TG task → IG → submit.
 
     N slots run in parallel (each opens its own Meta/IG browser up front);
@@ -583,13 +584,25 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 return "done"
             _session_count += 1
         try:
-            ok, detail = tg_worker.run_tg_coupled_cycle(
-                AISlotWorker, slot_id=slot_id, is_headless=is_headless,
-                tg_task=task, tg_bot=tg_bot,
-                captcha_mode=captcha_mode, mail_provider=mail_provider,
-                add_email=add_email, emu_ig=emu_ig,
-                emu_devices=emu_devices, emu_apk=emu_apk,
-                stop_event=_stop)
+            if cookie:
+                # PayGo Cookies task: Meta -> TG creds -> IG join + follow ->
+                # cookie export -> cookie submit -> register (no 2FA leg).
+                # Lazy import: run_cookie_cycle lazily imports AISlotWorker
+                # back, so a top-level import here would be circular.
+                from run_cookie_cycle import run_cookie_cycle_once
+                ok, detail = run_cookie_cycle_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email)
+            else:
+                ok, detail = tg_worker.run_tg_coupled_cycle(
+                    AISlotWorker, slot_id=slot_id, is_headless=is_headless,
+                    tg_task=task, tg_bot=tg_bot,
+                    captcha_mode=captcha_mode, mail_provider=mail_provider,
+                    add_email=add_email, emu_ig=emu_ig,
+                    emu_devices=emu_devices, emu_apk=emu_apk,
+                    stop_event=_stop)
             err_text = "" if ok else str(detail or "")
         except Exception as exc:
             ok, err_text = False, str(exc)
@@ -650,6 +663,10 @@ def main():
     parser.add_argument("--add-email", action="store_true",
                         help="telegram coupled: after password+2FA, add a fresh mail.td email in Accounts Center")
     parser.add_argument("--tg-profile", type=str, default=None, help="Force one Telegram profile id")
+    parser.add_argument("--cookie", action="store_true",
+                        help="PayGo Cookies task loop: Meta -> TG creds -> IG join + follow -> "
+                             "cookie export -> cookie submit -> register (no 2FA leg). "
+                             "Takes precedence over --tg-task/--tg-bot.")
     parser.add_argument("--start-stagger-ms", type=int, default=None,
                         help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
 
@@ -762,7 +779,8 @@ def main():
     else:
         # coupled_loop drives Meta -> TG task -> IG -> submit; credentials come
         # from the leased profile, and there is no fixed username/password.
-        _shared.update(task=args.tg_task, tg_bot=args.tg_bot, add_email=args.add_email)
+        _shared.update(task=args.tg_task, tg_bot=args.tg_bot, add_email=args.add_email,
+                       cookie=bool(getattr(args, "cookie", False)))
     # Self-heal TG leases. The Windows Stop button kills the worker with
     # TerminateProcess, so the coupled cycle's `finally: tg_manager.release`
     # never runs and the profile stays `busy` until LEASE_TTL (20 min). Reset

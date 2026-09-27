@@ -153,6 +153,7 @@ class EngineSignupMixin:
             clicked_email_btn = True
         else:
             # Check if the page is rendering the Meta AI modal (as in media_1789619105619.png)
+            bounced = 0
             for _ in range(3):
                 tail = (p.inner_text("body") or "").lower()
                 if "sign in to get started" in tail or "log in or sign up to ask meta ai" in tail or "where should we start" in tail:
@@ -202,7 +203,18 @@ class EngineSignupMixin:
                             pass
                     p.wait_for_timeout(3500)
                     if self._is_ig_bounce_url(p.url):
-                        self.log('[⚠️] "Sign up" bounced to Instagram — returning to the Meta entry.')
+                        bounced += 1
+                        self.log(f'[⚠️] "Sign up" bounced to Instagram ({bounced}/2) — returning to the Meta entry.')
+                        # Two bounces in a row is Meta gate/throttle, not a flake.
+                        # Before, we returned to meta.ai and then fell through to
+                        # the email step on a page that never rendered it, ending
+                        # with a misleading "Could not verify email field was
+                        # populated" (observed 2026-09-27 14:59). Abort with the
+                        # real reason instead of burning the slot on a hot IP.
+                        if bounced >= 2:
+                            raise RuntimeError(
+                                "Meta signup bounced to Instagram twice (IP throttled / Meta "
+                                "gating) — cooldown 5-10 min, lower creators to 1-2, retry")
                         try:
                             p.goto(_META_AI_URL, wait_until="domcontentloaded", timeout=60000)
                             p.wait_for_timeout(2500)
@@ -370,17 +382,49 @@ class EngineSignupMixin:
                 self._prefill_getstarted_password(p)
         if not self._advance(p, ["Next", "Continue"], "textbox", "New password"):
             self._advance(p, ["Next", "Continue"], "textbox", "Password")
-        p.wait_for_timeout(3000)
         self.log('[➡️] Password submitted.')
 
-        # Mobile: "Save your login info?"
-        if not self._try_click(p, "Not now", timeout=6000):
-            self._try_click(p, "Save", timeout=4000)
-        p.wait_for_timeout(3000)
+        # Desktop goes straight from password to "Edit your Meta AI details":
+        # there is no "Save your login info?" and no "Create account" — those
+        # belong to the MOBILE funnel. The old blind 3000 + 3000 + 5000 ms sleeps
+        # meant Confirm sat visible for ~11s before we even looked for it. Poll
+        # for whichever screen actually rendered and return the instant it does.
+        def _next_screen():
+            try:
+                t = (p.inner_text("body") or "").lower()
+            except Exception:
+                return None
+            if "edit your meta ai details" in t or "name (optional)" in t:
+                return "details"
+            if ("save your login info" in t or "save login info" in t
+                    or "finish creating your meta account" in t):
+                return "mobile"
+            return None
 
-        # Mobile: "Finish creating your Meta account"
-        self._try_click(p, "Create account", timeout=8000)
-        p.wait_for_timeout(5000)
+        def _on_details() -> bool:
+            return _next_screen() == "details"
+
+        screen = None
+        for _ in range(40):  # up to ~10s, but returns the moment a screen shows
+            screen = _next_screen()
+            if screen:
+                break
+            p.wait_for_timeout(250)
+
+        if screen != "details":
+            # Mobile: "Save your login info?"
+            if not self._try_click(p, "Not now", timeout=6000):
+                self._try_click(p, "Save", timeout=4000)
+            p.wait_for_timeout(1000)
+
+            # Mobile: "Finish creating your Meta account"
+            self._try_click(p, "Create account", timeout=8000)
+            # Poll for the details screen rather than a blind 5s sleep (mobile
+            # also passes through it on some variants).
+            for _ in range(40):
+                if _on_details():
+                    break
+                p.wait_for_timeout(250)
 
         # Desktop-only: Meta AI username/name screen ("Edit your Meta AI details")
         has_details = False
@@ -423,6 +467,8 @@ class EngineSignupMixin:
 
             # Avatar upload. Probe first: some details variants carry no
             # photo picker, and expect_file_chooser would burn 10s waiting.
+            # Timeouts kept SHORT: the avatar is optional but Confirm is the step
+            # that creates the account, so the picker must never stall it.
             try:
                 _probe = p.locator('input[type="file"], button[aria-label*="photo" i], button[aria-label*="avatar" i], button[aria-label*="camera" i], button[aria-label*="profile picture" i]').first
                 _has_picker = _probe.count() > 0 and _probe.is_visible()
@@ -432,19 +478,19 @@ class EngineSignupMixin:
                 try:
                     _sp = getattr(self, "selfie_path", None)
                     if _sp and os.path.exists(_sp):
-                        with p.expect_file_chooser(timeout=8000) as _fc:
+                        with p.expect_file_chooser(timeout=3000) as _fc:
                             if not (
-                                self._try_click(p, "Add profile photo", timeout=3000)
-                                or self._try_click(p, "Add a profile photo", timeout=2000)
-                                or self._try_click(p, "Edit", timeout=2000)
+                                self._try_click(p, "Add profile photo", timeout=1500)
+                                or self._try_click(p, "Add a profile photo", timeout=1000)
+                                or self._try_click(p, "Edit", timeout=1000)
                             ):
                                 try:
                                     if _probe.count() > 0 and _probe.is_visible():
-                                        _probe.click(force=True, timeout=3000)
+                                        _probe.click(force=True, timeout=1500)
                                 except Exception:
                                     pass
                         _fc.value.set_files(_sp)
-                        p.wait_for_timeout(2500)
+                        p.wait_for_timeout(1200)
                         self.log('[🖼️] Details avatar uploaded.')
                 except Exception as _exc:  # noqa: BLE001
                     self.log(f'[⚠️] Details avatar skipped: {_exc}')

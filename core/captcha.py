@@ -135,6 +135,34 @@ class CaptchaMixin:
                     pass
                 cur_url = (p.url or "").lower()
 
+            # Stuck-checkpoint guard: auth.meta.com/checkpoint… that only ever
+            # renders grey placeholder bars (skeleton) — no reCAPTCHA, no
+            # Continue. Nothing to solve and nothing to click, so the 4 retries
+            # just burn the whole 600s window. Wait ~12s for real controls; if
+            # none appear, dead-end now (close + next account).
+            if "checkpoint" in cur_url or "checkpoint" in cur_body or "checkpoints" in cur_url:
+                _ready = False
+                for _ in range(12):
+                    try:
+                        _n = p.evaluate("""() => {
+                            const vis = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                            const btns = Array.from(document.querySelectorAll('button, div[role="button"]')).filter(vis);
+                            const inps = Array.from(document.querySelectorAll('input')).filter(vis);
+                            return btns.length + inps.length;
+                        }""")
+                    except Exception:
+                        _n = 1
+                    if _n:
+                        _ready = True
+                        break
+                    p.wait_for_timeout(1000)
+                if not _ready and self._has_human_check(p) is False and "confirm" not in cur_body:
+                    self.log('[🛡️] Meta checkpoint is a stuck skeleton (no controls rendered in 12s) '
+                             '— dead end; closing and moving to the next account.')
+                    raise MetaCheckpointBlocked(
+                        "Meta checkpoint rendered no controls (stuck loading skeleton) — "
+                        "dead end, not a solvable captcha")
+
             if self._has_human_check(p) or "confirm" in cur_body or "checkpoints" in cur_url:
                 self._try_click(p, "Continue", timeout=8000)
                 self._poll_checkpoint_settled(p, timeout=8)

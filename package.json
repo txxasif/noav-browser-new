@@ -5,8 +5,12 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "license:deploy": "bash worker/license/deploy.sh",
     "worker:build": "node worker/license/scripts/build-worker.js",
+    "worker:secret": "cd worker/license && cat .signing_key.pem | npx wrangler secret put LICENSE_SIGNING_KEY",
     "worker:deploy": "cd worker/license && npx wrangler deploy",
+    "worker:dev": "cd worker/license && npx wrangler dev",
+    "worker:tail": "cd worker/license && npx wrangler tail",
     "build:win": "python3 build_windows_dist.py",
     "release": "node scripts/release.js"
   },

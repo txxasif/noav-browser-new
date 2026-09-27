@@ -522,14 +522,16 @@ def run_tg_coupled_cycle(
                         except Exception as exc:
                             emu_log(f"[⚠️] Email fallback failed ({exc}) — submitting anyway (best-effort).")
                 else:
+                    # Operator rule: email never kills the task — submit anyway.
                     try:
                         linked = _ig_emu.emu_add_email(serial, runner.email, _fetch_otp, log=emu_log)
                     except _ig_emu.EmuDeadEnd:
                         raise
                     except Exception as exc:
-                        raise RuntimeError(f"Email linkage failed in-app ({exc}) — refusing to submit")
+                        linked = False
+                        emu_log(f"[⚠️] Email linkage failed in-app ({exc}) — submitting anyway (email never rejects).")
                     if not linked:
-                        raise RuntimeError("Email linkage unconfirmed in-app — refusing to submit")
+                        emu_log("[⚠️] Email unconfirmed in-app — submitting anyway (email never rejects).")
             finally:
                 if emu_dev:
                     try:
@@ -581,10 +583,20 @@ def run_tg_coupled_cycle(
         # Env: INSTA_FOLLOW_AFTER_LOGIN=0, INSTA_FOLLOW_COUNT. No scrolling.
         ig_page = runner._ig_tab()
         if runner._has_human_check(ig_page):
-            try:
-                runner._handle_human(ig_page, timeout=30)
-            except Exception:
-                pass
+            # DEAD END (operator decision): the "Confirm you're human to use your
+            # profile" checkpoint on a FRESH IG account is not solvable by our
+            # offline solvers (it then requires a phone/photo Meta can reject),
+            # and the account is unusable while it stands. auto_ai used to sit
+            # here for the full timeout and then drag the unverified account into
+            # Accounts Center, where it failed anyway — burning the lease and the
+            # whole task. Fail the cycle NOW so the browser closes, the Taskly
+            # task is cancelled and the next cycle opens a NEW task immediately.
+            # Phrasing avoids "mobile number" so it is not mistaken for the
+            # per-account phone wall by _is_phone_wall().
+            raise RuntimeError(
+                "Instagram: human checkpoint ('Confirm you're human to use your "
+                "profile') on a fresh account — dead end; closing and starting a "
+                "new task")
 
         # -- Step 4: IG-side completion (classic path; window gate above) -----
         # The pre-AC human warm-up (exit the registered cards with Back, then
@@ -597,22 +609,24 @@ def run_tg_coupled_cycle(
         # too would navigate Accounts Center twice for the same purpose. When
         # OFF, the signup email is linked here; ig_link_email_to_instagram
         # solves its own email re-auth via _ac_reauth.
+        #
+        # Operator rule: this is the LAST stop and never kills the task — a
+        # link failure logs loudly and the account still submits (both bots
+        # have accepted email-less reports live).
         if add_email:
             runner.log("[✉️] Extra-email enabled — deferring email link to after 2FA (saves an AC visit).")
         else:
-            # Taskly rejects reports for accounts with no confirmed email, so the
-            # signup email must ACTUALLY be linked — not best-effort. A failure
-            # here aborts before the account is burned on a doomed submit.
             try:
                 linked = runner.ig_link_email_to_instagram(runner.email)
             except IGDeadEnd:
                 raise
             except Exception as exc:
-                raise RuntimeError(
-                    f"Email linkage failed ({exc}) — refusing to submit without a confirmed email")
+                linked = False
+                log(f"[⚠️] Email linkage error ({exc}) — submitting anyway (email never rejects).")
             if not linked:
-                raise RuntimeError(
-                    "Email linkage unconfirmed — refusing to submit without a confirmed email")
+                log("[⚠️] Signup email unconfirmed — submitting anyway (email never rejects).")
+            else:
+                runner.log("[✉️] Signup email linked.")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                     "detail": "Instagram 2FA setup + TG submit…"})
         # Verified live (tg_1 history): BOTH tasks end with a bot code step

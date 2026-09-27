@@ -68,3 +68,10 @@ Thumbs.db
 *.swo
 .idea/
 .vscode/
+
+# Build-time JavaScript tooling (javascript-obfuscator) — never shipped/committed
+node_modules/
+package-lock.json
+
+# License signing key — NEVER commit (set as Cloudflare Worker secret)
+worker/license/.signing_key.pem

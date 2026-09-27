@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Nova Browser — Meta Account Creator</title>
+  <!-- Suppress the default favicon 404 (no icon asset ships). -->
+  <link rel="icon" href="data:,">
   <!-- Icons: non-blocking (no render-blocking CDN round-trip; keeps the UI
        responsive even when offline). Google Fonts removed in favour of the
        system font stack (see styles.css) so first paint never waits on a CDN. -->
@@ -224,6 +226,7 @@
         <button type="button" class="close-modal" data-close="modal-global-password">&times;</button>
       </div>
       <form id="form-global-password">
+        <input type="text" name="username" autocomplete="username" style="display:none" tabindex="-1" aria-hidden="true">
         <div style="padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 0.85rem;">
           <div class="form-group" style="margin: 0;">
             <label>Password</label>
@@ -431,10 +434,13 @@
           <label for="mtCode">Login code</label>
           <input id="mtCode" class="form-control" inputmode="numeric" autocomplete="one-time-code" placeholder="12345" style="letter-spacing:.25em;">
         </div>
-        <div class="creator-field" style="margin-bottom:12px;">
-          <label for="mtPassword">2FA password <span style="font-weight:400;color:var(--text-muted);">(only if enabled)</span></label>
-          <input id="mtPassword" class="form-control" type="password" autocomplete="off" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;">
-        </div>
+        <form autocomplete="off" onsubmit="return false;" style="margin:0;">
+          <div class="creator-field" style="margin-bottom:12px;">
+            <label for="mtPassword">2FA password <span style="font-weight:400;color:var(--text-muted);">(only if enabled)</span></label>
+            <input type="text" name="username" autocomplete="username" style="display:none" tabindex="-1" aria-hidden="true">
+            <input id="mtPassword" class="form-control" type="password" autocomplete="new-password" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;">
+          </div>
+        </form>
         <button type="button" id="mtVerify" class="btn btn-primary btn-sm">
           <i class="fa-solid fa-check"></i> Verify &amp; add account
         </button>
@@ -453,6 +459,9 @@
   <script src="js/nova-core.js" defer></script>
   <script src="js/nova-license.js" defer></script>
   <script src="js/nova-meta-insta.js" defer></script>
-  <script src="js/nova-tg.js" defer></script>
+  <!-- ?v=4 cache-busts the dashboard scripts. Without a changing query, a
+       browser can keep serving a stale nova-tg.js (the TG Start preflight then
+       disagreed with the pool card). Bump this when shipping JS changes. -->
+  <script src="js/nova-tg.js?v=6" defer></script>
 </body>
 </html>

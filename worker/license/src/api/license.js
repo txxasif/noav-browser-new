@@ -1,7 +1,8 @@
 /** Client-facing license endpoints: activate / validate / trial. */
 import { jsonResponse } from '../http.js';
+import { withSignature } from '../lib/sign.js';
 
-export async function handleActivate(db, body) {
+export async function handleActivate(db, body, env) {
   try {
     const inputKey = (body.licenseKey || body.username || '').trim();
     const hwid = (body.hwid || '').trim();
@@ -66,30 +67,31 @@ export async function handleActivate(db, body) {
       .bind(hwid, now.toISOString(), expiresAt, row.license_key)
       .run();
 
+    const license = await withSignature(env, {
+      license_key: row.license_key,
+      username: row.username || 'Customer',
+      customer_name: row.customer_name || row.username || 'Customer',
+      license_type: row.license_type,
+      plan: row.plan,
+      expires_at: expiresAt,
+      max_profiles: row.max_profiles || 999999,
+      status: 'ACTIVE',
+      hwid,
+    });
+
     return jsonResponse({
       isValid: true,
       status: 'ACTIVE',
       message: 'License activated successfully!',
-      license: {
-        license_key: row.license_key,
-        username: row.username || 'Customer',
-        customer_name: row.customer_name || row.username || 'Customer',
-        license_type: row.license_type,
-        plan: row.plan,
-        expires_at: expiresAt,
-        max_profiles: row.max_profiles || 999999,
-        status: 'ACTIVE',
-        hwid,
-      },
+      license,
       hwid,
-      signature: 'cf-sig-' + Date.now(),
     });
   } catch (err) {
     return jsonResponse({ isValid: false, status: 'ERROR', message: err.message }, 500);
   }
 }
 
-export async function handleValidate(db, body) {
+export async function handleValidate(db, body, env) {
   try {
     const inputKey = (body.licenseKey || body.username || '').trim();
     const hwid = (body.hwid || '').trim();
@@ -109,27 +111,29 @@ export async function handleValidate(db, body) {
     if (row.hwid && row.hwid !== hwid)
       return jsonResponse({ isValid: false, status: 'HWID_MISMATCH', message: 'HWID mismatch.' }, 200);
 
+    const license = await withSignature(env, {
+      license_key: row.license_key,
+      username: row.username,
+      customer_name: row.customer_name,
+      license_type: row.license_type,
+      plan: row.plan,
+      expires_at: row.expires_at,
+      max_profiles: row.max_profiles,
+      status: 'ACTIVE',
+      hwid,
+    });
+
     return jsonResponse({
       isValid: true,
       status: 'ACTIVE',
-      license: {
-        license_key: row.license_key,
-        username: row.username,
-        customer_name: row.customer_name,
-        license_type: row.license_type,
-        plan: row.plan,
-        expires_at: row.expires_at,
-        max_profiles: row.max_profiles,
-        status: 'ACTIVE',
-        hwid,
-      },
+      license,
     });
   } catch (err) {
     return jsonResponse({ isValid: false, status: 'ERROR', message: err.message }, 500);
   }
 }
 
-export async function handleTrial(db, body) {
+export async function handleTrial(db, body, env) {
   try {
     const hwid = (body.hwid || '').trim();
     if (!hwid) return jsonResponse({ isValid: false, message: 'HWID required' }, 400);
@@ -137,12 +141,31 @@ export async function handleTrial(db, body) {
     const existingTrial = await db.prepare('SELECT * FROM trials WHERE hwid = ?').bind(hwid).first();
     if (existingTrial) {
       const isExpired = new Date(existingTrial.expires_at) < new Date();
+      if (isExpired) {
+        return jsonResponse({
+          isValid: false,
+          status: 'TRIAL_EXPIRED',
+          isTrial: true,
+          expires_at: existingTrial.expires_at,
+          message: '3-Day Free Trial has expired.',
+        });
+      }
+      const license = await withSignature(env, {
+        license_key: 'TRIAL-' + hwid.slice(-8),
+        license_type: 'TRIAL',
+        plan: '3-Day Free Trial',
+        expires_at: existingTrial.expires_at,
+        max_profiles: 999999,
+        status: 'ACTIVE',
+        hwid,
+      });
       return jsonResponse({
-        isValid: !isExpired,
-        status: isExpired ? 'TRIAL_EXPIRED' : 'ACTIVE',
+        isValid: true,
+        status: 'ACTIVE',
         isTrial: true,
         expires_at: existingTrial.expires_at,
-        message: isExpired ? '3-Day Free Trial has expired.' : 'Trial already active.',
+        message: 'Trial already active.',
+        license,
       });
     }
 
@@ -153,20 +176,22 @@ export async function handleTrial(db, body) {
       .bind(hwid, claimedAt.toISOString(), expiresAt)
       .run();
 
+    const license = await withSignature(env, {
+      license_key: 'TRIAL-' + hwid.slice(-8),
+      license_type: 'TRIAL',
+      plan: '3-Day Free Trial',
+      expires_at: expiresAt,
+      max_profiles: 999999,
+      status: 'ACTIVE',
+      hwid,
+    });
+
     return jsonResponse({
       isValid: true,
       status: 'ACTIVE',
       isTrial: true,
       message: '3-Day Free Trial activated!',
-      license: {
-        license_key: 'TRIAL-' + hwid.slice(-8),
-        license_type: 'TRIAL',
-        plan: '3-Day Free Trial',
-        expires_at: expiresAt,
-        max_profiles: 999999,
-        status: 'ACTIVE',
-        hwid,
-      },
+      license,
     });
   } catch (err) {
     return jsonResponse({ isValid: false, message: err.message }, 500);

@@ -9,6 +9,7 @@ const order = [
   'src/http.js',
   'src/auth.js',
   'src/db.js',
+  'src/lib/sign.js',
   'src/api/license.js',
   'src/api/admin.js',
   'src/api/payments.js',

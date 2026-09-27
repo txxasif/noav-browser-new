@@ -113,9 +113,93 @@ class IgLoginMixin:
         except Exception:
             pass
 
+        # 3c. "Filled form, disabled submit". Two causes, one symptom:
+        #   (1) the Bloks/React page is still HYDRATING — the submit is disabled
+        #       by design until the app boots (the loading bar in the screenshot);
+        #   (2) the values were written without React seeing them (the
+        #       select-all-on-a-wrapper bug) — controlled state is empty, so the
+        #       button never enables.
+        # Either way a blind tap is a silent no-op and we just spin the stall
+        # loop. So: wait for the control to ENABLE (hydration grace), then if it
+        # is still disabled re-dispatch input/change, and finally force-enable it
+        # before clicking.
+        def _login_btn_disabled():
+            try:
+                return p.evaluate("""() => {
+                    const cands = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                      .filter(el => /^log ?in$/i.test((el.innerText || el.textContent || '').trim()));
+                    const b = cands[0];
+                    if (!b) return null;
+                    return !!(b.disabled) || (b.getAttribute('aria-disabled') === 'true');
+                }""")
+            except Exception:
+                return None
+
+        _btn = None
+        for _ in range(10):          # ~10s hydration grace
+            _btn = _login_btn_disabled()
+            if _btn is False:        # control found and ENABLED
+                break
+            p.wait_for_timeout(1000)
+        if _btn is True:
+            self.log('[🖱️] Log in button stayed DISABLED — re-syncing React form state…')
+            try:
+                p.evaluate("""() => {
+                    document.querySelectorAll('input').forEach(el => {
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.dispatchEvent(new Event('blur', { bubbles: true }));
+                    });
+                }""")
+            except Exception:
+                pass
+            p.wait_for_timeout(600)
+            if _login_btn_disabled() is True:
+                self.log('[🖱️] Still disabled — force-enabling the Log in control.')
+                try:
+                    p.evaluate("""() => {
+                        const cands = Array.from(document.querySelectorAll('button, div[role="button"]'))
+                          .filter(el => /^log ?in$/i.test((el.innerText || el.textContent || '').trim()));
+                        for (const b of cands) {
+                            try { b.disabled = false; } catch (e) {}
+                            b.removeAttribute('disabled');
+                            b.setAttribute('aria-disabled', 'false');
+                        }
+                    }""")
+                except Exception:
+                    pass
+                p.wait_for_timeout(300)
+
         # 4. Blur input and trigger submit on Log in button
         try:
             p.evaluate("document.activeElement && document.activeElement.blur()")
+        except Exception:
+            pass
+
+        # 4b. Defensive: clear any document-wide selection and RE-ASSERT the
+        # field values before submitting. A stray select-all (Control+A on a
+        # non-input) leaves the page highlighted and the form unsynced, so the
+        # Log in tap is a no-op — the "odd/selecting" screen operators see.
+        try:
+            p.evaluate("""() => {
+              const s = window.getSelection && window.getSelection();
+              if (s && s.rangeCount) s.removeAllRanges();
+            }""")
+        except Exception:
+            pass
+        try:
+            for _sel, _val in (('input[name="username"]', self.email),
+                               ('input[name="password"]', self.password)):
+                _el = p.locator(_sel).first
+                if _el.count() > 0 and _el.is_visible():
+                    _cur = ""
+                    try:
+                        _cur = _el.input_value()
+                    except Exception:
+                        _cur = ""
+                    if _cur != _val:
+                        _el.fill(_val, timeout=4000)
+                        self.log(f'[✉️] IG login: re-asserted {_sel} (was emptied by a selection glitch).')
         except Exception:
             pass
 

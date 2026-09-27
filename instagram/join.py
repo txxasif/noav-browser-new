@@ -631,6 +631,77 @@ class IgJoinMixin:
                         break
 
             if not clicked_step:
+                # (c) OPTIONAL "Add phone number" prompt (has a Skip link) — click
+                # Skip at once instead of letting the 6x cadence elapse. Not the
+                # mandatory wall ("What's your mobile number?"), which dead-ends.
+                if "add phone number" in tail or "adding your number will help" in tail:
+                    for sel in ('a:has-text("Skip")', 'button:has-text("Skip")',
+                                'div[role="button"]:has-text("Skip")', 'span:has-text("Skip")',
+                                '[aria-label="Skip"]'):
+                        try:
+                            btn = p.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible():
+                                self._tap_or_click(p, btn)
+                                self.log('[✔] Instagram: clicked "Skip" on "Add phone number".')
+                                clicked_step = True
+                                p.wait_for_timeout(1200)
+                                break
+                        except Exception:
+                            pass
+            if not clicked_step:
+                # (d) "Save your login info to Instagram?" -> "Not now". This
+                # modal appears on the login/join screen BEFORE sessionid exists,
+                # so it hit step 3 (which had no handler) and only the step-4
+                # loop or ig_dismiss_onboarding cleared it — the delay the
+                # operator saw. Click Not now immediately.
+                if "save your login info" in tail or "save login info" in tail:
+                    for sel in ('button:has-text("Not now")',
+                                'div[role="button"]:has-text("Not now")',
+                                '[aria-label="Not now"]',
+                                'button:has-text("Save")',
+                                'div[role="button"]:has-text("Save")'):
+                        try:
+                            btn = p.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible():
+                                self._tap_or_click(p, btn)
+                                self.log('[✔] Instagram: dismissed "Save your login info" (Not now).')
+                                clicked_step = True
+                                p.wait_for_timeout(1200)
+                                break
+                        except Exception:
+                            pass
+            if not clicked_step:
+                # (e) "Get the Instagram app" interstitial -> prefer the TOP-LEFT
+                # BACK button; it exits the interstitial straight into the feed
+                # (follow list), whereas Skip can land on the next promo. Skip
+                # stays as the fallback (some variants offer no Back).
+                if "get the instagram app" in tail or "open instagram" in tail:
+                    for sel in ('[aria-label="Back"]', 'button[aria-label="Back"]',
+                                'a[aria-label="Back"]', 'svg[aria-label="Back"]'):
+                        try:
+                            btn = p.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible():
+                                self._tap_or_click(p, btn)
+                                self.log('[⬅️] Instagram: clicked Back on "Get the Instagram app".')
+                                clicked_step = True
+                                p.wait_for_timeout(1800)
+                                break
+                        except Exception:
+                            pass
+                    if not clicked_step:
+                        for sel in ('a:has-text("Skip")', 'button:has-text("Skip")',
+                                    'div[role="button"]:has-text("Skip")', '[aria-label="Skip"]'):
+                            try:
+                                btn = p.locator(sel).first
+                                if btn.count() > 0 and btn.is_visible():
+                                    self._tap_or_click(p, btn)
+                                    self.log('[✔] Instagram: clicked "Skip" on "Get the Instagram app".')
+                                    clicked_step = True
+                                    p.wait_for_timeout(1800)
+                                    break
+                            except Exception:
+                                pass
+            if not clicked_step:
                 p.wait_for_timeout(1500)
 
         # 4. Wait for full session (sessionid)
@@ -671,14 +742,42 @@ class IgJoinMixin:
                         self._tap_or_click(p, btn)
                         p.wait_for_timeout(3000)
                         break
-            # Interstitial "Get the Instagram app" -> strictly click "Skip"
+            # Interstitial "Get the Instagram app" -> prefer TOP-LEFT BACK (it
+            # exits straight into the feed / follow list); Skip is the fallback.
             if "get the instagram app" in tail or "open instagram" in tail:
-                for sel in ('a:has-text("Skip")', 'button:has-text("Skip")', 'div[role="button"]:has-text("Skip")', '[aria-label="Skip"]'):
+                _back_clicked = False
+                for sel in ('[aria-label="Back"]', 'button[aria-label="Back"]',
+                            'a[aria-label="Back"]', 'svg[aria-label="Back"]'):
                     btn = p.locator(sel).first
                     if btn.count() > 0 and btn.is_visible():
                         self._tap_or_click(p, btn)
-                        self.log('[✔] Instagram: clicked "Skip" on "Get the Instagram app".')
-                        p.wait_for_timeout(2500)
+                        self.log('[⬅️] Instagram: clicked Back on "Get the Instagram app".')
+                        p.wait_for_timeout(1800)
+                        _back_clicked = True
+                        break
+                if not _back_clicked:
+                    for sel in ('a:has-text("Skip")', 'button:has-text("Skip")', 'div[role="button"]:has-text("Skip")', '[aria-label="Skip"]'):
+                        btn = p.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible():
+                            self._tap_or_click(p, btn)
+                            self.log('[✔] Instagram: clicked "Skip" on "Get the Instagram app".')
+                            p.wait_for_timeout(1800)
+                            break
+            # OPTIONAL "Add phone number" prompt (it offers a Skip link). This is
+            # NOT the mandatory wall (that is "What's your mobile number?" at
+            # /accounts/signup/phone/ and still dead-ends above). Nothing handled
+            # it here, so the sessionid wait loop spun its full 2s cadence before
+            # ig_dismiss_onboarding finally clicked Skip — the delay the operator
+            # saw. Click Skip immediately, matching any element type.
+            if "add phone number" in tail or "adding your number will help" in tail:
+                for sel in ('a:has-text("Skip")', 'button:has-text("Skip")',
+                            'div[role="button"]:has-text("Skip")', 'span:has-text("Skip")',
+                            '[aria-label="Skip"]'):
+                    btn = p.locator(sel).first
+                    if btn.count() > 0 and btn.is_visible():
+                        self._tap_or_click(p, btn)
+                        self.log('[✔] Instagram: clicked "Skip" on "Add phone number".')
+                        p.wait_for_timeout(1200)
                         break
             # Interstitial "Save your login info" -> click "Not now" or "Save"
             if "save your login info" in tail or "save login info" in tail:
@@ -835,7 +934,8 @@ class IgJoinMixin:
                 "welcome to instagram", "see who is on instagram",
                 "add instagram to your home screen", "home screen", "add to home screen",
                 "get the instagram app", "open instagram",
-                "turn on notifications", "notifications"
+                "turn on notifications", "notifications",
+                "add phone number"
             )
             has_onboarding_overlay = any(k in body_text for k in onboarding_keywords)
 
@@ -849,6 +949,8 @@ class IgJoinMixin:
 
             if "get the instagram app" in body_text or "open instagram" in body_text:
                 screen_key = "getapp"
+            elif "add phone number" in body_text:
+                screen_key = "addphone"
             elif "save your login info" in body_text or "save login info" in body_text:
                 screen_key = "saveinfo"
             elif "home screen" in body_text:
@@ -949,9 +1051,23 @@ class IgJoinMixin:
                     continue
 
             # (A) "Get the Instagram app" interstitial screen (Screenshot 2)
-            # Strictly click "Skip", never click "Open Instagram"
+            # Prefer the TOP-LEFT BACK button: it exits the interstitial straight
+            # into the feed (follow list), one tap, exactly like a real user.
+            # Skip stays as the fallback — never "Open Instagram".
             if "get the instagram app" in body_text or "open instagram" in body_text:
-                self.log('[+] "Get the Instagram app" screen detected — strictly clicking Skip…')
+                self.log('[+] "Get the Instagram app" screen — trying top-left Back, else Skip…')
+                for back_sel in ('[aria-label="Back"]', 'button[aria-label="Back"]',
+                                 'a[aria-label="Back"]', 'svg[aria-label="Back"]'):
+                    try:
+                        b = p.locator(back_sel).first
+                        if b.count() > 0 and b.is_visible():
+                            if self._tap_or_click(p, b):
+                                self.log(f'[⬅️] Clicked Back on "Get the Instagram app" via "{back_sel}" — entering the feed.')
+                                p.wait_for_timeout(1800)
+                                dismissed = True
+                                break
+                    except Exception:
+                        pass
                 for skip_sel in (
                     'a:has-text("Skip")',
                     'button:has-text("Skip")',
@@ -959,6 +1075,8 @@ class IgJoinMixin:
                     'span:has-text("Skip")',
                     '[aria-label="Skip"]',
                 ):
+                    if dismissed:
+                        break
                     try:
                         b = p.locator(skip_sel).first
                         if b.count() > 0 and b.is_visible():
@@ -1151,12 +1269,14 @@ class IgJoinMixin:
             # INSIDE the try: this step is best-effort and must never abort the
             # cycle (invariant #20).
             p = self._ig_tab()
-            # Only act on a genuinely live, logged-in feed. A login wall or a
-            # blank page here is NOT this step's problem — return quietly so the
-            # Accounts Center entry reports the real reason with the real URL.
-            if "sessionid" not in self._ig_cookie_names():
-                self.log('[👥] No IG sessionid yet — skipping the follow pass.')
-                return 0
+            # Operator decision (2026-09-27): do NOT gate the follow pass on the
+            # sessionid cookie. "Just follow." The old `sessionid` check skipped
+            # the warm-up on accounts that were still perfectly usable, and the
+            # only state that should stop us is Instagram REDIRECTING to its
+            # "Confirm you're human to use your profile" checkpoint — which is
+            # detected right after this pass (and in tg_coupled) as a dead end.
+            # The tap is best-effort either way: on a dead page it simply does
+            # nothing and the check that follows reports the real reason.
             if "instagram.com" not in (p.url or ""):
                 self.log(f'[👥] Not on Instagram ({p.url}) — skipping the follow pass.')
                 return 0

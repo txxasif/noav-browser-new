@@ -153,7 +153,6 @@ class LicenseManager {
     this.configFilePath = path.join(this.licenseDir, 'license_config.json');
 
     this.gracePeriodHours = config.license.gracePeriodHours;
-    this.hmacSecret = process.env.HMAC_SECRET || config.license.fallbackHmacSecret;
     this.isValidating = false;
 
     this.remoteApiBase = this.getRemoteApiUrl();
@@ -263,28 +262,25 @@ class LicenseManager {
     });
   }
 
-  getDerivedHmacSecret() {
-    try {
-      const seed = getLocalSeed(this.licenseDir, this.legacySeedFilePath, this.userSeedFilePath);
-      const osId = getStableOSId();
-      if (seed) return crypto.createHash('sha256').update(`nova-hmac||${seed}||${osId}`).digest('hex');
-    } catch (e) {}
-    return null;
+  licenseBody(dataObj) {
+    return `${dataObj.license_key}||${dataObj.status}||${dataObj.expires_at || 'LIFETIME'}||${dataObj.last_validated_at}||${dataObj.hwid}`;
   }
 
-  calculateHmacSignature(dataObj) {
-    const str = `${dataObj.license_key}||${dataObj.status}||${dataObj.expires_at || 'LIFETIME'}||${dataObj.last_validated_at}||${dataObj.hwid}`;
-    const derived = this.getDerivedHmacSecret();
-    return crypto.createHmac('sha256', derived || this.hmacSecret).update(str).digest('hex');
-  }
-
-  verifyHmacSignature(dataObj) {
+  // Verify a SERVER-signed license with the shipped PUBLIC key (RSA-2048,
+  // PKCS#1 v1.5, SHA-256). The client never signs, so a locally minted cache
+  // can never pass — only the Cloudflare Worker (private key) can produce a
+  // valid signature.
+  verifyLicenseSignature(dataObj) {
     if (!dataObj || !dataObj.signature) return false;
-    if (dataObj.signature === this.calculateHmacSignature(dataObj)) return true;
+    const pub = config.license.licensePublicKey;
+    if (!pub) return false;
     try {
-      const str = `${dataObj.license_key}||${dataObj.status}||${dataObj.expires_at || 'LIFETIME'}||${dataObj.last_validated_at}||${dataObj.hwid}`;
-      const legacy = crypto.createHmac('sha256', this.hmacSecret).update(str).digest('hex');
-      return dataObj.signature === legacy;
+      return crypto.verify(
+        'sha256',
+        Buffer.from(this.licenseBody(dataObj), 'utf8'),
+        pub,
+        Buffer.from(String(dataObj.signature), 'base64')
+      );
     } catch (e) { return false; }
   }
 
@@ -294,7 +290,7 @@ class LicenseManager {
         const raw = fs.readFileSync(this.cacheFilePath, 'utf8');
         const cache = JSON.parse(raw);
         if (cache && cache.signature) {
-          if (this.verifyHmacSignature(cache)) {
+          if (this.verifyLicenseSignature(cache)) {
             return cache;
           } else {
             console.warn('[LicenseManager] TAMPER DETECTED: Cache signature mismatch. Clearing corrupted cache.');
@@ -314,7 +310,8 @@ class LicenseManager {
       const dir = path.dirname(this.cacheFilePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodPrivate(dir, 0o700);
-      cacheObj.signature = this.calculateHmacSignature(cacheObj);
+      // Store EXACTLY as received — the signature is server-issued. The client
+      // must never (re)sign, or the cache could be forged.
       fs.writeFileSync(this.cacheFilePath, JSON.stringify(cacheObj, null, 2), { encoding: 'utf8', mode: 0o600 });
       chmodPrivate(this.cacheFilePath, 0o600);
     } catch (e) {
@@ -331,8 +328,10 @@ class LicenseManager {
   }
 
   async validateOrActivateLicense(inputKey = null, forceRemote = false) {
-    // Check developer bypass environment flag
-    if (process.env.META_DEV_MODE === '1' || process.env.SKIP_LICENSE === '1') {
+    // Check developer bypass environment flag (disabled in shipped builds;
+    // set config.license.allowDevOverride = true for local development only).
+    if (config.license.allowDevOverride === true &&
+        (process.env.META_DEV_MODE === '1' || process.env.SKIP_LICENSE === '1')) {
       return {
         status: 'ACTIVE',
         isValid: true,
@@ -411,9 +410,11 @@ class LicenseManager {
         const res = await this.requestRemoteApi(endpoint, 'POST', payload);
         const data = res ? res.data : null;
 
-        if (data && data.isValid && data.license && data.license.status === 'ACTIVE') {
-          data.license.hwid = hwid;
-          data.license.last_validated_at = new Date().toISOString();
+        const serverActive = Boolean(
+          data && data.isValid && data.license && data.license.status === 'ACTIVE'
+        );
+        if (serverActive && this.verifyLicenseSignature(data.license)) {
+          // Server signed hwid + last_validated_at; store exactly as received.
           this.saveLicenseCache(data.license);
 
           return {
@@ -421,6 +422,19 @@ class LicenseManager {
             message: data.message || 'License validated successfully.',
             isValid: true,
             license: data.license,
+            hwid
+          };
+        } else if (serverActive) {
+          // Server claimed ACTIVE but returned no verifiable signature. Never
+          // surface its success text as if it were one — that produced
+          // "License activated successfully!" rendered in the ERROR box.
+          this.clearLicenseCache();
+          return {
+            status: 'UNTRUSTED_SIGNATURE',
+            message: 'The license server did not return a valid signature. '
+              + 'The licensing authority must be updated (deploy the signing key) '
+              + 'before activation can succeed.',
+            isValid: false,
             hwid
           };
         } else {
@@ -464,12 +478,9 @@ class LicenseManager {
     let legacyHwid = null;
     try { legacyHwid = this.getLegacyMachineFingerprint(); } catch (e) {}
     if (cache.hwid && cache.hwid !== currentHwid && cache.hwid !== legacyHwid) {
-      if (this.verifyHmacSignature(cache)) {
-        cache.hwid = currentHwid;
-        this.saveLicenseCache(cache);
-      } else {
-        return { status: 'HWID_MISMATCH', message: 'Hardware fingerprint mismatch.', isValid: false, hwid: currentHwid };
-      }
+      // The signature binds this cache to its original HWID and cannot be
+      // re-signed client-side, so a mismatch is simply invalid.
+      return { status: 'HWID_MISMATCH', message: 'Hardware fingerprint mismatch.', isValid: false, hwid: currentHwid };
     }
 
     if (cache.expires_at && cache.expires_at !== 'LIFETIME' && cache.expires_at !== 'NEVER') {
