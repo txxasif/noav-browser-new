@@ -45,7 +45,7 @@ from pipelines.telegram import tg_worker  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser(description="One-shot coupled Telegram cycle")
     ap.add_argument("--task", default=None, help="Taskly task (default: engine TG_DEFAULT_TASK)")
-    ap.add_argument("--tg-bot", default="both", choices=("both", "taskly", "paygo"))
+    ap.add_argument("--tg-bot", default="both", choices=("both", "taskly", "paygo", "fastpay"))
     ap.add_argument("--captcha-mode", default="extension", choices=("extension", "audio"))
     ap.add_argument("--mail-provider", default="mailtd")
     ap.add_argument("--slot", default="e2e_once")

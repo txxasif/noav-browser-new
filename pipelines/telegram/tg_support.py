@@ -45,14 +45,10 @@ try:
 except ImportError:  # pragma: no cover
     class IGDeadEnd(Exception):  # type: ignore
         pass
-try:
-    from pipelines.telegram import ig_emu as _ig_emu
-except ImportError:  # pragma: no cover — emu route unavailable
-    _ig_emu = None
 
-# Dead-end types: browser IGDeadEnd + emulator EmuDeadEnd share the
-# "close out, move on, never submit" semantics (invariant #17).
-_DEAD_ENDS = (IGDeadEnd,) + ((_ig_emu.EmuDeadEnd,) if _ig_emu is not None else ())
+# Dead-end types share the "close out, move on, never submit" semantics
+# (invariant #17).
+_DEAD_ENDS = (IGDeadEnd,)
 
 def _make_tg_bot(acct, bot_target, is_headless, log):
     """Construct the Telegram submitter for this pool record.

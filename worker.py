@@ -35,6 +35,7 @@ from ai_config import (
     ACCOUNTS_TXT,
     DATA_DIR,
     SELFIE_PATH,
+    TG_BOT_CHOICES,
     Urls,
     emit_event,
     run,
@@ -487,57 +488,26 @@ def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: i
 # the TG task acquisition + submit gate are telegram-specific.
 # ============================================================================
 def _wait_ig_cooldown() -> None:
-    """Block while a pipeline-wide IG cooldown is active (stop-aware)."""
-    while not _stop.is_set():
-        with _cooldown_lock:
-            remaining = _ig_cooldown_until - time.time()
-        if remaining <= 0:
-            return
-        time.sleep(min(remaining, 1.0))
-def _note_phone_wall(slot_id) -> bool:
-    """Record a phone-wall hit (split mode).
+    """Cooldown disabled completely."""
+    return
 
-    Returns True when the breaker trips — the caller should then take the
-    shared cooldown (the wall looks IP-wide, not account-specific).
-    """
-    global _phone_wall_streak
-    with _cooldown_lock:
-        _phone_wall_streak += 1
-        n = _phone_wall_streak
-        tripped = n >= IG_WALL_BREAKER_N
-        if tripped:
-            _phone_wall_streak = 0
-    if tripped:
-        emit_event({"type": "log", "slot_id": slot_id,
-                    "message": f"[throttle] {n} Instagram phone-walls in a row — looks IP-wide, cooling the pool (breaker {IG_WALL_BREAKER_N})"})
-        return True
+def _note_phone_wall(slot_id) -> bool:
+    """Record a phone-wall hit (split mode). No cooldown or throttle banner."""
     emit_event({"type": "log", "slot_id": slot_id,
-                "message": f"[wall] Instagram phone wall {n}/{IG_WALL_BREAKER_N} — skipping this account; other slots keep working"})
+                "message": "[wall] Instagram phone wall — skipping this account; other slots keep working"})
     return False
+
 def _note_ig_throttle(slot_id, detail="") -> int:
-    """Record a throttle hit and extend the shared cooldown deadline."""
-    global _ig_cooldown_until
-    with _cooldown_lock:
-        fails = getattr(coupled_loop, "_throttle_fails", 0) + 1
-        coupled_loop._throttle_fails = fails
-        backoff = min(60 * (2 ** min(fails - 1, 3)), 600)
-        _ig_cooldown_until = max(_ig_cooldown_until, time.time() + backoff)
-    emit_event({"type": "log", "slot_id": slot_id,
-                "message": f"[throttle] IG cooldown {backoff}s (streak {fails}) — ALL slots pause"})
-    print(f"[throttle] IG cooldown {backoff}s (streak {fails}) — ALL slots pause", flush=True)
-    return backoff
+    """No cooldown, no throttle banner."""
+    return 0
+
 def _clear_ig_throttle() -> None:
     global _phone_wall_streak
     coupled_loop._throttle_fails = 0
     _phone_wall_streak = 0
+
 def _looks_throttled(detail) -> bool:
-    """True when a cycle failure smells like platform throttling (back off)."""
-    low = str(detail or "").lower()
-    if any(m in low for m in _THROTTLE_MARKERS):
-        return True
-    # Legacy: with IG_WALL_SPLIT=0 a phone wall still cools the whole pool.
-    if not IG_WALL_SPLIT:
-        return any(m in low for m in _PHONE_WALL_MARKERS)
+    """Throttling disabled — never pause or block cycles."""
     return False
 def _is_phone_wall(detail) -> bool:
     """True when the failure is Instagram's "What's your mobile number?" gate."""
@@ -550,8 +520,7 @@ TG_DEFAULT_TASK = "Create Inst (No mail)"
 
 def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
                  tg_bot="taskly", captcha_mode="extension", mail_provider="mailtd",
-                 add_email=False, emu_ig=False, emu_devices=3, emu_apk=None,
-                 cookie=False):
+                 add_email=False, cookie=False):
     """Coupled per-task loop: ONE browser does Meta → TG task → IG → submit.
 
     N slots run in parallel (each opens its own Meta/IG browser up front);
@@ -584,24 +553,45 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 return "done"
             _session_count += 1
         try:
-            if cookie:
-                # PayGo Cookies task: Meta -> TG creds -> IG join + follow ->
-                # cookie export -> cookie submit -> register (no 2FA leg).
-                # Lazy import: run_cookie_cycle lazily imports AISlotWorker
-                # back, so a top-level import here would be circular.
+            # Pick the runner from the REGISTRY (data), not a regex on the task
+            # text: "🍪 Create Inst (No mail)" contains no literal "cookie", so a
+            # /cookie/i test would wrongly send it to the coupled runner.
+            _runner = ""
+            try:
+                import tg_tasks as _tt
+                from tg_flows import runner_of as _runner_of
+                _flow = _tt.flow_of(tg_bot, task)
+                _runner = _runner_of(_flow) if _flow else ""
+            except Exception:
+                _runner = ""
+            _use_cookie = cookie or str(_runner) == "run_cookie_cycle"
+            if _use_cookie:
+                # Cookie-family task (PayGo cookie, Taskly cookie_2fa):
+                # Meta -> TG creds -> [2FA] -> IG join + follow -> cookie export
+                # -> cookie submit. Lazy import: run_cookie_cycle lazily imports
+                # AISlotWorker back, so a top-level import here would be circular.
                 from run_cookie_cycle import run_cookie_cycle_once
                 ok, detail = run_cookie_cycle_once(
                     slot_id=slot_id, worker_factory=AISlotWorker,
                     is_headless=is_headless, captcha_mode=captcha_mode,
                     mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email)
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot)
+            elif str(_runner) == "run_native_cycle":
+                # Taskly 2FA native task: NO Meta, NO mailbox — lease TG,
+                # Start, bot email+code, IG native signup, Account Registered.
+                # Lazy import for the same circularity reason as above.
+                from run_native_cycle import run_native_cycle_once
+                ok, detail = run_native_cycle_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot)
             else:
                 ok, detail = tg_worker.run_tg_coupled_cycle(
                     AISlotWorker, slot_id=slot_id, is_headless=is_headless,
                     tg_task=task, tg_bot=tg_bot,
                     captcha_mode=captcha_mode, mail_provider=mail_provider,
-                    add_email=add_email, emu_ig=emu_ig,
-                    emu_devices=emu_devices, emu_apk=emu_apk,
+                    add_email=add_email,
                     stop_event=_stop)
             err_text = "" if ok else str(detail or "")
         except Exception as exc:
@@ -659,7 +649,8 @@ def main():
                         help="TG Classic: one browser per task (Meta -> TG task -> IG -> submit)")
     parser.add_argument("--twofa", action="store_true", help="Enable 2FA in the IG half")
     parser.add_argument("--tg-task", type=str, default=TG_DEFAULT_TASK, help="Taskly task name")
-    parser.add_argument("--tg-bot", type=str, default="taskly", choices=("taskly","paygo"), help="Task bot")
+    parser.add_argument("--tg-bot", type=str, default="taskly",
+                        choices=tuple(TG_BOT_CHOICES), help="Task bot")
     parser.add_argument("--add-email", action="store_true",
                         help="telegram coupled: after password+2FA, add a fresh mail.td email in Accounts Center")
     parser.add_argument("--tg-profile", type=str, default=None, help="Force one Telegram profile id")
@@ -814,6 +805,11 @@ def main():
 _HEADLESS = {"value": False}
 IG_WALL_SPLIT = os.environ.get("IG_WALL_SPLIT", "1").strip().lower() not in ("0", "false", "no")
 IG_WALL_BREAKER_N = max(1, int(os.environ.get("IG_WALL_BREAKER_N", "6") or 6))
+# Pipeline-wide IG throttle cooldown. DISABLED by default (IG_COOLDOWN=0): the
+# engine keeps working through a throttle — detection + the dashboard
+# toast/error still fire, only the blocking pause is skipped. Set IG_COOLDOWN=1
+# to restore the old "cool the whole pool" behaviour.
+IG_COOLDOWN_ENABLED = os.environ.get("IG_COOLDOWN", "0").strip().lower() not in ("0", "false", "no", "off")
 IG_WALL_SLOT_BACKOFF = max(0.0, float(os.environ.get("IG_WALL_SLOT_BACKOFF", "5") or 0))
 
 if __name__ == "__main__":

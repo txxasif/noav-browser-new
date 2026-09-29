@@ -186,8 +186,25 @@ class EngineIgMixin:
             try:
                 ub = p.get_by_role("combobox", name="Username").first
                 self._human_click(p, ub, 10000)
-                p.keyboard.press("Control+A")
-                p.keyboard.press("Backspace")
+                # Clear the field ONLY when it is the focused INPUT/TEXTAREA.
+                # A raw Control+A on a wrapper/unfocused page selects the WHOLE
+                # document — the blue "everything highlighted" screen where the
+                # value never lands (observed 2026-09-28 on the IG login/join).
+                try:
+                    _foc = bool(ub.evaluate(
+                        "el => document.activeElement === el && "
+                        "(el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')"))
+                except Exception:
+                    _foc = False
+                if _foc:
+                    p.keyboard.press("Control+A")
+                    p.keyboard.press("Backspace")
+                else:
+                    try:
+                        p.evaluate("() => { const s = window.getSelection && window.getSelection(); "
+                                   "if (s && s.rangeCount) s.removeAllRanges(); }")
+                    except Exception:
+                        pass
                 self._human_type(p, ub, self.username, 8000)
             except Exception:
                 pass

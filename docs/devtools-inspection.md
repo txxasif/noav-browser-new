@@ -45,6 +45,12 @@ email Continue → Get started (Month/Day/Year listbox comboboxes + password,
 Next disabled until valid) → details (suggested username, optional name,
 avatar picker, Confirm) → `Code` box → checkpoint or `meta.ai/` home.
 
+> Verified 2026-09-28 (mobile SM-S928B profile): desktop `meta.ai/` gates
+> behind "Welcome to Meta AI" → Continue (mobile skips it); the email-step
+> input is now `type=text autocomplete=username inputmode=email`; a live
+> run ended at `www.meta.ai/?error=Token exchange failed` (account created,
+> OIDC hop flopped → log in with the new creds).
+
 - Listbox combobox: `click` combobox uid → `take_snapshot` shows
   `[role=option]` uids → `click` option uid.
 - Temp inbox: `new_page(url="https://mail.td/", background=true)` → read

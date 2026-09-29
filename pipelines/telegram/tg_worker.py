@@ -18,7 +18,7 @@ Modules
 * :mod:`pipelines.telegram.tg_cycles` — the two decoupled cycles
   (``run_tg_create_cycle`` Phase 1, ``run_tg_submit_one`` Phase 2).
 * :mod:`pipelines.telegram.tg_coupled` — ``run_tg_coupled_cycle``, the
-  ONE-browser Meta → TG → IG → submit orchestrator (classic + TG-Emu phases).
+  ONE-browser Meta → TG → IG → submit orchestrator.
 """
 from __future__ import annotations
 

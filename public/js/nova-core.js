@@ -82,26 +82,87 @@ function initThemeNav() {
     });
   }
 
-  // Sidebar View Switcher
+  // Hash routing: every page has its own route, so each TG bot is a
+  // separate deep-linkable page (back/forward + refresh keep their place).
+  //   #/meta  #/ig  #/tg/taskly  #/tg/paygo  #/tg/fastpay  #/manager  #/guide
+  const VIEW_ROUTES = {
+    'view-meta-creator': '#/meta',
+    'view-ig-creator': '#/ig',
+    'view-tg-manager': '#/manager',
+    'view-guide': '#/guide',
+  };
+
+  function routeForItem(item) {
+    const bot = item.getAttribute('data-bot');
+    if (bot) return '#/tg/' + bot;
+    return VIEW_ROUTES[item.getAttribute('data-view')] || '#/meta';
+  }
+
+  function showView(viewId, bot) {
+    document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+    let item = null;
+    if (bot) {
+      item = document.querySelector('.nav-item[data-view="' + viewId + '"][data-bot="' + bot + '"]');
+    }
+    if (!item) item = document.querySelector('.nav-item[data-view="' + viewId + '"]');
+    if (item) item.classList.add('active');
+    document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
+    const targetPanel = document.getElementById(viewId);
+    if (targetPanel) targetPanel.classList.add('active');
+    // TG submenu: the page IS the bot (no picker).
+    if (bot && typeof window.__setTgBot === 'function') window.__setTgBot(bot);
+  }
+
+  function applyHash() {
+    const h = (window.location.hash || '').toLowerCase();
+    const m = h.match(/^#\/tg\/([a-z]+)/);
+    if (m) {
+      const bot = m[1];
+      if (document.querySelector('.nav-item[data-view="view-tg-classic"][data-bot="' + bot + '"]')) {
+        showView('view-tg-classic', bot);
+        return;
+      }
+    }
+    for (const [viewId, route] of Object.entries(VIEW_ROUTES)) {
+      if (h === route.toLowerCase()) {
+        showView(viewId, null);
+        return;
+      }
+    }
+    // Unknown/empty hash → default route (replace: no history spam).
+    if (h !== '#/meta') window.location.replace('#/meta');
+    else showView('view-meta-creator', null);
+  }
+
+  // Sidebar View Switcher (route-driven)
   document.querySelectorAll('.nav-item[data-view]').forEach(item => {
     item.addEventListener('click', () => {
-      const viewId = item.getAttribute('data-view');
-      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
-      item.classList.add('active');
-      document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
-      const targetPanel = document.getElementById(viewId);
-      if (targetPanel) targetPanel.classList.add('active');
+      const route = routeForItem(item);
+      if (window.location.hash === route) applyHash();
+      else window.location.hash = route;
     });
   });
+  window.addEventListener('hashchange', applyHash);
 
-  // Guide page → back to TG Classic
+  // Collapsible TG bot submenu (parent toggles the bot list)
+  const tgToggle = document.getElementById('nav-tg-toggle');
+  const tgSub = document.getElementById('tg-submenu');
+  if (tgToggle && tgSub) {
+    tgToggle.addEventListener('click', () => {
+      const collapsed = tgSub.classList.toggle('collapsed');
+      tgToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  }
+
+  // Guide page → back to TG Classic (route-driven so history stays coherent)
   const guideBack = document.getElementById('guide-back-tg');
   if (guideBack) {
     guideBack.addEventListener('click', () => {
-      const tgNav = document.querySelector('.nav-item[data-view="view-tg-classic"]');
-      if (tgNav) tgNav.click();
+      window.location.hash = '#/tg/taskly';
     });
   }
+  // Deep-link on load: refresh keeps the current page/bot.
+  applyHash();
 }
 
 function initModalDismiss() {

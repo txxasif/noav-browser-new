@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     attempts INTEGER DEFAULT 0,
     platform TEXT,
     cookies TEXT,
+    fastpay_paid INTEGER DEFAULT 0,
+    fastpay_paid_at TEXT,
     extra TEXT
 );
 
@@ -69,7 +71,8 @@ COLUMNS = [
     "profile_dir", "device_model", "device_ua",
     "nitro_device", "nitro_submitted", "nitro_submitted_at",
     "coinsta_device", "coinsta_submitted", "coinsta_submitted_at",
-    "dob", "mail_provider", "created_at", "claimed_at", "attempts", "platform", "cookies", "extra"
+    "dob", "mail_provider", "created_at", "claimed_at", "attempts", "platform", "cookies",
+    "fastpay_paid", "fastpay_paid_at", "extra"
 ]
 
 
@@ -140,6 +143,16 @@ def init_db() -> None:
         conn.execute("ALTER TABLE accounts ADD COLUMN cookies TEXT;")
     except Exception:
         pass
+    # FastPay payout columns (additive migration; tg_fastpay.py stamps these so
+    # a payout is never re-submitted for the same account).
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN fastpay_paid INTEGER DEFAULT 0;")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN fastpay_paid_at TEXT;")
+    except Exception:
+        pass
     # Index after the columns exist (safe on both fresh and migrated tables).
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acc_pending_coinsta ON accounts(target, status, coinsta_submitted);")
@@ -162,6 +175,7 @@ def dict_from_row(row: sqlite3.Row) -> Dict[str, Any]:
     d["tg_submitted"] = bool(d.get("tg_submitted"))
     d["nitro_submitted"] = bool(d.get("nitro_submitted"))
     d["coinsta_submitted"] = bool(d.get("coinsta_submitted"))
+    d["fastpay_paid"] = bool(d.get("fastpay_paid"))
     if d.get("attempts") is not None:
         d["attempts"] = int(d["attempts"])
     if d.get("claimed_at") is not None:
@@ -188,7 +202,7 @@ def row_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
 
     for k, v in d.items():
         if k in COLUMNS and k != "extra":
-            if k in ("tg_submitted", "nitro_submitted", "coinsta_submitted"):
+            if k in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid"):
                 row[k] = 1 if v else 0
             elif k == "attempts":
                 row[k] = int(v) if v is not None else 0
@@ -202,7 +216,7 @@ def row_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
 
     for col in COLUMNS:
         if col not in row and col != "extra":
-            if col in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "attempts"):
+            if col in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid", "attempts"):
                 row[col] = 0
             else:
                 row[col] = None

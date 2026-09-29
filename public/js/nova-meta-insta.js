@@ -9,7 +9,7 @@ const MI_WORKSPACE_DEFS = {
     kind: 'meta',
     mode: 'meta',
     title: 'Meta Account Creator',
-    subtitle: 'Create Instagram accounts via Meta signup in an anti-detect browser.',
+    subtitle: 'Create Meta accounts in an anti-detect browser.',
     accent: '#0081fb',
     icon: 'fa-brands fa-meta',
     countLabel: 'Accounts Created',
@@ -18,7 +18,7 @@ const MI_WORKSPACE_DEFS = {
     usernameLabel: 'Account username (optional)',
     usernamePlaceholder: 'leave empty = auto',
     startLabel: 'Start Creator',
-    flowHint: 'Flow: Meta signup → selfie verify → join Instagram → follow 1-2 profiles → save credentials + cookies.',
+    flowHint: 'Flow: Meta signup → selfie verify → save credentials (Meta-only, no Instagram join).',
   },
   ig: {
     kind: 'ig',
@@ -256,7 +256,8 @@ function miCreatorPanelHtml(def) {
       </div>
     </div>
     <div data-role="log" class="log-container" style="height: 220px; overflow-y: auto; background: #060910; border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; font-family: var(--font-mono); font-size: 0.78rem; white-space: pre-wrap;"></div>
-  </div>`;
+  </div>
+  ${window.NovaDiag ? NovaDiag.renderHtml(def.kind) : ''}`;
 }
 
 function initMetaInsta() {
@@ -465,7 +466,7 @@ function initMetaInsta() {
   // Build one workspace per mount
   // ---------------------------------------------------------------------------
   const workspaces = [];
-  mounts.forEach((mount) => {
+    mounts.forEach((mount) => {
     const kind = mount.getAttribute('data-kind') === 'ig' ? 'ig' : 'meta';
     mount.innerHTML = miCreatorPanelHtml(MI_WORKSPACE_DEFS[kind]);
     workspaces.push(createCreatorWorkspace(mount, MI_WORKSPACE_DEFS[kind], state, {
@@ -476,6 +477,11 @@ function initMetaInsta() {
       subscribe: (fn) => { state.listeners.add(fn); return () => state.listeners.delete(fn); },
     }));
   });
+
+  if (window.NovaDiag) {
+    NovaDiag.refreshReasons();
+    NovaDiag.refreshLogs();
+  }
 
   // ---------------------------------------------------------------------------
   // Shared SSE stream — routes log lines to the active workspace

@@ -161,6 +161,12 @@ _ANTIDETECT_TEMPLATE = r"""
     try { Object.defineProperty(navigator, key, { get: () => nav[key], configurable: true, enumerable: true }); } catch(e) {}
   }
   try {
+    delete Object.getPrototypeOf(navigator).webdriver;
+  } catch(e) {}
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true, enumerable: false });
+  } catch(e) {}
+  try {
     const brands = [{ brand: 'Chromium', version: CONFIG.chMajor || '124' },
                     { brand: 'Google Chrome', version: CONFIG.chMajor || '124' },
                     { brand: 'Not-A.Brand', version: '99' }];
@@ -206,10 +212,10 @@ _ANTIDETECT_TEMPLATE = r"""
           if (document.head) document.head.appendChild(meta); }
         meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no';
         const style = document.createElement('style');
-        style.id = 'antidetect-mobile-style';
+        style.id = '_m_viewport_cfg';
         style.innerHTML = 'html, body { max-width: ' + screenWidth + 'px !important; margin: 0 auto !important; overflow-x: hidden !important; }' +
                           'body._a9-- { max-width: 100% !important; } section._a9_0 { width: 100% !important; max-width: 100% !important; }';
-        if (document.head && !document.getElementById('antidetect-mobile-style')) { document.head.appendChild(style); }
+        if (document.head && !document.getElementById('_m_viewport_cfg')) { document.head.appendChild(style); }
       } catch(e) {}
     }
     if (typeof document !== 'undefined') {
@@ -217,32 +223,6 @@ _ANTIDETECT_TEMPLATE = r"""
       else { enforceMobileLayout(); }
     }
   }
-  try {
-    const raw = (CONFIG.noise && CONFIG.noise.canvas) != null ? CONFIG.noise.canvas : 0.0001;
-    const nR = typeof raw === 'object' ? (raw.r != null ? raw.r : 0.0001) : raw;
-    const nG = typeof raw === 'object' ? (raw.g != null ? raw.g : 0.0001) : raw;
-    const nB = typeof raw === 'object' ? (raw.b != null ? raw.b : 0.0001) : raw;
-    if (typeof CanvasRenderingContext2D !== 'undefined') {
-      const orig = CanvasRenderingContext2D.prototype.getImageData;
-      CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {
-        const d = orig.apply(this, arguments);
-        for (let i = 0; i < d.data.length; i += 4) {
-          d.data[i] = Math.min(255, Math.max(0, d.data[i] + (nR * 255)));
-          d.data[i+1] = Math.min(255, Math.max(0, d.data[i+1] + (nG * 255)));
-          d.data[i+2] = Math.min(255, Math.max(0, d.data[i+2] + (nB * 255)));
-        }
-        return d;
-      };
-    }
-    if (typeof HTMLCanvasElement !== 'undefined') {
-      const o2 = HTMLCanvasElement.prototype.toDataURL;
-      HTMLCanvasElement.prototype.toDataURL = function(type) {
-        const ctx = this.getContext('2d');
-        if (ctx) { try { const d = ctx.getImageData(0, 0, this.width, this.height); ctx.putImageData(d, 0, 0); } catch(e) {} }
-        return o2.apply(this, arguments);
-      };
-    }
-  } catch(e) {}
   try {
     const gpuVendor = (CONFIG.device && CONFIG.device.gpu && CONFIG.device.gpu.vendor) || (isMobile ? 'Qualcomm' : 'Google Inc. (NVIDIA)');
     const gpuRenderer = (CONFIG.device && CONFIG.device.gpu && CONFIG.device.gpu.renderer) || (isMobile ? 'Adreno (TM) 660' : 'ANGLE (NVIDIA, NVIDIA GeForce RTX 3080 Direct3D11 vs_5_0 ps_5_0, D3D11)');
@@ -259,23 +239,12 @@ _ANTIDETECT_TEMPLATE = r"""
     if (typeof WebGL2RenderingContext !== 'undefined') { WebGL2RenderingContext.prototype.getParameter = proxy(WebGL2RenderingContext.prototype.getParameter); }
   } catch(e) {}
   try {
-    const audioNoise = (CONFIG.noise && typeof CONFIG.noise.audio === 'number') ? CONFIG.noise.audio : 0.0001;
-    if (typeof AudioBuffer !== 'undefined') {
-      const orig = AudioBuffer.prototype.getChannelData;
-      AudioBuffer.prototype.getChannelData = function() {
-        const res = orig.apply(this, arguments);
-        for (let i = 0; i < res.length; i += 100) { res[i] = res[i] + audioNoise; }
-        return res;
-      };
-    }
-  } catch(e) {}
-  try {
     if (CONFIG.network && CONFIG.network.webrtc === 'BLOCK') {
       if (typeof window.RTCPeerConnection !== 'undefined') {
-        window.RTCPeerConnection = function() { throw new Error('WebRTC Disabled by Anti-Detect Engine'); };
+        window.RTCPeerConnection = function() { throw new TypeError('Failed to construct "RTCPeerConnection"'); };
       }
       if (typeof window.webkitRTCPeerConnection !== 'undefined') {
-        window.webkitRTCPeerConnection = function() { throw new Error('WebRTC Disabled by Anti-Detect Engine'); };
+        window.webkitRTCPeerConnection = function() { throw new TypeError('Failed to construct "RTCPeerConnection"'); };
       }
     }
   } catch(e) {}

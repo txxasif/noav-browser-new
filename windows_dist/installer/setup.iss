@@ -40,6 +40,7 @@ Source: "..\instagram\*"; DestDir: "{app}\instagram"; Flags: ignoreversion recur
 Source: "..\selfies\*"; DestDir: "{app}\selfies"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "..\img\*"; DestDir: "{app}\img"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "..\server.js"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; .py* wildcard: matches worker.py (dev build) or worker.pyc (protected build).
 Source: "..\worker.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\runner.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

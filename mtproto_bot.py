@@ -76,6 +76,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_config import DATA_DIR, TG_BOTS, TG_DEFAULT_TASK  # noqa: E402
 from tg_bot import classify_report_reply  # noqa: E402
 from tg_fingerprint import for_profile  # noqa: E402
+# NFKC button matching: FastPay renders its menu in Unicode math-bold
+# (𝗧𝗮𝘀𝗸 / 𝗜𝗻𝘀𝘁𝗮𝗴𝗿𝗮𝗺), which plain ``.lower()`` never turns into ASCII, so
+# every button comparison below goes through ``normalize``. It is a no-op for
+# Taskly/PayGo's plain-ASCII menus.
+from tg_tasks import normalize as _norm_btn  # noqa: E402
 
 TG_SESSIONS_DIR = os.path.join(DATA_DIR, "tg_sessions")
 os.makedirs(TG_SESSIONS_DIR, exist_ok=True)
@@ -101,6 +106,19 @@ _SYS_VERSIONS = {
     "Linux": ("Linux", "Ubuntu 22.04"),
 }
 _DEVICE_MODELS = ("Desktop", "Desktop", "Desktop", "Laptop")
+
+# Random IG first names for bots that issue no name (FastPay sends only
+# Username/Password). Kept plain ASCII so the IG onboarding field accepts it.
+_FIRST_NAMES = (
+    "James", "Emma", "Liam", "Olivia", "Noah", "Ava", "Lucas", "Mia",
+    "Ethan", "Sofia", "Mason", "Isla", "Leo", "Nora", "Ryan", "Zoe",
+    "Adam", "Lily", "Omar", "Sara", "Daniel", "Ella", "Marco", "Nina",
+)
+
+
+def _random_first_name() -> str:
+    import random
+    return random.choice(_FIRST_NAMES)
 
 
 def session_file(tg_id: str) -> str:
@@ -370,9 +388,18 @@ class MtprotoTasklyBot:
             return None
 
     def close(self, ok=True):
-        """MTProto has no browser to close — the session file persists."""
+        """MTProto has no browser — but the Telethon client DOES hold a lock on
+        the session SQLite file (``data/tg_sessions/<id>.session``).
+
+        Not disconnecting here wedged the next client on the same session with
+        "database is locked" — the pool reuses a session across cycles and the
+        owner loop rebuilds the bot on a bot-target switch (observed
+        2026-09-28: an orphaned engine plus a rebuilt owner both held
+        ``tg_1.session``). Disconnect so the file is released.
+        """
         self.creds = {}
         self.one_time_code = None
+        self.disconnect()
         return True
 
     def disconnect(self):
@@ -469,7 +496,7 @@ class MtprotoTasklyBot:
             btns, msg = self._buttons()
             if msg is not None:
                 last_msg = msg
-            hit = next((b for b in btns if needle.lower() in b.lower()), None)
+            hit = next((b for b in btns if _norm_btn(needle) in _norm_btn(b)), None)
             if hit:
                 return hit, msg
             if time.time() >= deadline:
@@ -634,6 +661,8 @@ class MtprotoTasklyBot:
 
     def start_task(self):
         """Press Start and parse fresh creds (never stale, never across a cancel)."""
+        if self.bot_target == "fastpay":
+            return self._start_task_fastpay()
         for attempt in range(4):
             # Guard: if a task is ALREADY mid-flight (2FA-key prompt / code /
             # register prompt), pressing Start is meaningless — it just posts a
@@ -735,21 +764,81 @@ class MtprotoTasklyBot:
 
     @staticmethod
     def _parse_creds(txt):
-        m_login = re.search(r"Login:\s*(.*?)(?=\s*Password:|\n|\r|$)", txt, re.I)
+        # The bot wraps labels in Markdown (`**Username:** \`value\``) and
+        # Telethon's .text keeps the raw syntax. Strip the decoration so the
+        # value is captured cleanly. FastPay uses "Username:", Taskly/PayGo
+        # use "Login:"; both carry "Password:". FastPay sends no first name,
+        # so the caller fills one in. Taskly's 2FA task ALSO sends the
+        # registration email ("Email:", learned live 2026-09-28) — captured
+        # additively; callers that don't need it ignore the key.
+        txt = str(txt or "").replace("`", "").replace("*", "")
+        m_login = re.search(r"(?:Login|Username):\s*(.*?)(?=\s*Password:|\n|\r|$)", txt, re.I)
         m_pwd = re.search(r"Password:\s*([A-Za-z0-9_!@#$%^&*+=?-]+)", txt, re.I)
-        m_name = re.search(r"First name:\s*(.*?)(?=\s*Login:|\n|\r|$)", txt, re.I)
+        m_name = re.search(r"First name:\s*(.*?)(?=\s*(?:Login|Username):|\n|\r|$)", txt, re.I)
+        m_email = re.search(r"Email:\s*(\S+)", txt, re.I)
         if not (m_login and m_pwd):
             return None
-        return {"first_name": (m_name.group(1).strip() if m_name else ""),
-                "login": m_login.group(1).strip(),
-                "password": m_pwd.group(1).strip()}
+        out = {"first_name": (m_name.group(1).strip() if m_name else ""),
+               "login": m_login.group(1).strip(),
+               "password": m_pwd.group(1).strip()}
+        if m_email:
+            out["email"] = m_email.group(1).strip()
+        return out
+
+    def _start_task_fastpay(self):
+        """FastPay has NO Start button — selecting the task already sent the creds.
+
+        The bot sends TWO messages on task select::
+
+            📋 Task: 𝗜𝗻𝘀𝘁𝗮𝗴𝗿𝗮𝗺 2𝗙𝗔
+            👤 Username: `virginia_howardzau_47203`
+            🔒 Password: `FASTPAY%27`
+            [𝗥𝗲𝗳𝗿𝗲𝘀𝗵]
+
+            👇 Please send the 2FA Key below: 🔑
+
+        Reading only the NEWEST message shows just the key prompt — which is
+        what made this bot look payout-only. Scan a few messages for the creds.
+        FastPay sends no first name, so a random one is generated (the engine's
+        IG onboarding needs something to type).
+        """
+        deadline = time.time() + 12.0
+        while time.time() < deadline:
+            for m in self._messages(limit=6):
+                if getattr(m, "out", False):
+                    continue
+                txt = (getattr(m, "text", "") or "").replace("`", "")
+                if not (re.search(r"Username:\s*\S+", txt, re.I)
+                        and re.search(r"Password:\s*\S+", txt, re.I)):
+                    continue
+                creds = self._parse_creds(txt)
+                if creds and creds.get("login") and creds.get("password"):
+                    creds["first_name"] = _random_first_name()
+                    self.creds = creds
+                    self.log(f"[tg] task started → {self.creds}")
+                    return self.creds
+            time.sleep(0.6)
+        self.log("[tg] ❌ FastPay did not send task credentials "
+                 f"(last msgs: {[t[:90] for t in self._recent_texts(3)]})")
+        return {"first_name": "", "login": "", "password": ""}
 
     def submit_2fa_key(self, key, allow_local_fallback=True):
         clean = str(key or "").strip()
+        # Fail-safe: if 'Get code' is still on the keyboard, click it to advance Taskly's state
+        try:
+            btns, _msg = self._buttons(limit=10)
+        except Exception:
+            btns = []
+        hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
+        if hit:
+            self.log(f"[tg] '{hit}' button still on keyboard — clicking to advance bot state before submitting 2FA key…")
+            self._send(hit)
+            time.sleep(1.5)
+
         before_id = self._last_id()
         self._send(clean)
         self.log(f"[tg] 2FA key submitted to {self.bot_name}; waiting for one-time code…")
-        deadline = time.time() + 10.0
+        deadline = time.time() + 25.0
         while time.time() < deadline:
             time.sleep(0.25)
             for m in self._messages(limit=4):
@@ -767,13 +856,68 @@ class MtprotoTasklyBot:
                     return self.one_time_code
         if not allow_local_fallback:
             raise RuntimeError("Telegram bot did not return a one-time code")
+        totp_clean = re.sub(r"[^A-Za-z2-7]", "", clean).upper()
         try:
             import pyotp
-            self.one_time_code = pyotp.TOTP(clean).now()
+            self.one_time_code = pyotp.TOTP(totp_clean).now()
             self.log(f"[tg] ⚡ bot reply delayed; used local TOTP: {self.one_time_code}")
             return self.one_time_code
-        except Exception:
+        except Exception as e:
+            self.log(f"[tg] [⚠️] local TOTP generation failed for '{totp_clean}': {e}")
             raise RuntimeError("Telegram bot did not return a one-time code")
+
+    def request_email_code(self, timeout: float = 45.0):
+        """Press 📥 Get code and read the bot-issued email verification code.
+
+        Taskly 2FA flow (learned live 2026-09-28): after Start the bot orders
+        a mailbox and sends First name/Login/Password/Email; the 6-digit IG
+        confirmation code for that email is ONLY available via the "📥 Get
+        code" key — there is no inbox on our side. Returns the code string,
+        else "". Never sends credentials or register keys.
+        """
+        before_id = self._last_id()
+        sent = False
+        for _try in range(2):
+            try:
+                btns, _msg = self._buttons(limit=10)
+            except Exception:
+                btns = []
+            hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
+            if hit:
+                self._send(hit)
+                sent = True
+                self.log(f"[tg] requested email code via '{hit}'")
+                break
+            time.sleep(1.5)
+        if not sent:
+            self.log("[tg] Get-code key not visible — cannot fetch email code")
+            return ""
+        deadline = time.time() + max(10.0, timeout)
+        _beat = time.time()
+        while time.time() < deadline:
+            time.sleep(1.5)
+            if time.time() - _beat >= 15:
+                _beat = time.time()
+                left = max(0, int(deadline - time.time()))
+                self.log(f"[tg] still waiting for the bot email code… {left}s left (do NOT press Stop)")
+            for m in self._messages(limit=6):
+                if getattr(m, "out", False):
+                    continue
+                if int(getattr(m, "id", 0) or 0) <= int(before_id or 0):
+                    continue
+                txt = (getattr(m, "text", "") or "")
+                if not txt.strip():
+                    continue
+                if any(c in txt.lower() for c in _CANCEL_RES):
+                    self.log(f"[tg] email-code wait hit cancel/timeout marker: {txt[:80]}")
+                    return ""
+                mm = re.search(r"\b(\d{6})\b", txt.replace("`", ""))
+                if mm:
+                    code = mm.group(1)
+                    self.log(f"[tg] ⚡ email code from bot: ****{code[-2:]}")
+                    return code
+        self.log("[tg] ❌ bot sent no email code in time")
+        return ""
 
     def submit_cookie(self, cookie: str, timeout: float = 20.0):
         """Send the IG cookie header string for a PayGo Cookies task.
@@ -850,17 +994,18 @@ class MtprotoTasklyBot:
         btns, msg = self._buttons()
         inline = _inline_buttons(msg) if msg is not None else []
         pick = None
-        # 1. Exact label match on the reply keyboard.
+        # 1. Exact label match on the reply keyboard (NFKC: FastPay's Confirm
+        #    is `𝗖𝗼𝗻𝗳𝗶𝗿𝗺`, which plain .lower() cannot match).
         for label in _REGISTER_LABELS:
-            hit = next((b for b in btns if b.strip().lower() == label), None)
+            hit = next((b for b in btns if _norm_btn(b).strip() == label), None)
             if hit:
                 pick = hit
                 break
         # 2. Register/confirm-LIKE reply key (never a destructive/menu key).
         if not pick:
             pick = next((b for b in btns
-                         if ("regist" in b.lower() or "confirm" in b.lower())
-                         and not any(x in b.lower() for x in _REGISTER_BAD)), None)
+                         if ("regist" in _norm_btn(b) or "confirm" in _norm_btn(b))
+                         and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
         # 3. Inline button fallback.
         inline_pick = None
         if not pick:
@@ -1093,6 +1238,9 @@ class MtprotoPooledBot:
 
     def submit_2fa_key(self, key, allow_local_fallback=True):
         return self._call("submit_2fa_key", key, allow_local_fallback=allow_local_fallback)
+
+    def request_email_code(self, timeout=45.0):
+        return self._call("request_email_code", timeout=timeout)
 
     def submit_cookie(self, cookie, timeout=20.0):
         return self._call("submit_cookie", cookie, timeout=timeout)

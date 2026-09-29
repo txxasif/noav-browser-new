@@ -14,7 +14,7 @@
   'use strict';
 
   var root = null, timer = null;
-  var state = { running: false, igMode: null, pool: [], log: [], cfg: { headless: true } };
+  var state = { running: false, igMode: null, bot: 'taskly', pool: [], log: [], cfg: { headless: true } };
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -27,6 +27,96 @@
   // cookie and have NO 2FA/password/email step (see tg_flows.py). The
   // "Extra email" toggle therefore does not apply to them.
   function isCookieTask(task) { return /cookie/i.test(String(task || '')); }
+  // Native Taskly-2FA (📱 Create Inst (2FA)) has NO mailbox step at all —
+  // bot email + bot code — so extra-email is meaningless for it too.
+  function isNativeTask(task) {
+    var t = String(task || '');
+    return /2fa/i.test(t) && !/no.mail/i.test(t) && !/cookie/i.test(t);
+  }
+
+  // The page IS the bot (set by the TG submenu) — there is no "Mining bot"
+  // picker on a page that is already scoped to a bot.
+  var BOT_META = {
+    taskly: { name: 'Taskly Bot', logo: 'taskly',
+      tasks: [['📱 Create Inst (2FA)', '📱 Create Inst (2FA) — 2FA flow'],
+              ['🍪 Create Inst (No mail)', '🍪 Create Inst (No mail) — 2FA + cookie flow'],
+              ['🔥 Create Inst (No mail)', '🔥 Create Inst (No mail) — 2FA flow']] },
+    paygo: { name: 'PayGo Bot', logo: 'paygo',
+      tasks: [['📱 Create Inst (Cookies)', '📱 Create Inst (Cookies) — cookie flow']] },
+    fastpay: { name: 'FastPay Bot', logo: 'fastpay',
+      tasks: [['Instagram 2FA', 'Instagram 2FA — create + payout']] },
+  };
+
+  function renderTaskOptions(bot) {
+    var t = $('tg-task');
+    var list = (BOT_META[bot] || BOT_META.taskly).tasks;
+    if (!t) return;
+    var keep = t.value, html = '';
+    for (var i = 0; i < list.length; i++) {
+      html += '<option value="' + esc(list[i][0]) + '">' + esc(list[i][1]) + '</option>';
+    }
+    t.innerHTML = html;
+    var valid = false;
+    for (var j = 0; j < list.length; j++) { if (list[j][0] === keep) valid = true; }
+    t.value = valid ? keep : list[0][0];
+  }
+
+  function updateBotBadge(bot) {
+    var el = $('tg-bot-badge');
+    if (!el) return;
+    var m = BOT_META[bot] || BOT_META.taskly;
+    el.innerHTML = '<img src="img/bot_logo/' + m.logo + '.png" width="20" height="20" ' +
+      'style="border-radius:50%;object-fit:cover;" onerror="this.style.display=\'none\'" alt=""> ' +
+      esc(m.name);
+  }
+
+  // Cookie tasks have no email step (tg_flows.py) — grey out + disable the
+  // toggle so the operator is not misled; it is also ignored server-side.
+  // Same for the native 2FA task (bot email+code, no mailbox at all).
+  function applyFlowGuards() {
+    var task = ($('tg-task') || {}).value || '';
+    var cookie = isCookieTask(task);
+    var native = isNativeTask(task);
+    var off = cookie || native;
+    var sw = $('tg-adde-sw');
+    var lbl = $('tg-adde-lbl');
+    var field = sw ? sw.closest('.creator-field') : null;
+    if (sw) {
+      sw.disabled = off;
+      sw.title = cookie
+        ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
+        : (native ? 'Not used by the native 2FA task — email + code come from the bot.' : '');
+    }
+    if (field) field.style.opacity = off ? '0.5' : '1';
+    if (lbl) lbl.textContent = off ? 'Not used' : (addEmail ? 'On' : 'Off');
+  }
+
+  // Called by the sidebar submenu: switch this page to a bot.
+  window.__setTgBot = function (bot) {
+    bot = BOT_META[bot] ? bot : 'taskly';
+    state.bot = bot;
+    renderTaskOptions(bot);
+    updateBotBadge(bot);
+    applyFlowGuards();
+    refresh();  // re-scope the per-bot KPIs immediately (don't wait 5s)
+  };
+
+  // Shared Add-MTProto modal (owned here) — the TG Manager opens it.
+  window.openMtprotoModal = function () { mtReset(); mtOpen(); };
+
+  // ---- IP-throttle banner ------------------------------------------------
+  // The engine emits {"type":"throttle","scope":"ip","seconds":N,…} when
+  // Meta/Instagram rate-limit the WHOLE IP (not one account). That is not
+  // something the user can click away — show a big, unmissable banner with the
+  // concrete remedy (switch to mobile data / wait / keep creators at 1).
+  // ---- Throttle banner disabled (user requested no throttle banner or cooldown) ----
+  function hideThrottleBanner() {
+    var el = document.getElementById("tg-throttle-banner");
+    if (el) el.remove();
+  }
+  function showThrottleBanner() { hideThrottleBanner(); }
+  window.__tgShowThrottle = hideThrottleBanner;
+  hideThrottleBanner();
 
   // Toasts — used for operator-actionable conditions (e.g. a pooled account
   // that never joined the selected bot, so its task can never be claimed).
@@ -51,7 +141,7 @@
     setTimeout(function () { try { host.removeChild(el); } catch (e) {} }, ms || 9000);
   }
 
-  function statCard(label, id, sub) {
+  function statCard(label, id, sub, subId) {
     // TG accent = --accent-purple, the same one meta_auto_ai's TG tab uses.
     return '<div class="insta-stat-card" style="background:var(--bg-card);' +
              'border:1px solid var(--border-color);border-radius:var(--radius-md);' +
@@ -60,7 +150,8 @@
              'background:var(--accent-purple);opacity:.9;"></div>' +
       '<div class="insta-stat-label" style="color:var(--text-dim);">' + esc(label) + '</div>' +
       '<div class="insta-stat-value" id="' + id + '" style="color:var(--text-main);">0</div>' +
-      '<div class="insta-stat-sub" style="color:var(--text-muted);">' + esc(sub) + '</div></div>';
+      '<div class="insta-stat-sub"' + (subId ? ' id="' + subId + '"' : '') +
+             ' style="color:var(--text-muted);">' + esc(sub) + '</div></div>';
   }
 
   // Creator-settings building blocks. The ported panel rendered Mail/Captcha
@@ -98,47 +189,7 @@
         statCard('TG - TOTAL ACCOUNTS', 'tg-kpi-total', 'created for Telegram') +
         statCard('TG - PARKED READY', 'tg-kpi-parked', 'created, not submitted') +
         statCard('TG - SUBMITTING', 'tg-kpi-submitting', 'in flight now') +
-        statCard('TG - SUBMITTED', 'tg-kpi-submitted', 'task accepted') +
-      '</div>' +
-
-      /* ---- Telegram profiles + balances table ---- */
-      '<div class="card-panel" style="margin-top:1rem;">' +
-        '<div class="card-top">' +
-          '<div><strong>Telegram Profiles</strong>' +
-          '<div class="creator-option-hint">MTProto logins \u2014 the accounts that submit created accounts</div>' +
-          '<div class="creator-option-hint" id="tg-pool-sum">0 / 0 &middot; 0 ready</div></div>' +
-          '<div class="button-row">' +
-            '<button id="tg-enable-all" class="btn btn-sm btn-secondary">Select All</button>' +
-            '<button id="tg-disable-all" class="btn btn-sm btn-secondary">Deselect All</button>' +
-            '<button id="tg-add-toggle" class="btn btn-sm btn-primary">+ Add MTProto</button>' +
-            '<button id="tg-bal" class="btn btn-sm btn-secondary">Get Balances</button>' +
-            '<button id="tg-refresh" class="btn btn-sm btn-secondary">Refresh</button>' +
-          '</div>' +
-        '</div>' +
-
-        '<div id="tg-bal-wrap" style="display:none;margin-top:12px;">' +
-          '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
-            '<strong>Balances</strong>' +
-            '<button id="tg-bal-hide" class="btn btn-sm btn-secondary">Hide</button>' +
-          '</div>' +
-          '<table style="width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums;">' +
-            '<thead><tr style="text-align:left;color:var(--text-dim);font-size:11px;text-transform:uppercase;letter-spacing:.05em;">' +
-              '<th style="padding:4px 6px;">Account</th>' +
-              '<th style="padding:4px 6px;text-align:right;">Taskly</th>' +
-              '<th style="padding:4px 6px;text-align:right;">PayGo</th>' +
-              '<th style="padding:4px 6px;text-align:right;">Total</th>' +
-            '</tr></thead>' +
-            '<tbody id="tg-bal-body"></tbody>' +
-            '<tfoot><tr style="font-weight:700;border-top:1px solid var(--border-color);">' +
-              '<td style="padding:6px;">TOTAL</td>' +
-              '<td id="tg-bal-t-taskly" style="padding:6px;text-align:right;">&mdash;</td>' +
-              '<td id="tg-bal-t-paygo" style="padding:6px;text-align:right;">&mdash;</td>' +
-              '<td id="tg-bal-t-grand" style="padding:6px;text-align:right;">$0.00</td>' +
-            '</tr></tfoot>' +
-          '</table>' +
-        '</div>' +
-
-        '<div id="tg-pool" class="mt-2.5"></div>' +
+        statCard('TG - SUBMITTED', 'tg-kpi-submitted', 'task accepted', 'tg-kpi-submitted-sub') +
       '</div>' +
 
       /* LiveEngineBanner — COPIED from meta_auto_ai/public/index.html */
@@ -170,7 +221,7 @@
             '<h3 class="panel-header" style="margin:0;"><i class="fa-solid fa-sliders" style="color:var(--accent-purple);"></i> Creator Settings</h3>' +
             '<div class="panel-desc" style="margin:0;">Applies to the next TG engine start.</div>' +
           '</div>' +
-          '<span class="badge-pill bg-muted">Applies on next start</span>' +
+          '<span class="tg-bot-badge" id="tg-bot-badge"></span>' +
         '</div>' +
         '<div class="tg-settings-grid">' +
           tgField('Parallel creators',
@@ -179,19 +230,9 @@
           tgField('Target goal',
             '<input id="tg-target" class="form-control" type="number" min="0" value="0">',
             '0 = run until stopped') +
-          tgField('Mining bot',
-            '<div style="display:flex;align-items:center;gap:.5rem;">' +
-              '<img id="tg-bot-logo" src="img/bot_logo/taskly.png" alt="Taskly Bot logo" ' +
-                'width="30" height="30" style="border-radius:50%;flex:0 0 auto;object-fit:cover;">' +
-              '<select id="tg-bot" class="form-control" style="flex:1;">' +
-                '<option value="taskly">Taskly Bot</option>' +
-                '<option value="paygo">PayGo Bot</option>' +
-              '</select>' +
-            '</div>',
-            'Bot first — the Task list below shows only this bot\u2019s tasks.') +
           tgField('Task name',
             '<select id="tg-task" class="form-control"></select>',
-            'Only this bot\u2019s tasks — chosen by Mining bot first') +
+            'Only this bot\u2019s tasks') +
           tgSwitch('Visible window', 'tg-vis-sw', true, 'tg-vis-lbl', 'Visible',
             'On = a real browser window opens. Off = background.') +
           tgSwitch('Extra email after 2FA + password', 'tg-adde-sw', true, 'tg-adde-lbl', 'On',
@@ -215,9 +256,16 @@
         '<div id="tg-log" class="log-container" style="height:220px;overflow-y:auto;background:#060910;' +
           'border:1px solid var(--border-color);border-radius:8px;padding:0.75rem;' +
           'font-family:var(--font-mono);font-size:0.78rem;white-space:pre-wrap;"></div>' +
-      '</div>';
+      '</div>' +
+
+      /* ---- failure reasons & session logs (meta_auto_ai parity) ---- */
+      (window.NovaDiag ? NovaDiag.renderHtml('tg') : '');
 
     wire();
+    if (window.NovaDiag) {
+      NovaDiag.refreshReasons();
+      NovaDiag.refreshLogs();
+    }
   }
 
   function setWindow(headless) {
@@ -251,8 +299,8 @@
 
   function startEngine() {
     var btn = $('tg-start');
-    var bot = ($('tg-bot') || {}).value || 'taskly';
-    var botName = bot === 'paygo' ? 'PayGo' : 'Taskly';
+    var bot = state.bot || 'taskly';
+    var botName = bot === 'paygo' ? 'PayGo' : bot === 'fastpay' ? 'FastPay' : 'Taskly';
     if (btn) btn.disabled = true;
     // no-store: the pool is a live read. A cached (stale/empty) status here used
     // to block Start with "no profile in the pool" while the card above showed
@@ -276,9 +324,11 @@
           toast('No connected Telegram account for ' + botName + '. Log in (or re-enable) a profile, then start.', 'error', 14000);
           append('! start blocked \u2014 no logged-in Telegram profile for ' + botName);
         } else {
-          var task = ($('tg-task') || {}).value || '🔥 Create Inst (No mail)';
+          var task = ($('tg-task') || {}).value ||
+            ((BOT_META[bot] || BOT_META.taskly).tasks[0] || [''])[0];
           // Cookie tasks have no email step (tg_flows.py) — force add_email off.
-          var effAddEmail = isCookieTask(task) ? false : addEmail;
+          // Same for the native 2FA task (bot email+code, no mailbox at all).
+          var effAddEmail = (isCookieTask(task) || isNativeTask(task)) ? false : addEmail;
           append('> start (' + st.connected + ' connected \u00b7 ' + botName +
                  ', parallel=' + (($('tg-conc') || {}).value || '?') +
                  ', target=' + (($('tg-target') || {}).value || '?') +
@@ -304,67 +354,7 @@
   function wire() {
     if ($('tg-start')) $('tg-start').addEventListener('click', startEngine);
     if ($('tg-stop')) $('tg-stop').addEventListener('click', function () { post('/api/tg/stop', {}); });
-    // Bot-first task list (mirrors tg_tasks.py — each bot offers ONLY its
-    // own tasks; Cookies is PayGo-only, No mail/2FA are Taskly-only).
-    // Rebuilt on every Mining-bot change so an unoffered task can never
-    // even be selected, let alone submitted.
-    var TASKS_BY_BOT = {
-      taskly: [
-        ['🔥 Create Inst (No mail)', '🔥 Create Inst (No mail) — 2FA flow'],
-        ['📱 Create Inst (2FA)', '📱 Create Inst (2FA) — 2FA flow'],
-      ],
-      paygo: [
-        ['📱 Create Inst (Cookies)', '📱 Create Inst (Cookies) — PayGo cookie flow'],
-      ],
-    };
-    function renderTaskOptions(bot) {
-      var t = $('tg-task');
-      if (!t) return;
-      var list = TASKS_BY_BOT[bot] || TASKS_BY_BOT.taskly;
-      var keep = t.value;
-      var html = '';
-      for (var i = 0; i < list.length; i++) {
-        html += '<option value="' + esc(list[i][0]) + '">' + esc(list[i][1]) + '</option>';
-      }
-      t.innerHTML = html;
-      // Keep the previous choice only if this bot actually offers it;
-      // otherwise default to the bot's first task.
-      var valid = false;
-      for (var j = 0; j < list.length; j++) { if (list[j][0] === keep) valid = true; }
-      t.value = valid ? keep : list[0][0];
-    }
-    // Cookie tasks have no email step (tg_flows.py) — grey out + disable the
-    // toggle so the operator is not misled; it is also ignored server-side.
-    function applyFlowGuards() {
-      var task = ($('tg-task') || {}).value || '';
-      var cookie = isCookieTask(task);
-      var sw = $('tg-adde-sw');
-      var lbl = $('tg-adde-lbl');
-      var field = sw ? sw.closest('.creator-field') : null;
-      if (sw) {
-        sw.disabled = cookie;
-        sw.title = cookie
-          ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
-          : '';
-      }
-      if (field) field.style.opacity = cookie ? '0.5' : '1';
-      if (lbl) lbl.textContent = cookie ? 'Not used' : (addEmail ? 'On' : 'Off');
-    }
-    renderTaskOptions((($('tg-bot') || {}).value || 'taskly'));
-    applyFlowGuards();
-    // Bot-aware task default: PayGo only offers the Cookies task now (the old
-    // 2FA button is gone from its menu), Taskly runs the 2FA/No-mail flow.
-    // Manual override still possible via the Task dropdown.
-    if ($('tg-bot')) $('tg-bot').addEventListener('change', function () {
-      var b = ($('tg-bot') || {}).value || 'taskly';
-      var logo = $('tg-bot-logo');
-      if (logo) {
-        logo.src = 'img/bot_logo/' + (b === 'paygo' ? 'paygo' : 'taskly') + '.png';
-        logo.alt = (b === 'paygo' ? 'PayGo' : 'Taskly') + ' Bot logo';
-      }
-      renderTaskOptions(b);
-      applyFlowGuards();
-    });
+    window.__setTgBot(state.bot);
     if ($('tg-task')) $('tg-task').addEventListener('change', applyFlowGuards);
     if ($('tg-vis-sw')) $('tg-vis-sw').addEventListener('change', function () { setWindow(!$('tg-vis-sw').checked); });
     if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; if ($('tg-adde-lbl')) $('tg-adde-lbl').textContent = addEmail ? 'On' : 'Off'; });
@@ -629,12 +619,42 @@
     fetch('/api/tg/status', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) { setStatus(false, null); return; }
+        // Follow the build manifest: a single-bot build (e.g. --bots fastpay)
+        // must not stay on a 'taskly' that was never shipped.
+        var eb = s.enabled_bots || [];
+        if (eb.length && eb.indexOf(state.bot) === -1) {
+          state.bot = eb[0];
+          renderTaskOptions(state.bot);
+          updateBotBadge(state.bot);
+          applyFlowGuards();
+        }
         setStatus(!!s.running, s.ig_mode);
         renderPool(s.pool && s.pool.accounts ? s.pool.accounts : s.pool);
-        kpi('tg-kpi-total', s.tg_total != null ? s.tg_total : s.total_accounts);
-        kpi('tg-kpi-parked', s.tg_pending);
-        kpi('tg-kpi-submitted', s.tg_submitted);
-        kpi('tg-kpi-submitting', s.running ? (s.concurrency || 0) : 0);
+        // ALL KPIs are PER BOT — Taskly, PayGo and FastPay never share a number.
+        // (Unassigned parked records count toward every bot: any submitter can
+        // claim them. Falls back to the combined counters against an old server.)
+        var bot = state.bot || 'taskly';
+        var tot = bot === 'paygo' ? s.tg_total_paygo
+                : bot === 'fastpay' ? s.tg_total_fastpay
+                : s.tg_total_taskly;
+        kpi('tg-kpi-total', tot == null ? (s.tg_total != null ? s.tg_total : s.total_accounts) : tot);
+        var pen = bot === 'paygo' ? s.tg_pending_paygo
+                : bot === 'fastpay' ? s.tg_pending_fastpay
+                : s.tg_pending_taskly;
+        kpi('tg-kpi-parked', pen == null ? s.tg_pending : pen);
+        // SUBMITTED is PER BOT — Taskly, PayGo and FastPay never share a number.
+        var sub = bot === 'paygo' ? s.tg_submitted_paygo
+                : bot === 'fastpay' ? s.tg_submitted_fastpay
+                : s.tg_submitted_taskly;
+        kpi('tg-kpi-submitted', sub == null ? s.tg_submitted : sub);
+        var subEl = $('tg-kpi-submitted-sub');
+        if (subEl) {
+          var botName = bot === 'paygo' ? 'PayGo' : bot === 'fastpay' ? 'FastPay' : 'Taskly';
+          subEl.textContent = botName + ' task accepted';
+        }
+        // SUBMITTING = in-flight slots, but only when the RUNNING bot is this page's bot.
+        var runBot = s.engine && s.engine.tg_bot ? String(s.engine.tg_bot).toLowerCase() : null;
+        kpi('tg-kpi-submitting', (s.running && (!runBot || runBot === bot)) ? (s.concurrency || 0) : 0);
       })
       .catch(function () { setStatus(false, null); });
   }
@@ -754,6 +774,10 @@
           try {
             var d = JSON.parse(ev.data);
             if (d && d.pipeline && d.pipeline !== 'telegram') return;
+            if (d && d.type === 'throttle') {
+              hideThrottleBanner();
+              return;
+            }
             if (d && d.message) {
               append(String(d.message));
               // Actionable conditions -> toast, so they aren't missed in a long log.

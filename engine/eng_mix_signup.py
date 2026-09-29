@@ -458,9 +458,7 @@ class EngineSignupMixin:
                 cur = ""
             if cur:
                 try:
-                    name_input.click()
-                    p.keyboard.press("Control+A")
-                    p.keyboard.press("Backspace")
+                    # fill("") clears the field natively — no Control+A.
                     name_input.fill("")
                 except Exception:
                     pass
@@ -556,9 +554,7 @@ class EngineSignupMixin:
                             else name_input
                         )
                         if curr_name_inp:
-                            curr_name_inp.click()
-                            p.keyboard.press("Control+A")
-                            p.keyboard.press("Backspace")
+                            # fill("") clears natively — no Control+A.
                             curr_name_inp.fill("")
                             self.name = ""
                     except Exception:

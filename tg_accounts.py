@@ -309,7 +309,7 @@ class TGAccountManager:
             self.save()
             return dict(rec)
 
-    def acquire(self, timeout=None):
+    def acquire(self, timeout=None, bot=None):
         """Lease an idle, logged-in account (marks it busy). Waits if needed.
 
         Reclaims ``busy`` leases older than ``LEASE_TTL`` (dead-worker safety);
@@ -375,6 +375,7 @@ class TGAccountManager:
                     a = eligible[0]
                     a["status"] = "busy"
                     a["leased_at"] = time.time()
+                    a["busy_bot"] = (str(bot) if bot else None)
                     self.save()
                     return dict(a)
                 if end is not None and time.time() >= end:
@@ -399,6 +400,7 @@ class TGAccountManager:
                     else:
                         a["status"] = "idle"
                     a["leased_at"] = None
+                    a.pop("busy_bot", None)
                     if ok and count:
                         a["tasks_done"] = int(a.get("tasks_done", 0)) + 1
                     if count:

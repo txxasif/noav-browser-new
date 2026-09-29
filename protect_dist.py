@@ -8,7 +8,8 @@ Build-time only: this file is NEVER shipped. ``build_windows_dist.py`` calls
 
 Two protections, mirroring Nova Browser's release pipeline:
 
-1. **JavaScript** — ``server.js`` (+ the license/update core modules) get the
+1. **JavaScript** — the Node backend (``server.js`` entry + ``server/`` route
+   modules + the license/update core modules) get the
    anti-AI directive + honeypot decoy routines, then are run through
    ``javascript-obfuscator`` (control-flow flattening, dead-code injection,
    base64 string array, split strings, self-defending). The Node backend is
@@ -21,8 +22,9 @@ Two protections, mirroring Nova Browser's release pipeline:
    anti-piracy boundary stays server-side (Cloudflare licensing).
 
 The entry scripts the Node server spawns by name (``worker`` / ``tg_balance`` /
-``tg_toggle`` / ``tg_login_mtproto``) are rewritten in ``server.js`` to
-``*.pyc`` so ``python <script>.pyc`` keeps working.
+``tg_toggle`` / ``tg_login_mtproto``) are rewritten in the server JS
+(``server.js`` + ``server/routes-*.js``) to ``*.pyc`` so
+``python <script>.pyc`` keeps working.
 
 Fails closed: any compile/obfuscate failure aborts the build.
 """
@@ -46,8 +48,20 @@ SKIP_DIRS = {
 #  * ai_config.py — Update.ps1 greps it for the mail.td-only marker.
 KEEP_SOURCE = {"ai_config.py"}
 
+# Node scripts carrying commercial logic. server.js is the thin entry — the
+# route modules under server/ spawn the same Python entries, so they ship
+# under the same strong profile + entry-script rewrite.
+SERVER_JS = ["server.js", "server/context.js", "server/routes-license.js",
+             "server/routes-updates.js", "server/routes-meta.js",
+             "server/routes-tg.js", "server/routes-diag.js", "server/diag.js",
+             "server/runlog.js", "server/routes-static.js"]
+
 # Node scripts carrying commercial logic.
-JS_SENSITIVE = ["server.js", "core/licenseManager.js", "core/updateManager.js", "core/licenseConfig.js"]
+JS_SENSITIVE = ["server.js", "server/context.js", "server/routes-license.js",
+                "server/routes-updates.js", "server/routes-meta.js",
+                "server/routes-tg.js", "server/routes-diag.js", "server/diag.js",
+                "server/runlog.js", "server/routes-static.js",
+                "core/licenseManager.js", "core/updateManager.js", "core/licenseConfig.js"]
 
 # Dashboard scripts (client UI). Obfuscated with a CONSERVATIVE profile so the
 # DOM wiring and cross-file globals keep working: top-level globals are NOT
@@ -59,8 +73,11 @@ JS_SENSITIVE = ["server.js", "core/licenseManager.js", "core/updateManager.js", 
 UI_JS = [
     "public/js/nova-core.js",
     "public/js/nova-license.js",
+    "public/js/nova-diag.js",
     "public/js/nova-meta-insta.js",
     "public/js/nova-tg.js",
+    "public/js/nova-fastpay.js",
+    "public/js/nova-manager.js",
 ]
 
 # Entry scripts spawned by server.js by filename (rewritten to .pyc).
@@ -118,21 +135,28 @@ def compile_python(root: str) -> int:
 
 
 def rewrite_entry_scripts(root: str) -> int:
-    """Point server.js at the .pyc entry scripts."""
-    server = os.path.join(root, "server.js")
-    if not os.path.isfile(server):
-        raise SystemExit(f"[protect] server.js not found at {server}")
-    with open(server, encoding="utf-8") as fh:
-        src = fh.read()
+    """Point the Node backend at the .pyc entry scripts.
+
+    Entry references live in server.js AND server/routes-*.js (each route
+    module spawns its own Python helpers), so every server JS file is
+    rewritten and the total must cover all ENTRY_SCRIPTS.
+    """
+    targets = [os.path.join(root, rel) for rel in SERVER_JS]
+    targets = [t for t in targets if os.path.isfile(t)]
+    if not targets:
+        raise SystemExit("[protect] no server JS found at " + root)
     changed = 0
-    for name in ENTRY_SCRIPTS:
-        for q in ("'", '"'):
-            old, new = f"{q}{name}.py{q}", f"{q}{name}.pyc{q}"
-            if old in src:
-                src = src.replace(old, new)
-                changed += 1
-    with open(server, "w", encoding="utf-8") as fh:
-        fh.write(src)
+    for server in targets:
+        with open(server, encoding="utf-8") as fh:
+            src = fh.read()
+        for name in ENTRY_SCRIPTS:
+            for q in ("'", '"'):
+                old, new = f"{q}{name}.py{q}", f"{q}{name}.pyc{q}"
+                if old in src:
+                    src = src.replace(old, new)
+                    changed += 1
+        with open(server, "w", encoding="utf-8") as fh:
+            fh.write(src)
     return changed
 
 
@@ -232,12 +256,19 @@ def verify(root: str) -> None:
                 "pipelines/telegram/tg_coupled.pyc", "ai_config.py"):
         if not os.path.isfile(os.path.join(root, rel)):
             problems.append(f"expected file missing: {rel}")
-    # 3. server.js is valid JavaScript (obfuscator output must still parse).
-    server = os.path.join(root, "server.js")
-    chk = subprocess.run(["node", "--check", server], cwd=root,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if chk.returncode != 0:
-        problems.append(f"node --check server.js failed: {chk.stderr.decode(errors='replace')[:300]}")
+    # 3. All server JS is valid JavaScript (obfuscator output must still parse).
+    bad_server = []
+    for rel in SERVER_JS:
+        server = os.path.join(root, rel)
+        if not os.path.isfile(server):
+            bad_server.append(rel + " (missing)")
+            continue
+        chk = subprocess.run(["node", "--check", server], cwd=root,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if chk.returncode != 0:
+            bad_server.append(rel)
+    if bad_server:
+        problems.append(f"node --check failed for server JS: {bad_server}")
     # 3b. Dashboard JS must still parse after obfuscation.
     bad_ui = []
     for rel in UI_JS:
@@ -283,7 +314,7 @@ def protect(root: str, project_root: str, do_python: bool = True, do_js: bool = 
     if rw < len(ENTRY_SCRIPTS):
         raise SystemExit(f"[protect] expected {len(ENTRY_SCRIPTS)} entry-script references "
                          f"in server.js, rewrote {rw}")
-    print(f"[protect] rewrote {rw} entry-script references in server.js")
+    print(f"[protect] rewrote {rw} entry-script references in server JS")
     if do_js:
         js = obfuscate_javascript(root, project_root, JS_SENSITIVE, _OBF_NODE_SERVER, decorate=True)
         ui = obfuscate_javascript(root, project_root, UI_JS, _OBF_NODE_UI)

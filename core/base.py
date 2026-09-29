@@ -143,10 +143,43 @@ class MetaBaseMixin:
                 return True
         return super()._clean_fill(page, locator, text, timeout)
 
-    def _human_type(self, page, locator, text, timeout=25000):  # noqa: ARG002
+    def _human_type(self, *args, **kwargs):
+        """Polymorphic human-like typing supporting both (locator, text) and (page, locator, text)."""
+        if len(args) >= 3:
+            page, locator, text = args[0], args[1], args[2]
+            timeout = kwargs.get("timeout", args[3] if len(args) > 3 else 25000)
+        elif len(args) == 2:
+            locator, text = args[0], args[1]
+            page = getattr(locator, "page", None)
+            timeout = kwargs.get("timeout", 25000)
+        elif len(args) == 1 and "text" in kwargs:
+            locator = args[0]
+            text = kwargs["text"]
+            page = getattr(locator, "page", None)
+            timeout = kwargs.get("timeout", 25000)
+        else:
+            return None
+
+        # If it's an Instagram locator with press_sequentially, prefer realistic keystrokes
+        if hasattr(self, "_ig_human_type") and hasattr(locator, "press_sequentially"):
+            try:
+                return self._ig_human_type(locator, str(text))
+            except Exception:
+                pass
+
         if _fast_mode_enabled():
             return self._clean_fill(page, locator, text, timeout)
-        return super()._human_type(page, locator, text, timeout)
+
+        sup = getattr(super(), "_human_type", None)
+        if sup and callable(sup):
+            try:
+                return sup(page, locator, text, timeout=timeout)
+            except TypeError:
+                try:
+                    return sup(locator, str(text))
+                except Exception:
+                    pass
+        return self._clean_fill(page, locator, text, timeout)
 
     def _dispatch_react_events(self, page, locator):
         """Dispatch explicit synthetic React events (input, change, blur) to synchronize Fiber tree."""

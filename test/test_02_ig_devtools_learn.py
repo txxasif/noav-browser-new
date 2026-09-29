@@ -125,9 +125,10 @@ class IgDevToolsLearner:
         print(" [Step 1: Instagram Login & Linking Exploration]", flush=True)
         print("=======================================================", flush=True)
         p = self.page
-        p.goto(Urls.IG_LOGIN, wait_until="domcontentloaded", timeout=60000)
+        print("[Learner] Navigating to https://www.instagram.com/...", flush=True)
+        p.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=60000)
         p.wait_for_timeout(3500)
-        snap = self.inspector.capture(p, "login_initial_page")
+        snap = self.inspector.capture(p, "01_ig_home_landing")
 
         # 1. Dismiss cookies
         for bt in ("Allow all cookies", "Only allow essential cookies", "Decline optional cookies", "Allow"):
@@ -135,6 +136,29 @@ class IgDevToolsLearner:
                 self.log_finding("Login", f"Dismissed cookie dialog via '{bt}'")
                 p.wait_for_timeout(1000)
                 break
+
+        # If on home, find and click 'Log in'
+        clicked_home_login = False
+        for sel in (
+            'a[href*="/accounts/login"]',
+            'a:has-text("Log in")',
+            'a:has-text("Log In")',
+            'button:has-text("Log in")',
+            'button:has-text("Log In")',
+            'div[role="button"]:has-text("Log in")',
+            'div[role="button"]:has-text("Log In")',
+        ):
+            try:
+                el = p.locator(sel).first
+                if el.count() > 0 and el.is_visible():
+                    self.log_finding("Login", f"Clicked 'Log in' from instagram.com via: {sel}")
+                    el.click(timeout=3000)
+                    clicked_home_login = True
+                    p.wait_for_timeout(3500)
+                    break
+            except Exception:
+                pass
+        self.inspector.capture(p, "02_after_click_login_on_home")
 
         # 2. Check for "Continue as [Meta Name]" prompt
         has_continue = False

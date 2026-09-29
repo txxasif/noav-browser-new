@@ -1,7 +1,7 @@
 """tg_flows.py — per-flow step pipelines (single source of truth).
 
-A **task** (``tg_tasks.py``) declares which **flow** it uses (``"2fa"`` or
-``"cookie"``). A **flow** declares the ordered **steps** its runner executes
+A **task** (``tg_tasks.py``) declares which **flow** it uses (``"2fa"``,
+``"cookie"``, ``"cookie_2fa"`` or ``"native"``). A **flow** declares the ordered **steps** its runner executes
 *after* the shared preamble. The runner walks ``steps_of(flow)`` and calls the
 matching step callable — so adding a flow or a step happens in ONE place and
 the existing flows are untouched.
@@ -28,19 +28,51 @@ FLOWS = {
         "needs_email": False,
         "needs_2fa": False,
     },
-    # Taskly "🔥 Create Inst (No mail)" / "📱 Create Inst (2FA)".
+    # Taskly "🍪 Cookies → 🍪 Create Inst (No mail)" — 2FA FIRST, then cookie.
+    # Verified live 2026-09-28: Start sends First name/Login/Password, then
+    # "🔑 Please enter your 2FA key to get the code:"; after the key round-trip
+    # the bot asks for the account Cookie. Shares the cookie runner.
+    "cookie_2fa": {
+        "label": "Create Inst (Cookies) + 2FA — 2FA then cookie",
+        "runner": "run_cookie_cycle",
+        "steps": ["ig_join", "2fa", "cookie_export", "submit_cookie"],
+        "needs_email": False,
+        "needs_2fa": True,
+    },
+    # Taskly "📱 Create Inst (2FA)" — NATIVE signup (learned live 2026-09-28).
+    # The bot issues First name/Login/Password/Email (Email ordered async
+    # after Start) plus the email code via its Get-code key. IG NATIVE email
+    # signup with the bot data — NO Meta account, NO temp mail — then the
+    # "Account Registered" key. Shares nothing with the "2fa" (Meta-coupled)
+    # flow; its own runner below.
+    "native": {
+        "label": "Create Inst (2FA) — native signup with bot email+code",
+        "runner": "run_native_cycle",
+        "steps": ["ig_signup", "2fa", "register"],
+        "needs_email": False,
+        "needs_2fa": True,
+    },
+    # Taskly "🔥 Create Inst (No mail)" (Meta-coupled; the 2FA task moved to
+    # the "native" flow above).
     "2fa": {
-        "label": "Create Inst (2FA/No mail) — email + 2FA + password + register",
+        "label": "Create Inst (No mail) — password + email + 2FA + register",
         "runner": "tg_coupled",
-        "steps": ["email_link", "2fa", "password", "extra_email", "register"],
+        "steps": ["password", "email_link", "2fa", "extra_email", "register"],
         "needs_email": True,
         "needs_2fa": True,
     },
+    # FastPay2025_bot "Instagram 2FA" — a CREATE task like Taskly's 2FA, but the
+    # 2FA key is submitted to FastPay (→ 2FA Code → Confirm → ৳3.0). It shares
+    # the "2fa" flow: Meta → IG (bot Username) → follow 2 → AC 2FA+submit →
+    # password (bot Password) → optional extra email. No separate flow needed.
+    # (Was briefly modelled as payout-only — corrected 2026-09-28: the bot sends
+    #  Username/Password in the message BEFORE the key prompt.)
 }
 
 # Human labels for the task-window gate log (phase names).
 STEP_LABELS = {
     "ig_join": "IG join",
+    "ig_signup": "IG native signup",
     "cookie_export": "cookie export",
     "submit_cookie": "cookie submit",
     "email_link": "email link",
@@ -48,6 +80,8 @@ STEP_LABELS = {
     "password": "password change",
     "extra_email": "extra email",
     "register": "register confirm",
+    "submit_key": "submit 2FA key",
+    "confirm": "confirm registration",
 }
 
 
@@ -80,3 +114,46 @@ def needs_2fa(flow: str) -> bool:
 
 def runner_of(flow: str) -> str:
     return str(spec(flow).get("runner") or "")
+
+
+def resolve_steps(bot_target: str, task) -> list:
+    """Ordered step list for a (bot, task), honouring per-task overrides.
+
+    Resolution order:
+      1. ``TASKS[bot][task]["steps"]``  — an explicit list beats the flow;
+      2. else the task's ``flow`` steps (default flow = ``2fa``);
+      3. minus ``TASKS[bot][task]["skip"]``.
+
+    This is what makes "a different task needs different steps" a DATA edit:
+    a task can drop ``password``/``extra_email`` (or add a learned step) with no
+    runner change. Unknown steps are ignored-with-a-warning by the callers.
+    """
+    try:
+        import tg_tasks
+        tid, _reason = tg_tasks.resolve(bot_target, task)
+        tspec = (tg_tasks.TASKS.get(str(bot_target), {}) or {}).get(tid) if tid else None
+    except Exception:
+        tspec = None
+    if not tspec:
+        return list(FLOWS["2fa"]["steps"])
+    flow = tspec.get("flow") or "2fa"
+    steps = tspec.get("steps") or list(FLOWS.get(flow, FLOWS["2fa"]).get("steps") or [])
+    skip = set(tspec.get("skip") or [])
+    return [s for s in steps if s not in skip]
+
+
+def validate_steps(bot_target: str, task) -> list:
+    """Human-readable problems with a task's resolved steps (empty = ok)."""
+    issues = []
+    steps = resolve_steps(bot_target, task)
+    try:
+        import tg_steps
+        err = tg_steps.validate(steps)
+        if err:
+            issues.append(err)
+    except Exception:
+        pass
+    if not steps:
+        issues.append("resolved to an empty step list")
+    return issues
+

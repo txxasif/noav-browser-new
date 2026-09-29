@@ -96,6 +96,27 @@ class EngineMetaMixin:
             pass
         return None
 
+    def _dismiss_meta_welcome_gate(self, page):
+        """Click through the desktop "Welcome to Meta AI" → Continue gate.
+
+        Desktop meta.ai (and only desktop — the mobile profile skips it)
+        renders a `role=dialog` holding "Welcome to Meta AI" with a Continue
+        button that covers the signup UI. Scoped to that dialog's text so a
+        "Continue" anywhere else (e.g. the auth.meta.com email step) is never
+        touched. Returns True when a gate was dismissed.
+        """
+        try:
+            gate = page.locator('div[role="dialog"]:has-text("Welcome to Meta AI")').first
+            if gate.count() > 0 and gate.is_visible():
+                btn = gate.get_by_role("button", name="Continue").first
+                if btn.count() > 0 and btn.is_visible():
+                    self._human_click(page, btn, 3000)
+                    page.wait_for_timeout(800)
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _wait_for_meta_signup_control(self, page, timeout=8000):
         """Wait for consent/signup UI instead of sleeping a fixed 3 seconds."""
         try:
@@ -124,6 +145,10 @@ class EngineMetaMixin:
                     pass
             if consent_clicked:
                 page.wait_for_timeout(250)
+                continue
+            # Desktop "Welcome to Meta AI" gate covers the same UI — dismiss
+            # it here too so the wait below can't stall on it.
+            if self._dismiss_meta_welcome_gate(page):
                 continue
             control = self._meta_signup_control(page)
             if control is not None:
@@ -166,6 +191,10 @@ class EngineMetaMixin:
             self.log('[🌐] Trying meta.ai entry funnel (low-fraud path)…')
             page.goto(_META_AI_URL, wait_until="domcontentloaded", timeout=60000)
 
+            # Desktop renders a "Welcome to Meta AI" → Continue gate over the
+            # signup UI (mobile skips it). Clear it before anything else.
+            self._dismiss_meta_welcome_gate(page)
+
             # Wait for the hydrated signup UI (and consent dialog, if shown)
             # instead of unconditionally sleeping before every attempt.
             if self._wait_for_meta_signup_control(page) is None:
@@ -174,6 +203,9 @@ class EngineMetaMixin:
             # 1. Find and click "Sign up" on the dialog/modal or page
             signed = False
             for _ in range(4):
+                # The welcome gate can render late; never let it cover the
+                # signup control during the retry loop.
+                self._dismiss_meta_welcome_gate(page)
                 # Check for explicit dialog modal first (highest priority)
                 try:
                     dialog = page.locator('div[role="dialog"]').first
@@ -359,6 +391,12 @@ class EngineMetaMixin:
 
             # 4. Probe for the email input field (email-specific ONLY — the
             # meta.ai chat composer is a generic input and false-positived here).
+            # The live field was renamed to type=text autocomplete=username
+            # inputmode=email (verified 2026-09-28), so the strict set below
+            # only matches via its inputmode alternative. The fallback accepts
+            # the renamed shape, but ONLY while the email-step heading is
+            # showing — otherwise a login page's username field would
+            # false-positive here.
             for _ in range(6):
                 # Never accept an Instagram page as the Meta email step.
                 if self._is_ig_bounce_url(page.url):
@@ -372,6 +410,23 @@ class EngineMetaMixin:
                     if probe.is_visible():
                         self.log('[✅] meta.ai funnel reached the email step.')
                         return True
+                except Exception:
+                    pass
+                try:
+                    head = page.get_by_role(
+                        "heading", name=re.compile(r"mobile number or email", re.IGNORECASE)
+                    ).first
+                    if head.count() > 0 and head.is_visible():
+                        fb = page.locator('input[autocomplete="username"]').first
+                        if fb.count() > 0 and fb.is_visible():
+                            self.log('[✅] meta.ai funnel reached the email step (renamed input).')
+                            return True
+                        tb = page.get_by_role(
+                            "textbox", name=re.compile(r"mobile number or email", re.IGNORECASE)
+                        ).first
+                        if tb.count() > 0 and tb.is_visible():
+                            self.log('[✅] meta.ai funnel reached the email step (textbox role).')
+                            return True
                 except Exception:
                     pass
                 page.wait_for_timeout(1000)

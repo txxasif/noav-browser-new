@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from .helpers import IgHelpersMixin
 from .login import IgLoginMixin
 from .join import IgJoinMixin
+from .native import IgNativeMixin
 from .ac_reauth import IgAcReauthMixin
 from .ac_nav import IgAcNavMixin
 from .password import IgPasswordMixin
@@ -19,6 +20,7 @@ __all__ = [
     "IgHelpersMixin",
     "IgLoginMixin",
     "IgJoinMixin",
+    "IgNativeMixin",
     "IgAcReauthMixin",
     "IgAcNavMixin",
     "IgPasswordMixin",
@@ -32,6 +34,7 @@ class InstagramFlowMixin(
     IgHelpersMixin,
     IgLoginMixin,
     IgJoinMixin,
+    IgNativeMixin,
     # AC re-auth BEFORE navigation: both call each other, and keeping re-auth
     # first means its guards are the ones a navigation pass hits first.
     IgAcReauthMixin,

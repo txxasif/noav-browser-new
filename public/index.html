@@ -81,10 +81,30 @@
           <span id="metainsta-badge-ig" class="nav-pill nav-pill--tool">0</span>
         </button>
 
-        <button class="nav-item" data-view="view-tg-classic" title="TG Classic: Meta → Instagram → Taskly submit">
+        <div class="nav-section-title">TELEGRAM</div>
+        <button class="nav-item nav-parent" id="nav-tg-toggle" type="button" aria-expanded="true" title="Telegram bots — pick a submenu item">
           <i class="fa-brands fa-telegram" style="color: #229ED9;"></i>
           <span>TG Classic</span>
           <span id="metainsta-badge-tg" class="nav-pill nav-pill--tool">0</span>
+          <i class="fa-solid fa-chevron-down nav-caret"></i>
+        </button>
+        <div class="nav-submenu" id="tg-submenu">
+          <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="taskly" title="Meta → Instagram → Taskly submit (2FA / No mail)">
+            <i class="fa-solid fa-bolt" style="color: #229ED9;"></i>
+            <span>Taskly Bot</span>
+          </button>
+          <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="paygo" title="Meta → Instagram → PayGo cookie submit">
+            <i class="fa-solid fa-cookie-bite" style="color: #f59e0b;"></i>
+            <span>PayGo Bot</span>
+          </button>
+          <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="fastpay" title="Meta → Instagram → FastPay 2FA create + payout">
+            <i class="fa-solid fa-sack-dollar" style="color: #22c55e;"></i>
+            <span>FastPay Bot</span>
+          </button>
+        </div>
+        <button class="nav-item" data-view="view-tg-manager" title="Connect & manage Telegram accounts — lease, enable/disable, balances">
+          <i class="fa-solid fa-sliders" style="color: #a78bfa;"></i>
+          <span>TG Manager</span>
         </button>
         <div class="nav-section-title">HELP</div>
         <button class="nav-item" data-view="view-guide" title="Telegram setup guide — create api_id / api_hash">
@@ -138,6 +158,23 @@
                rendered the Meta Creator UI inside this panel. -->
           <div id="tg-classic-root"></div>
         </section>
+
+        <!-- ================= VIEW: TG MANAGER ================= -->
+        <section id="view-tg-manager" class="view-panel" aria-label="Telegram account manager">
+          <div class="page-title-box">
+            <div class="page-title-row">
+              <div>
+                <h2><i class="fa-solid fa-sliders" style="color:#a78bfa;"></i> Telegram Manager</h2>
+                <p>Connect, lease and monitor every Telegram profile across the bots. A profile leased by one bot is locked to it until released.</p>
+              </div>
+            </div>
+          </div>
+          <div id="tg-manager-root"></div>
+        </section>
+
+        <!-- FastPay is a TG Classic create bot now (nav data-view="view-tg-classic"
+             data-bot="fastpay"). The old standalone payout page was removed; the
+             payout runner (tg_fastpay.py) remains as a CLI/ops tool. -->
 
         <!-- ================= VIEW: SETUP GUIDE ================= -->
         <section id="view-guide" class="view-panel" aria-label="Telegram setup guide">
@@ -456,12 +493,16 @@
   </div>
 
 
-  <script src="js/nova-core.js" defer></script>
-  <script src="js/nova-license.js" defer></script>
-  <script src="js/nova-meta-insta.js" defer></script>
-  <!-- ?v=4 cache-busts the dashboard scripts. Without a changing query, a
+  <script src="js/nova-core.js?v=2" defer></script>
+  <script src="js/nova-license.js?v=1" defer></script>
+  <script src="js/nova-diag.js?v=1" defer></script>
+  <script src="js/nova-meta-insta.js?v=2" defer></script>
+  <!-- ?v=N cache-busts the dashboard scripts. Without a changing query, a
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
-       disagreed with the pool card). Bump this when shipping JS changes. -->
-  <script src="js/nova-tg.js?v=6" defer></script>
+       disagreed with the pool card). Bump these when shipping JS changes. -->
+  <script src="js/nova-tg.js?v=9" defer></script>
+  <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:
+       FastPay is a TG Classic create bot now. The file is kept on disk. -->
+  <script src="js/nova-manager.js?v=1" defer></script>
 </body>
 </html>

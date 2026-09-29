@@ -143,16 +143,19 @@ Follow the natural in-app UI click route:
 ### Email Security Checkpoint Intercept
 When modifying password or 2FA, Meta presents `"Two Step Verification - Check your email"`.
 
-> **Verified order (MCP, 2026-09-20): do 2FA FIRST, then password.**
-> 2FA setup (`Get started`) triggers this email OTP; **changing the password
-> while 2FA is already ON opens the Change-password form directly — no email
-> re-auth.** The old order (password before 2FA) forced an unsolved email OTP
-> and wedged. Coupled order:
-> `ig_2fa_begin → ig_2fa_confirm → ig_set_password → [extra email] → mark_registered`.
-1. Call `select_page(pageId: 1)` to switch to Mail.td.
+> **Dual-Order Parity (Verified live via MCP 2026-09-29):**
+> 1. **2FA First (`cookie_2fa`):** 2FA setup (`Get started`) triggers this email OTP. After OTP verification, changing password opens directly with NO email challenge.
+> 2. **Password First (Taskly `2fa` flow: `password → email_link → 2fa → register`):** Clicking `Change password` navigates directly to `/password/change/` with the form already pre-selected. Meta throws `"Check your email"` modal dialog **directly over the form**. Solve the OTP challenge immediately via `_ac_reauth` before attempting form fills. Once solved, subsequent 2FA setup opens directly with NO email challenge.
+>
+> **TRAP AVOIDANCE**:
+> - Never search for bare `"Meta"` or generic `:has-text("Email")` on the `Login and security` menu — it matches **`Emails from Meta`** and abandons the form!
+> - When `_challenge_present()` is `True`, NEVER call `_ac_choose_account()`. The form is already targeted under the modal.
+> - The OTP input element is `<input type="password" ...>` with accessible name `"Code"`. React synthetic value tracking requires prototype setter + `input`, `change`, `blur` dispatch so `aria-disabled="true"` clears on the Continue button.
+
+1. Call `select_page(pageId: 1)` to switch to Mail.td (or Page 2).
 2. Read 8-digit OTP from `"Authenticate your profile"` email.
-3. Call `select_page(pageId: 2)` to return to Accounts Center.
-4. Enter code into `textbox "Code"` and click `button "Continue"`.
+3. Call `select_page(pageId: 2)` to return to Accounts Center (or Page 1).
+4. Enter code into `textbox "Code"` (using React prototype setter) and click `button "Continue"`.
 
 ### 2FA Secret Key Scrape & TOTP Verification
 On the QR code screen:

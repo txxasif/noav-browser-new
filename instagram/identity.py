@@ -70,9 +70,8 @@ class IgIdentityMixin:
             try:
                 inp = p.locator(sel).first
                 if inp.count() > 0 and inp.is_visible():
-                    inp.click()
-                    p.keyboard.press("Control+A")
-                    p.keyboard.press("Backspace")
+                    # fill() REPLACES the value (clears first) — no Control+A,
+                    # which on a non-focused wrapper selects the whole document.
                     inp.fill(new_name)
                     self._dispatch_react_events(p, inp)
                     filled = True
@@ -117,9 +116,7 @@ class IgIdentityMixin:
             try:
                 inp = p.locator(sel).first
                 if inp.count() > 0 and inp.is_visible():
-                    inp.click()
-                    p.keyboard.press("Control+A")
-                    p.keyboard.press("Backspace")
+                    # fill() REPLACES the value — no Control+A (see above).
                     inp.fill(new_username)
                     self._dispatch_react_events(p, inp)
                     filled = True
@@ -166,7 +163,44 @@ class IgIdentityMixin:
         self.log('[⚠️] Username change not confirmed.')
         return False
 
-    def ig_link_email_to_instagram(self, target_email: Optional[str] = None) -> bool:
+    def _dismiss_contact_modal(self, p) -> None:
+        """Dismiss any active Add email, Confirmation code, or Contact info overlay modal."""
+        for _ in range(6):
+            if p.locator('div[role="dialog"]').count() == 0:
+                break
+            closed = False
+            for sel in (
+                'div[role="dialog"] [aria-label="Close"]',
+                'div[role="dialog"] [aria-label="Back"]',
+                '[aria-label="Close"]',
+                '[aria-label="Back"]',
+                'button:has-text("Cancel")',
+                'div[role="button"]:has-text("Cancel")',
+            ):
+                try:
+                    loc = p.locator(sel)
+                    cnt = loc.count()
+                    if cnt > 0:
+                        # Try the top-most dialog button first
+                        for idx in (cnt - 1, 0):
+                            candidate = loc.nth(idx)
+                            if candidate.is_visible():
+                                self._tap_or_click(p, candidate, timeout=2000)
+                                p.wait_for_timeout(800)
+                                closed = True
+                                break
+                        if closed:
+                            break
+                except Exception:
+                    pass
+            if not closed or p.locator('div[role="dialog"]').count() > 0:
+                try:
+                    p.keyboard.press("Escape")
+                    p.wait_for_timeout(600)
+                except Exception:
+                    pass
+
+    def ig_link_email_to_instagram(self, target_email: Optional[str] = None, code_fetcher=None) -> bool:
         """Ensure the account email is linked and confirmed directly on the Instagram profile.
         Essential for Telegram Taskly submissions to prevent rejection:
         'Your report was rejected because the Instagram account was registered without an email address.'
@@ -190,17 +224,15 @@ class IgIdentityMixin:
         # Abort so the creator discards this account (close + next) instead of
         # parking a broken record with no linked email.
         try:
-            if self._is_ig_dead_end_chooser(p) or "/accounts/login" in (p.url or ""):
-                # Session dropped mid-AC (IG require_login hold), NOT necessarily
-                # a failed Meta join — try to re-login with the creds we own
-                # before declaring a dead end (observed 2026-09-21).
-                if self._chooser_relogin(p):
-                    self.log('[✔] Recovered dropped session — continuing email link.')
-                    p = self._ig_tab()
-                elif self._is_ig_dead_end_chooser(p):
-                    raise IGDeadEnd("IG saved-account chooser with the bare email profile — Meta join failed (re-login failed)")
-                else:
-                    raise IGDeadEnd(f"IG session lost (login wall) at {(p.url or '')[:80]}")
+            if self._is_ig_dead_end_chooser(p):
+                # TERMINAL: the saved-account chooser means logged out (session
+                # dropped). Quit — do NOT tap Continue (operator decision
+                # 2026-09-28).
+                raise IGDeadEnd("IG saved-account chooser (logged out — session dropped) — dead end")
+            if "/accounts/login" in (p.url or ""):
+                # NO retry login (operator decision 2026-09-28): the login wall
+                # IS the dead end — quit, do not attempt a re-login.
+                raise IGDeadEnd(f"IG session lost (login wall) at {(p.url or '')[:80]}")
         except IGDeadEnd:
             raise
         except Exception:
@@ -330,13 +362,37 @@ class IgIdentityMixin:
 
             p.wait_for_timeout(1500)
             self._try_click(p, "Next", timeout=6000)
-            p.wait_for_timeout(4000)
+            # Check if email is already in use / rejected (or if OTP confirmation screen appeared)
+            for _ in range(12):
+                p.wait_for_timeout(500)
+                try:
+                    full_body = (p.inner_text("body") or "").lower()
+                except Exception:
+                    full_body = self._page_tail(p, 600).lower()
+
+                if any(k in full_body for k in ("already in use", "another account", "not available", "enter a valid email")):
+                    self.log(f'<font color="#FFA500"><b>[⚠️] Email {em} was rejected by Accounts Center ("The email address you entered is already in use.") — dismissing modal and proceeding directly to 2FA…</b></font>')
+                    if callable(code_fetcher):
+                        try:
+                            self.log('[✉️] Triggering code_fetcher to advance bot state (Get code)…')
+                            code_fetcher()
+                        except Exception:
+                            pass
+                    self._dismiss_contact_modal(p)
+                    return False
+
+                if any(k in full_body for k in ("confirmation code", "enter code", "check your email")):
+                    break
 
             # Check if confirmation OTP is requested
             tail = self._page_tail(p, 400).lower()
             if any(k in tail for k in ("confirmation code", "enter code", "check your email")):
-                self.log('[✉️] Accounts Center email verification code requested. Polling temp mail…')
-                code = getattr(self, "fetch_code", lambda *a, **kw: None)("instagram", timeout=120) or getattr(self, "fetch_code", lambda *a, **kw: None)("meta", timeout=60)
+                if callable(code_fetcher):
+                    self.log(f'[✉️] Requesting email confirmation code via code_fetcher ({em})…')
+                    code = code_fetcher()
+                else:
+                    self.log('[✉️] Accounts Center email verification code requested. Polling temp mail…')
+                    code = getattr(self, "fetch_code", lambda *a, **kw: None)("instagram", timeout=120) or getattr(self, "fetch_code", lambda *a, **kw: None)("meta", timeout=60)
                 if code:
                     self.log(f'[✉️] Entering confirmation code: {code}')
                     filled = False
@@ -381,15 +437,18 @@ class IgIdentityMixin:
                             break
                         if any(k in body for k in ("invalid", "incorrect", "wrong",
                                                    "expired", "try again",
-                                                   "didn't match", "did not match")):
-                            self.log('[⚠️] Email confirmation code rejected by Accounts Center.')
-                            break
+                                                   "didn't match", "did not match",
+                                                   "already in use", "another account")):
+                            self.log(f'<font color="#FFA500"><b>[⚠️] Email code rejected or email in use ("{body[:60]}") — dismissing modal and proceeding directly to 2FA…</b></font>')
+                            self._dismiss_contact_modal(p)
+                            return False
                     if confirmed:
                         self.log(f'<font color="#00FF00"><b>[✔] Email {em} added (toast confirmed).</b></font>')
                         return True
                     self._try_click(p, "Close", timeout=4000)
                     return self._email_confirmed(p, em)
 
+        self._dismiss_contact_modal(p)
         self.log('[ℹ️] Email linking flow finished.')
         return self._email_confirmed(p, em)
 

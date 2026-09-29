@@ -24,6 +24,20 @@ Contract
   (USD, informational), ``path`` — the exact button chain from the main
   menu, where each level is a matcher ``{"all": [...], "none": [...]}``
   applied to normalized button text.
+* **Per-task STEP control (optional).** A task may also carry:
+  ``steps`` — an explicit ordered step list (beats the flow's list), and
+  ``skip`` — step names to drop from the flow. ``tg_flows.resolve_steps``
+  applies them; the runner performs only what is listed. So "this task has no
+  password step" or "2FA only, no extra email" is a DATA edit::
+
+      INST_2FA:  {"label": "...", "flow": "2fa",
+                  "skip": ["extra_email"],          # no extra-email step
+                  "path": [...]},
+      #   or a fully explicit, learned sequence:
+      LEARNED:   {"label": "...", "steps": ["ig_join", "2fa", "register"],
+                  "path": [...]},
+
+  Step names live in ``tg_steps.STEPS`` (the step registry).
 * ``resolve(bot_target, task)`` returns ``(task_id, levels)`` or
   ``(None, reason)``. A task NOT listed for a bot is UNAVAILABLE — the
   caller must refuse (return False), never fall back to another task.
@@ -39,7 +53,9 @@ from __future__ import annotations
 # Canonical task ids. UI / CLI / worker strings resolve to these via ALIASES.
 NOMAIL = "nomail"        # Create Inst (No mail) — Taskly only
 INST_2FA = "inst_2fa"    # Create Inst (2FA) — Taskly only (PayGo button gone)
+COOKIES_NOMAIL = "cookies_nomail"  # Taskly: Cookies → Create Inst (No mail) (2FA + cookie)
 COOKIES = "cookies"      # Create Inst (Cookies) — PayGo only
+FASTPAY_2FA = "fastpay_ig_2fa"  # Instagram 2FA payout — FastPay bot (key -> code)
 
 # Canonical display label per task — mirrors the bot button text EXACTLY
 # (same words + same emoji/logo), minus the volatile price suffix.
@@ -49,7 +65,9 @@ COOKIES = "cookies"      # Create Inst (Cookies) — PayGo only
 LABELS = {
     NOMAIL: "🔥 Create Inst (No mail)",
     INST_2FA: "📱 Create Inst (2FA)",
+    COOKIES_NOMAIL: "🍪 Create Inst (No mail)",
     COOKIES: "📱 Create Inst (Cookies)",
+    FASTPAY_2FA: "Instagram 2FA",
 }
 
 # User-facing strings (dashboard dropdown, --tg-task, legacy callers) ->
@@ -69,6 +87,13 @@ ALIASES = {
     "Cookies": COOKIES,
     "Cookie": COOKIES,
     "🍪 Cookies": COOKIES,  # category button text (resolves; picker walks it)
+    # Taskly Cookies → "🍪 Create Inst (No mail)" (2FA + cookie flow).
+    "🍪 Create Inst (No mail)": COOKIES_NOMAIL,
+    "Create Inst (No mail) Cookies": COOKIES_NOMAIL,
+    # FastPay2025_bot "Instagram 2FA" payout task.
+    "Instagram 2FA": FASTPAY_2FA,
+    "instagram 2fa": FASTPAY_2FA,
+    "IG 2FA": FASTPAY_2FA,
 }
 
 # Per-bot catalog. ``path`` is ordered button levels from the MAIN menu.
@@ -87,10 +112,25 @@ TASKS = {
         },
         INST_2FA: {
             "label": LABELS[INST_2FA],
+            # Meta-coupled flow: Meta create -> IG join (bot Login) -> password change
+            # -> bot email link -> 2FA setup -> register confirm
             "flow": "2fa",
+            "price": 0.018,
             "path": [
                 {"all": ["task"], "none": ["cookie"]},
                 {"all": ["create inst", "2fa"], "none": ["no mail"]},
+            ],
+            "steps": ["password", "email_link", "2fa", "register"],
+        },
+        # 🍪 Cookies → 🍪 Create Inst (No mail): 2FA first, then cookie submit.
+        COOKIES_NOMAIL: {
+            "label": LABELS[COOKIES_NOMAIL],
+            "flow": "cookie_2fa",
+            "price": 0.023,
+            "path": [
+                {"all": ["task"], "none": []},                    # 📋 Tasks
+                {"all": ["cookies"], "none": []},                 # 🍪 Cookies category
+                {"all": ["create inst", "no mail"], "none": ["twitter"]},  # 🍪 Create Inst (No mail)
             ],
         },
     },
@@ -106,12 +146,45 @@ TASKS = {
             ],
         },
     },
+    # FastPay2025_bot — Instagram 2FA CREATE task (reverse-engineered live
+    # 2026-09-28). It IS a task issuer after all: selecting the task sends
+    #   📋 Task: Instagram 2FA
+    #   👤 Username: `...`
+    #   🔒 Password: `FASTPAY%27`
+    # then asks for the 2FA key. So it runs the SAME create flow as Taskly's
+    # "Create Inst (2FA)" (flow "2fa"), except the 2FA key is submitted to
+    # FastPay (→ 2FA Code → Confirm → paid) instead of Taskly.
+    # NOTE: reading only the LAST message shows just "Please send the 2FA Key
+    # below:" — the creds arrive in the PREVIOUS message. Do not "simplify" the
+    # creds reader to the last message (that is what made this look payout-only).
+    # Labels render as Unicode bold (𝗧𝗮𝘀𝗸/𝗜𝗻𝘀𝘁𝗮𝗴𝗿𝗮𝗺); `normalize` NFKC-folds
+    # them to ASCII so these matchers match.
+    "fastpay": {
+        FASTPAY_2FA: {
+            "label": LABELS[FASTPAY_2FA],
+            "flow": "2fa",
+            "price": 0.024,
+            "path": [
+                {"all": ["task"], "none": []},                        # 𝗧𝗮𝘀𝗸
+                {"all": ["instagram"], "none": ["facebook"]},         # 𝗜𝗻𝘀𝘁𝗮𝗴𝗿𝗮𝗺 category
+                {"all": ["instagram", "2fa"], "none": ["facebook"]},  # Instagram 2FA task
+            ],
+            "steps": ["2fa", "password", "register"],
+        },
+    },
 }
 
 
 def normalize(text: str) -> str:
-    """Lowercase button/text match surface (emoji kept, harmless)."""
-    return str(text or "").lower()
+    """Lowercase, NFKC-normalized match surface.
+
+    NFKC folds Unicode "math bold"/fancy letterforms back to plain ASCII
+    (FastPay's menu is 𝗧𝗮𝘀𝗸 / 𝗜𝗻𝘀𝘁𝗮𝗴𝗿𝗮𝗺, which ``.lower()`` alone does NOT turn
+    into ASCII), so ASCII matcher terms still match. Plain ASCII (Taskly /
+    PayGo) is unchanged; emoji and prices are untouched.
+    """
+    import unicodedata
+    return unicodedata.normalize("NFKC", str(text or "")).lower()
 
 
 def match_level(buttons, level):
@@ -155,9 +228,18 @@ def resolve(bot_target: str, task):
 
 
 def flow_of(bot_target: str, task_id: str):
-    """``'2fa'`` | ``'cookie'`` | None (unknown combo)."""
+    """``'2fa'`` | ``'cookie'`` | ``'cookie_2fa'`` | None (unknown combo).
+
+    Accepts a canonical task id OR a label/alias (resolved first), so callers
+    can pass whatever the dashboard sent.
+    """
+    b = (bot_target or "").lower()
     try:
-        return TASKS.get((bot_target or "").lower(), {}).get(task_id, {}).get("flow")
+        spec = TASKS.get(b, {}).get(task_id)
+        if spec is None:
+            tid, _reason = resolve(b, task_id)
+            spec = TASKS.get(b, {}).get(tid) if tid else None
+        return (spec or {}).get("flow")
     except Exception:
         return None
 

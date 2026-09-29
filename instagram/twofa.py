@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import random
 import sys
 from typing import Any, Optional
 
@@ -97,6 +98,23 @@ class IgTwofaMixin:
         if "accountscenter.instagram.com" not in (p.url or ""):
             self.log(f'[⚠️] 2FA setup halted: Not inside Accounts Center (url={p.url})')
             return None
+
+        # The 2FA step must land on the TWO-FACTOR sub-page, NEVER the password
+        # sub-page. _ac_in_section() batches both under /password_and_security/,
+        # so an Accounts Center already sitting on password/change satisfies the
+        # section check — and the 2FA step would open the CHANGE-PASSWORD modal
+        # first (observed 2026-09-28). Back out to the section list and re-enter
+        # so 2FA runs before any password form.
+        if ("password_and_security" in (p.url or "")
+                and "two_factor" not in (p.url or "")):
+            self.log('[2fa] On a password sub-page — returning to the section list '
+                     'so 2FA opens FIRST (not the password modal)…')
+            try:
+                self._ac_leave_subpage(p)
+            except Exception:
+                pass
+            p.wait_for_timeout(1500)
+            p = self._ig_tab()
 
         # Right after a password change the app often drops us on the AC HOME
         # (the "Meta Account" overview). _ac_section can return there without
@@ -397,8 +415,10 @@ class IgTwofaMixin:
             try:
                 inp = p.locator(sel).first
                 if inp.count() and inp.is_visible():
-                    inp.click(force=True, timeout=2000)
-                    inp.fill(str(code))
+                    self._tap_or_click(p, inp, timeout=2000)
+                    self._human_pause(0.2, 0.4)
+                    inp.press_sequentially(str(code), delay=random.randint(60, 130))
+                    self._human_pause(0.2, 0.5)
                     # Verify the value actually landed (React controlled inputs
                     # sometimes swallow fill) — the #1 cause of "code didn't submit".
                     try:

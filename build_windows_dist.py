@@ -7,6 +7,7 @@ validates runtime hermetic dependencies, tests license logic,
 and creates the standalone MetaCreator-Windows-Portable.zip package.
 """
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -25,11 +26,36 @@ SYNC_DIRS = [
     "engine",
     "instagram",
     "pipelines",   # TG Classic: pipelines/telegram/* (tg_worker/tg_coupled/tg_cycles/tg_support)
+    "tg",          # TG manager package (common/registry/manager/bots/*)
+    "server",      # Node backend route modules (server.js entry + server/*.js)
     "public",
     "extensions",
     "selfies",
     "img",
 ]
+
+# Bots that can be shipped. `--bots taskly,paygo` ships ONLY those (excludes
+# tg/bots/<other>.py and writes tg/enabled_bots.json so the dashboard hides the
+# rest). Default = all.
+ALL_BOTS = ["taskly", "paygo", "fastpay"]
+
+
+def selected_bots():
+    for i, a in enumerate(sys.argv):
+        if a == "--bots" and i + 1 < len(sys.argv):
+            want = [b.strip().lower() for b in sys.argv[i + 1].split(",") if b.strip()]
+            return [b for b in ALL_BOTS if b in want] or list(ALL_BOTS)
+        if a.startswith("--bots="):
+            want = [b.strip().lower() for b in a.split("=", 1)[1].split(",") if b.strip()]
+            return [b for b in ALL_BOTS if b in want] or list(ALL_BOTS)
+    return list(ALL_BOTS)
+
+
+def get_dist_tag():
+    bots = selected_bots()
+    if set(bots) == set(ALL_BOTS):
+        return "Full"
+    return "-".join(b.capitalize() for b in bots)
 
 # Root files to synchronize
 SYNC_ROOT_FILES = [
@@ -56,7 +82,12 @@ SYNC_ROOT_FILES = [
     "warm_pool.py",         # warm browser pool used by tg_cycles
     "tg_tasks.py",          # per-bot task registry (strict pick guards)
     "tg_flows.py",          # per-flow step pipelines (data-driven cycle steps)
+    "tg_steps.py",          # step registry (single source of truth for one step)
     "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
+    "run_native_cycle.py",  # one-shot Taskly 2FA native cycle (lease -> bot email+code -> IG signup -> register)
+    "tg_fastpay.py",        # FastPay2025 IG-2FA payout runner (key -> code -> Confirm)
+    "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
+    "tg_manager_cli.py",    # dashboard <-> tg.manager bridge (summary/balance/bots)
 ]
 
 ANTI_AI_JS = """/**
@@ -150,6 +181,13 @@ def sync_sources():
                     continue
                 s_file = os.path.join(root, f)
                 d_file = os.path.join(target_sub, f)
+                # --bots X,Y: ship only the selected tg/bots/<id>.py modules.
+                if dname == "tg" and f.endswith(".py"):
+                    rel_f = os.path.relpath(s_file, s_dir)
+                    if rel_f.startswith("bots" + os.sep):
+                        bid = f[:-3]
+                        if bid != "__init__" and bid not in selected_bots():
+                            continue
                 # Skip symlinks that point to linux-specific paths
                 if os.path.islink(s_file):
                     continue
@@ -186,6 +224,29 @@ def sync_sources():
                     continue
                 shutil.copy2(os.path.join(root, item), os.path.join(target_sub, item))
                 synced_count += 1
+
+    # Remove EXCLUDED bots from a previous build (source + stale bytecode), or
+    # a `--bots taskly` build would still import an old fastpay.pyc that lingered.
+    for _bid in ALL_BOTS:
+        if _bid in selected_bots():
+            continue
+        for _ext in (".py", ".pyc"):
+            _p = os.path.join(ROOT_WIN, "tg", "bots", _bid + _ext)
+            try:
+                if os.path.isfile(_p):
+                    os.remove(_p)
+            except OSError:
+                pass
+
+    # Build-selection manifest: which bots this build ships. The dashboard
+    # reads it (via tg.registry) to hide the bots that were not built.
+    try:
+        tg_dir = os.path.join(ROOT_WIN, "tg")
+        os.makedirs(tg_dir, exist_ok=True)
+        with open(os.path.join(tg_dir, "enabled_bots.json"), "w", encoding="utf-8") as fh:
+            json.dump({"bots": selected_bots()}, fh, indent=2)
+    except Exception as exc:
+        log("WARN", f"could not write tg/enabled_bots.json: {exc}")
 
     log("SYNC", f"Successfully synced {synced_count} files to Windows distribution.")
     strip_all_markdown()
@@ -350,9 +411,11 @@ def validate_license_parity():
 
 
 def build_portable_zip(protect_mode: bool = True):
-    log("ZIP", "Building MetaCreator-Windows-Portable.zip...")
+    tag = get_dist_tag()
+    zip_name = f"MetaCreator-Windows-{tag}-Portable.zip"
+    log("ZIP", f"Building {zip_name}...")
     os.makedirs(DIST_DIR, exist_ok=True)
-    zip_path = os.path.join(DIST_DIR, "MetaCreator-Windows-Portable.zip")
+    zip_path = os.path.join(DIST_DIR, zip_name)
 
     if os.path.exists(zip_path):
         os.remove(zip_path)
@@ -376,13 +439,12 @@ def build_portable_zip(protect_mode: bool = True):
                 )]
 
             for file in files:
-                if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown", ".c", ".cpp", ".h", ".rst")):
+                if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown", ".c", ".cpp", ".h", ".rst", ".zip")):
                     continue
                 # Sourceless bytecode (protection) ships; only stale __pycache__ is dropped.
                 if file.endswith(".pyc") and "__pycache__" in root:
                     continue
                 if file in (
-                    "MetaCreator-Windows-Portable.zip", "MetaCreator-Windows-Patch.zip",
                     "build_windows_dist.py", "BUILD_RUNBOOK.md",
                     "accounts.txt", "data.db", "test_store.db", "update.zip"
                 ):
@@ -410,6 +472,15 @@ def build_portable_zip(protect_mode: bool = True):
         names = set(zf.namelist())
         required_in_zip = [
             "MetaCreator/server.js",
+            "MetaCreator/server/context.js",
+            "MetaCreator/server/routes-license.js",
+            "MetaCreator/server/routes-updates.js",
+            "MetaCreator/server/routes-meta.js",
+            "MetaCreator/server/routes-tg.js",
+            "MetaCreator/server/routes-diag.js",
+            "MetaCreator/server/diag.js",
+            "MetaCreator/server/runlog.js",
+            "MetaCreator/server/routes-static.js",
             "MetaCreator/worker.py",
             "MetaCreator/engine/resource_runtime.py",
             "MetaCreator/Run.bat",
@@ -459,13 +530,18 @@ def build_portable_zip(protect_mode: bool = True):
     log("OK", f"Created {zip_path}")
     log("INFO", f"Package Size: {size_mb:.2f} MB ({total_files} files packaged)")
     log("INFO", f"SHA-256: {sha256}")
+    if tag == "Full":
+        default_zip = os.path.join(DIST_DIR, "MetaCreator-Windows-Portable.zip")
+        shutil.copy2(zip_path, default_zip)
     return zip_path, size_mb, sha256
 
 
 def build_patch_zip():
-    log("ZIP", "Building lightweight MetaCreator-Windows-Patch.zip (Code & Engines only)...")
+    tag = get_dist_tag()
+    patch_name = f"MetaCreator-Windows-{tag}-Patch.zip"
+    log("ZIP", f"Building lightweight {patch_name} (Code & Engines only)...")
     os.makedirs(DIST_DIR, exist_ok=True)
-    patch_path = os.path.join(DIST_DIR, "MetaCreator-Windows-Patch.zip")
+    patch_path = os.path.join(DIST_DIR, patch_name)
 
     if os.path.exists(patch_path):
         os.remove(patch_path)
@@ -490,12 +566,11 @@ def build_patch_zip():
                 )]
 
             for file in files:
-                if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown")):
+                if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown", ".zip")):
                     continue
                 if file.endswith(".pyc") and "__pycache__" in root:
                     continue
                 if file in (
-                    "MetaCreator-Windows-Portable.zip", "MetaCreator-Windows-Patch.zip",
                     "build_windows_dist.py", "BUILD_RUNBOOK.md",
                     "accounts.txt", "data.db", "test_store.db", "update.zip"
                 ):
@@ -531,6 +606,9 @@ def build_patch_zip():
     log("OK", f"Created {patch_path}")
     log("INFO", f"Patch Size: {size_mb:.2f} MB ({total_files} files packaged)")
     log("INFO", f"SHA-256: {sha256}")
+    if tag == "Full":
+        default_patch = os.path.join(DIST_DIR, "MetaCreator-Windows-Patch.zip")
+        shutil.copy2(patch_path, default_patch)
     return patch_path, size_mb, sha256
 
 
@@ -576,6 +654,7 @@ def main():
     print("=" * 70)
 
     sync_sources()
+    print(f"[BUILD] Bots in this build: {', '.join(selected_bots())}")
     ensure_python_deps()   # telethon/pyaes/rsa into the SHIPPED runtime
     validate_installer_sources()
     validate_runtimes()

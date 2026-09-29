@@ -133,7 +133,13 @@ class EngineLaunchMixin:
         os.makedirs(base, exist_ok=True)
         if override:
             override = os.path.expanduser(override)
-            slot_num = int(getattr(w, "slot_id", 1) or 1)
+            # slot_id may be a STRING (the test harnesses pass an id like
+            # "test_meta_20260928_..."): int() raised and killed the launch.
+            # A non-numeric slot is a single dedicated profile -> slot 1.
+            try:
+                slot_num = int(getattr(w, "slot_id", 1) or 1)
+            except (TypeError, ValueError):
+                slot_num = 1
             if slot_num > 1 and os.environ.get("INSTA_ALLOW_SHARED_PROFILE", "0") not in ("1", "true", "yes"):
                 prof = os.path.join(override, f"slot_{slot_num}")
                 self.log(f'[⚠️] Partitioning shared profile override for slot {slot_num}.')

@@ -81,7 +81,12 @@ class MailboxMixin:
             self._ensure_mail_tab()
         except Exception:
             pass
-        return super().fetch_code(keyword, timeout=timeout)
+        return super().fetch_code(
+            keyword,
+            timeout=timeout,
+            subject_hint=subject_hint,
+            prefer_len=prefer_len,
+        )
 
     def finish(self):
         """Clean up the runner/browser through the existing engine hook."""

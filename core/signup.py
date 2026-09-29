@@ -129,9 +129,8 @@ class SignupMixin:
                 inp = page.locator('input[aria-label*="Name" i], input[placeholder*="Name" i], input[name*="name" i]').first
                 if inp.count() > 0 and inp.is_visible():
                     try:
-                        inp.click()
-                        page.keyboard.press("Control+A")
-                        page.keyboard.press("Backspace")
+                        # fill("") clears natively — no Control+A (which on a
+                        # non-focused wrapper selects the whole document).
                         inp.fill("")
                     except Exception:
                         pass

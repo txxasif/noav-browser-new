@@ -61,7 +61,14 @@ class IgHelpersMixin:
         self.insta_page = page
         return page
 
-    def _page_tail(self, p, n: int = 220) -> str:
+    def _page_text(self, p) -> str:
+        """Fetch the full normalized visible page body text for telemetry and state checks."""
+        try:
+            return (p.inner_text("body") or "").replace("\n", " ")
+        except Exception:
+            return ""
+
+    def _page_tail(self, p, n: int = 400) -> str:
         """Fetch the normalized tail of the visible page body text for telemetry and checks."""
         try:
             return (p.inner_text("body") or "").replace("\n", " ")[-n:]
@@ -103,7 +110,21 @@ class IgHelpersMixin:
         return False
 
     def _tap_or_click(self, p, loc, timeout: int = 4000) -> bool:
-        """Attempt touch tap, forced click, or human mouse click on a locator."""
+        """Attempt touch tap, randomized bounding-box click, or forced click on a locator."""
+        try:
+            # First try randomized position within bounding box to avoid center-coordinate fingerprint
+            box = loc.bounding_box(timeout=min(1500, timeout))
+            if box and box.get("width", 0) > 4 and box.get("height", 0) > 4:
+                rx = box["x"] + box["width"] * random.uniform(0.25, 0.75)
+                ry = box["y"] + box["height"] * random.uniform(0.25, 0.75)
+                try:
+                    p.touchscreen.tap(rx, ry)
+                    return True
+                except Exception:
+                    p.mouse.click(rx, ry)
+                    return True
+        except Exception:
+            pass
         try:
             loc.tap(timeout=timeout)
             return True
@@ -119,6 +140,38 @@ class IgHelpersMixin:
             return True
         except Exception:
             return False
+
+    def _human_type(self, *args, **kwargs) -> None:
+        """Type text sequentially with jittered delays and realistic keystrokes."""
+        if len(args) >= 3:
+            loc, text = args[1], str(args[2])
+        elif len(args) >= 2:
+            loc, text = args[0], str(args[1])
+        elif len(args) == 1 and "text" in kwargs:
+            loc, text = args[0], str(kwargs["text"])
+        else:
+            return
+
+        lo = kwargs.get("lo", 45)
+        hi = kwargs.get("hi", 110)
+        try:
+            p = getattr(loc, "page", None)
+            if p:
+                self._tap_or_click(p, loc, timeout=2000)
+            else:
+                loc.click(timeout=2000)
+            self._human_pause(0.15, 0.35)
+            loc.fill("")
+            self._human_pause(0.1, 0.2)
+            loc.press_sequentially(text, delay=random.randint(lo, hi))
+            self._human_pause(0.2, 0.5)
+        except Exception:
+            try:
+                loc.fill(text)
+            except Exception:
+                pass
+
+    _ig_human_type = _human_type
 
     def _human_pause(self, lo: float = 0.25, hi: float = 0.9) -> None:
         """Short jittered idle between UI actions (anti-mechanization).
@@ -373,6 +426,28 @@ class IgHelpersMixin:
             pass
         return escaped
 
+    def _ig_logged_in_ui(self, p) -> bool:
+        """True when the page is a logged-in Instagram surface (bottom nav/feed).
+
+        The ``sessionid`` cookie is the fast path, but IG's newer web flow does
+        NOT always set it — a loaded feed with the bottom navigation is proof
+        enough that we are logged in. Treating a missing cookie as "session
+        dead" cancelled healthy accounts (observed 2026-09-28: the feed was
+        fully rendered, "Failed to Load" only on the follow rail, and the cycle
+        dead-ended as 'IG session dead').
+        """
+        try:
+            if "/accounts/login" in (p.url or ""):
+                return False
+            return bool(p.evaluate(
+                "() => !!(document.querySelector('svg[aria-label=\"Home\"]') || "
+                "document.querySelector('svg[aria-label=\"Profile\"]') || "
+                "document.querySelector('svg[aria-label=\"Search\"]') || "
+                "document.querySelector('nav[role=\"navigation\"]') || "
+                "document.querySelector('a[href=\"/direct/inbox/\"]'))"))
+        except Exception:
+            return False
+
     def _ig_relogin_if_needed(self, p, timeout: int = 45) -> bool:
         """Re-login when bounced to the IG login wall mid-flow (session drop).
 
@@ -394,6 +469,11 @@ class IgHelpersMixin:
                 return True
         except Exception:
             pass
+        # A logged-in IG surface (feed / bottom nav) means the session is ALIVE
+        # even when the sessionid cookie is absent — do NOT cancel a healthy
+        # account. Checked BEFORE the cookie fallback below.
+        if self._ig_logged_in_ui(p):
+            return True
         if "/accounts/login" not in url and "log in" not in tail:
             return "sessionid" in self._ig_cookie_names()
         self.log('[🔑] Login wall mid-flow — re-logging in with account creds…')
@@ -647,21 +727,33 @@ class IgHelpersMixin:
         return "email address associated with your account" in tail and "at risk" in tail
 
     def _is_ig_dead_end_chooser(self, p) -> bool:
-        """True for the Instagram saved-account chooser that means the Meta join
-        silently failed: 'Use another profile' + 'Create new account' on an
-        instagram.com/accounts/ page, with the bare profile named after the
-        email local part (e.g. lxwf3r for lxwf3r@nqmo.com). DEAD END."""
+        """True for the Instagram SAVED-ACCOUNT CHOOSER — a DEAD END.
+
+        'Continue' + 'Use another profile' + 'Create new account' on an
+        ``instagram.com/accounts/`` page means the browser is **logged OUT** and
+        IG is only offering a saved account (profile names in the screenshot:
+        frankvasquezvr13940, jennifer_clinejwqk68984, …). The session did not
+        hold, so the cycle cannot reach Accounts Center — quit and move on.
+
+        Operator decision 2026-09-28: ANY such chooser is a dead end. The old
+        version additionally required the profile to be named after the EMAIL
+        LOCAL PART (e.g. ``lxwf3r`` for ``lxwf3r@nqmo.com``), so a chooser
+        showing a REAL username slipped through and the cycle thrashed instead
+        of closing out.
+        """
         try:
             tail = (p.inner_text("body") or "").lower()
             url = (p.url or "").lower()
         except Exception:
             return False
+        # The signature is the unique PAIR: "Use another profile" only ever
+        # appears on the chooser (the plain login page has "Create new account"
+        # but NOT "Use another profile"). Requiring both, then any Instagram
+        # page — the old "instagram.com/accounts/" URL filter could miss a
+        # chooser served from another IG route.
         if "use another profile" not in tail or "create new account" not in tail:
             return False
-        if "instagram.com/accounts/" not in url and "/accounts/login" not in url:
-            return False
-        local = (getattr(self, "email", "") or "").split("@")[0].lower()
-        return bool(local) and local in tail
+        return "instagram.com" in url
 
     def _recover_something_went_wrong(self, p, max_attempts: int = 3) -> bool:
         """Detect Instagram 'Something went wrong' / 'Reload page' screens.
@@ -778,6 +870,13 @@ class IgHelpersMixin:
         """
         dismissed = False
 
+        # One body serialization shared by blocks 0 + trusted-first below
+        # (was a full read per block per pass — pure time noise).
+        try:
+            _tail0 = (p.inner_text("body") or "").lower()
+        except Exception:
+            _tail0 = ""
+
         # 0. "We suspect automated behavior on your account" scraping warning.
         # Scoped to THIS wall only (not the full _dismiss_scraping_warning "way
         # out", which also aborts on "something went wrong" and is too blunt
@@ -787,7 +886,7 @@ class IgHelpersMixin:
         # 2026-09-26). One check here covers every IG entry point — invariant 20:
         # no duplicate guards, and this helper already owns cross-screen recovery.
         try:
-            _tail = (p.inner_text("body") or "").lower()
+            _tail = _tail0
             if ("we suspect automated behavior" in _tail
                     or "scraping_warning" in (p.url or "")):
                 self.log('[🚪] Scraping warning during IG flow — tapping Dismiss…')
@@ -867,6 +966,41 @@ class IgHelpersMixin:
         except Exception:
             pass
 
+        # Trusted-first for the two critical controls (2026-09-28): the JS
+        # below fires SYNTHETIC events (isTrusted=false — countable by a
+        # serious detector). A real tap leaves no such mark, so try the
+        # trusted path first on the modal + Back exit; synthetic JS stays as
+        # the fallback. A tap here returns immediately — SWW screens never
+        # co-occur with a save-modal, so no recovery is skipped in practice.
+        if "save your login info" in _tail0 or "save login info" in _tail0:
+            for _sel in ('[role="dialog"] button:has-text("Not now")',
+                         '[role="dialog"] div[role="button"]:has-text("Not now")',
+                         'button:has-text("Not now")'):
+                try:
+                    _b = p.locator(_sel).first
+                    if _b.count() > 0 and _b.is_visible():
+                        if self._tap_or_click(p, _b, timeout=2500):
+                            self.log('[+] _dismiss_ig_sheets: trusted tap on Not now (save-login).')
+                            p.wait_for_timeout(600)
+                            return True
+                except Exception:
+                    continue
+        if ("/accounts/registered" in (p.url or "")
+                and ("get the instagram app" in _tail0 or "open instagram" in _tail0
+                     or "connect to facebook" in _tail0 or "add a profile photo" in _tail0)):
+            for _sel in ('nav a[href="/"]', 'a[aria-label="Back"]', 'a:has-text("Back")'):
+                try:
+                    _b = p.locator(_sel).first
+                    if _b.count() > 0 and _b.is_visible():
+                        if "instagram" in (_b.inner_text() or "").strip().lower():
+                            continue  # header wordmark, not the chevron
+                        if self._tap_or_click(p, _b, timeout=2500):
+                            self.log('[+] _dismiss_ig_sheets: trusted tap on Back (registered cards).')
+                            p.wait_for_timeout(1200)
+                            return True
+                except Exception:
+                    continue
+
         # 1. Comprehensive single-pass JS evaluation (< 10ms execution time)
         try:
             js_res = p.evaluate("""() => {
@@ -897,10 +1031,51 @@ class IgHelpersMixin:
                     }
                 }
 
+                // (A0) MODAL FIRST — "Save your login info to Instagram?" is an
+                // OVERLAY on the join page. This MUST run before every
+                // page-level handler, INCLUDING (A) below: on
+                // /accounts/registered/ ALL cards pre-render at once, so the
+                // getapp text is always in the body and (A) used to win every
+                // pass — tapping a Skip BEHIND the modal while Not-now sat
+                // unclicked (operator report 2026-09-28: "it never clicks Not
+                // now, it keeps clicking Skip"). Modal text present = handle
+                // the modal, full stop.
+                if (bodyText.includes("save your login info") || bodyText.includes("save login info")) {
+                    for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
+                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if (t === 'not now') {
+                            fireClick(el);
+                            cleanBackdrops();
+                            return 'clicked_not_now_save_login';
+                        }
+                    }
+                }
+
                 // (A) "Get the Instagram app" interstitial screen (Screenshot 2)
                 // Prefer the TOP-LEFT BACK control (exits straight to the feed);
                 // never click "Open Instagram". Skip is the fallback.
+                //
+                // Carousel coexistence (verified live 2026-09-28): on
+                // /accounts/registered/ the getapp card text is ALWAYS present
+                // (all cards pre-render) AND a plain Back LINK exists next to
+                // it — one tap exits the whole stack. The old aria-only list
+                // never matched that plain link, so the bot Skipped
+                // card-by-card instead. Plain-link Back wins here, scoped to
+                // the registered path so feed/photo pages are untouched.
                 if (bodyText.includes("get the instagram app") || bodyText.includes("turn on notifications, read comments and discover reels")) {
+                    if (window.location.href.includes('/accounts/registered')) {
+                        for (const el of document.querySelectorAll('nav a[href="/"], a[aria-label="Back"]')) {
+                            const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            const r = el.getBoundingClientRect();
+                            // The header wordmark is also a[href="/"] ("instagram")
+                            // — take only the chevron (empty/icon) or "back".
+                            if ((t === 'back' || t === '') && r.width > 0 && r.height > 0) {
+                                fireClick(el);
+                                cleanBackdrops();
+                                return 'clicked_back_registered_link';
+                            }
+                        }
+                    }
                     for (const el of document.querySelectorAll('[aria-label="Back"], button[aria-label="Back"], a[aria-label="Back"], svg[aria-label="Back"]')) {
                         const r = el.getBoundingClientRect();
                         if (r.width > 0 && r.height > 0) {
@@ -936,26 +1111,8 @@ class IgHelpersMixin:
                     }
                 }
 
-                // (B) "Save your login info to Instagram?" bottom sheet modal (Screenshot 3)
-                if (bodyText.includes("save your login info") || bodyText.includes("save login info")) {
-                    // Prefer "Not now", fallback to "Save"
-                    for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
-                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        if (t === 'not now') {
-                            fireClick(el);
-                            cleanBackdrops();
-                            return 'clicked_not_now_save_login';
-                        }
-                    }
-                    for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
-                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        if (t === 'save') {
-                            fireClick(el);
-                            cleanBackdrops();
-                            return 'clicked_save_login';
-                        }
-                    }
-                }
+                // (B) REMOVED 2026-09-28 — dead duplicate of (A0) above (same
+                // condition, same action; (A0) always returns first).
 
                 // (C) "Add Instagram to your Home screen?" modal dialog (Screenshot 4)
                 // Extremely fast dismissal: click Cancel, remove modal from DOM immediately, unblock backdrops
@@ -966,8 +1123,11 @@ class IgHelpersMixin:
                             fireClick(el);
                             const modal = el.closest('[role="dialog"], div[aria-modal="true"], ._a9-v');
                             if (modal) {
+                                // Non-destructive: hide + unblock, never remove().
+                                // Removing React roots breaks later updates and is
+                                // MutationObserver-visible; hiding is normal UI.
+                                modal.style.pointerEvents = 'none';
                                 modal.style.display = 'none';
-                                try { modal.remove(); } catch(e) {}
                             }
                             cleanBackdrops();
                             return 'clicked_cancel_home_screen';
@@ -983,7 +1143,8 @@ class IgHelpersMixin:
                         const t = (el.innerText || el.textContent || '').trim().toLowerCase();
                         if (t === 'cancel' || t === 'not now' || t === 'skip' || t === 'close' || t === 'dismiss') {
                             fireClick(el);
-                            try { d.remove(); } catch(e) {}
+                            // Non-destructive (see (C)): unblock, never remove().
+                            try { d.style.pointerEvents = 'none'; } catch(e) {}
                             cleanBackdrops();
                             return 'clicked_dialog_' + t;
                         }
@@ -1026,8 +1187,9 @@ class IgHelpersMixin:
                     });
                     if (banner) {
                         const c = banner.closest('div[style*="position: fixed"], div[style*="bottom"]') || banner;
+                        // Non-destructive (see (C)): hide + unblock, never remove().
+                        c.style.pointerEvents = 'none';
                         c.style.display = 'none';
-                        try { c.remove(); } catch(e) {}
                         return 'removed_use_app_banner';
                     }
                 }
@@ -1055,7 +1217,8 @@ class IgHelpersMixin:
                     or (("save your login info" in _tail_now or "save login info" in _tail_now)
                         and js_res in ("clicked_not_now_save_login", "clicked_save_login"))
                     or (("get the instagram app" in _tail_now or "open instagram" in _tail_now)
-                        and js_res in ("clicked_skip_get_app", "clicked_back_get_app"))
+                        and js_res in ("clicked_skip_get_app", "clicked_back_get_app",
+                                        "clicked_back_registered_link"))
                 )
                 if still_up:
                     self.log(f'[⚠️] _dismiss_ig_sheets: "{js_res}" did not clear the '
@@ -1090,8 +1253,15 @@ class IgHelpersMixin:
                 except Exception:
                     pass
 
+        # Escape only when a dialog is actually up (was: unconditional, 8×/run
+        # — pure timing noise on clean passes).
         try:
-            p.keyboard.press("Escape")
+            _dlg = p.locator('[role="dialog"], div[aria-modal="true"]').first
+            if _dlg.count() > 0 and _dlg.is_visible():
+                try:
+                    p.keyboard.press("Escape")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1196,6 +1366,9 @@ class IgHelpersMixin:
         end = time.time() + timeout
         while time.time() < end and self.w.is_running:
             if "sessionid" in self._ig_cookie_names():
+                return True
+            # Logged-in IG surface == alive, even without the cookie.
+            if self._ig_logged_in_ui(p):
                 return True
             tail = self._page_tail(p).lower()
 

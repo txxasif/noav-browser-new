@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import os
 import time
 
 from ai_config import run  # noqa: E402
@@ -50,6 +48,30 @@ def _meta_ip_blocked(body: str, url: str) -> bool:
 
 
 class CaptchaMixin:
+    def _has_human_check(self, page) -> bool:
+        """True if the page is on an Instagram/Meta human checkpoint or challenge screen."""
+        try:
+            u = (page.url or "").lower()
+            if "accounts/suspended" in u or "checkpoint" in u or "challenge" in u:
+                return True
+        except Exception:
+            pass
+        try:
+            body = (page.inner_text("body") or "").lower()
+            if any(m in body for m in (
+                "confirm you're human",
+                "confirm that you're human",
+                "can't read this text",
+                "hear this code",
+                "upload a verification selfie",
+                "enter the code from the image",
+                "suspect automated",
+            )):
+                return True
+        except Exception:
+            pass
+        return False
+
     def ensure_meta_verified(self, timeout: int = 600) -> bool:
         """Human verification, done intentionally like before.
 
@@ -166,10 +188,18 @@ class CaptchaMixin:
             if self._has_human_check(p) or "confirm" in cur_body or "checkpoints" in cur_url:
                 self._try_click(p, "Continue", timeout=8000)
                 self._poll_checkpoint_settled(p, timeout=8)
-                # reCAPTCHA audio + selfie + Continue
-                self._meta_selfie_checkpoint(p, timeout=per)
+                # reCAPTCHA audio + selfie + Continue. The selfie result GATES:
+                # an upload that never cleared must not ride on into Instagram
+                # (Meta answers with the phone wall and burns the account).
+                selfie_ok = self._meta_selfie_checkpoint(p, timeout=per)
                 self._try_click(p, "Continue", timeout=8000)
                 self._poll_checkpoint_settled(p, timeout=8)
+                if selfie_ok is False and self.w.is_running:
+                    raise RuntimeError(
+                        "Meta selfie checkpoint never accepted the upload "
+                        "(file sent, prompt never cleared) — NOT verified, "
+                        "closing and moving to the next account instead of "
+                        "driving an unverified account into Instagram")
                 # Early exit: as soon as the human check is gone we are DONE.
                 # The old code also required "checkpoints" to leave the URL, so
                 # it ran attempts 2-4 (each re-entering the selfie checkpoint)
@@ -256,10 +286,241 @@ class CaptchaMixin:
                     self.log("[⚠️] Audio STT did not finish; falling back to Visual AI…")
             except Exception as exc:  # noqa: BLE001
                 self.log(f"[⚠️] {solver} solver error: {exc}")
+        # Also try image captcha if present
         try:
-            return not self._has_human_check(page)
-        except Exception:
+            if self._solve_image_captcha(page):
+                return True
+        except Exception as exc:
+            self.log(f"[⚠️] Image captcha error in ordered solver: {exc}")
+        return False
+
+    def _solve_image_captcha(self, page, max_attempts: int = 3) -> bool:
+        """OCR Instagram/Meta 'enter the code from the image' captcha with RapidOCR."""
+        try:
+            ocr_engine = self._ensure_ocr()
+        except Exception as exc:
+            self.log(f'[⚠️] OCR engine unavailable: {exc}')
             return False
+
+        for attempt in range(max_attempts):
+            best, best_area = None, 0
+            try:
+                for img in page.locator("img").all():
+                    try:
+                        box = img.bounding_box()
+                        if box and box["width"] > 60 and box["height"] > 30:
+                            area = box["width"] * box["height"]
+                            if area > best_area:
+                                best, best_area = img, area
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            if best is None:
+                try:
+                    if not page.get_by_text("Enter the code from the image", exact=False).is_visible():
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            try:
+                shot = best.screenshot()
+            except Exception as exc:
+                self.log(f'[⚠️] Could not capture captcha screenshot: {exc}')
+                return False
+
+            try:
+                from engine.eng_mix_audio import _OCR_INFER_LOCK, HERE
+                png = os.path.join(HERE, f"captcha_img_{attempt}.png")
+                with open(png, "wb") as f:
+                    f.write(shot)
+                with _OCR_INFER_LOCK:
+                    result, _ = ocr_engine(png)
+            except Exception as exc:
+                self.log(f'[⚠️] RapidOCR inference error: {exc}')
+                return False
+
+            # Direct recognizer with multi-padding bounding box crop
+            # Instagram captchas are 6 characters with blank side margins and thin scratch lines
+            candidates = []
+            try:
+                import cv2
+                img_arr = cv2.imread(png)
+                if img_arr is not None:
+                    gray = cv2.cvtColor(img_arr, cv2.COLOR_BGR2GRAY)
+                    _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+                    pts = cv2.findNonZero(thresh)
+                    if pts is not None and hasattr(ocr_engine, "text_recognizer"):
+                        x, y, w, h = cv2.boundingRect(pts)
+                        for pad in (5, 2, 8, 0, 10):
+                            x0 = max(0, x - pad)
+                            y0 = max(0, y - pad)
+                            w0 = min(img_arr.shape[1] - x0, w + 2 * pad)
+                            h0 = min(img_arr.shape[0] - y0, h + 2 * pad)
+                            crop = img_arr[y0:y0 + h0, x0:x0 + w0]
+                            rec_res, _ = ocr_engine.text_recognizer(crop)
+                            if rec_res and rec_res[0] and rec_res[0][0]:
+                                cand = "".join(c for c in str(rec_res[0][0]) if c.isalnum())
+                                conf = float(rec_res[0][1]) if len(rec_res[0]) > 1 else 0.5
+                                candidates.append((len(cand) == 6, conf, cand))
+            except Exception as ocr_crop_exc:
+                self.log(f'[⚠️] OCR crop note: {ocr_crop_exc}')
+
+            if candidates:
+                candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                best_cand = candidates[0]
+                result = [[None, best_cand[2], best_cand[1]]]
+            elif not result and hasattr(ocr_engine, "text_recognizer"):
+                try:
+                    rec_res, _ = ocr_engine.text_recognizer(img_arr)
+                    if rec_res and rec_res[0] and rec_res[0][0]:
+                        cand = "".join(c for c in str(rec_res[0][0]) if c.isalnum())
+                        score = float(rec_res[0][1]) if len(rec_res[0]) > 1 else 0.5
+                        result = [[None, cand, score]]
+                except Exception:
+                    pass
+
+            code = "".join(t[1] for t in result).replace(" ", "").strip() if result else ""
+
+            # Instagram captcha is 6 characters. If < 6 characters and we have attempts left,
+            # refresh the image rather than submitting a guaranteed-rejected code!
+            if (not code or len(code) < 6) and attempt < (max_attempts - 1):
+                self.log(f'[⚠️] Decoded code "{code}" incomplete (<6 chars, attempt {attempt + 1}/{max_attempts}) — refreshing image…')
+                for rel_sel in (
+                    'a:has-text("can\'t read this text")',
+                    'button:has-text("can\'t read this text")',
+                    '[role="button"]:has-text("can\'t read this text")',
+                    'button[aria-label*="new code" i]',
+                    'button[aria-label*="reload" i]',
+                    'a:has-text("Try another code")',
+                    'button:has-text("Try another code")',
+                ):
+                    try:
+                        r = page.locator(rel_sel).first
+                        if r.count() > 0 and r.is_visible():
+                            r.click()
+                            page.wait_for_timeout(2000)
+                            break
+                    except Exception:
+                        pass
+                continue
+
+            if not code:
+                self.log(f'[⚠️] RapidOCR detected no text in captcha (attempt {attempt + 1}/{max_attempts})')
+                continue
+
+            self.log(f'[🤖] RapidOCR decoded image captcha: "{code}" (attempt {attempt + 1}/{max_attempts})')
+
+            input_box = None
+            try:
+                for inp in page.locator("input:visible").all():
+                    try:
+                        t = (inp.get_attribute("type") or "text").lower()
+                        if t not in ("hidden", "submit", "button", "checkbox", "radio", "image", "file"):
+                            input_box = inp
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            if input_box is None:
+                try:
+                    for tb in page.get_by_role("textbox").all():
+                        if tb.is_visible():
+                            input_box = tb
+                            break
+                except Exception:
+                    pass
+
+            if input_box is None:
+                for sel in (
+                    'input:not([type="hidden"])',
+                    'input[type="text"]',
+                    'input',
+                    'textarea',
+                    '[contenteditable="true"]',
+                ):
+                    try:
+                        el = page.locator(sel).first
+                        if el.count() > 0 and el.is_visible():
+                            input_box = el
+                            break
+                    except Exception:
+                        continue
+
+            if input_box is None:
+                self.log('[⚠️] Image captcha input element not found')
+                return False
+
+            try:
+                input_box.click(timeout=3000)
+            except Exception:
+                pass
+            try:
+                input_box.fill(code, timeout=3000)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "_human_type"):
+                    self._human_type(input_box, code)
+            except Exception:
+                pass
+            try:
+                input_box.evaluate(
+                    "(el, v) => { el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }",
+                    code,
+                )
+            except Exception:
+                pass
+            try:
+                input_box.press("Enter", timeout=3000)
+            except Exception as fill_exc:
+                self.log(f'[⚠️] Note on typing captcha code: {fill_exc}')
+
+            # Tap submission buttons (Next, Continue, Submit, Confirm)
+            tapped = False
+            for btn_name in ("Next", "Continue", "Submit", "Confirm"):
+                for btn_sel in (
+                    f'button:has-text("{btn_name}")',
+                    f'[role="button"]:has-text("{btn_name}")',
+                    f'input[type="submit"][value*="{btn_name}" i]',
+                    'button[type="submit"]',
+                ):
+                    try:
+                        b = page.locator(btn_sel).first
+                        if b.count() > 0 and b.is_visible():
+                            b.click(timeout=3000)
+                            tapped = True
+                            break
+                    except Exception:
+                        pass
+                if tapped:
+                    break
+
+            for _wait in range(8):
+                page.wait_for_timeout(1000)
+                try:
+                    body_now = (page.inner_text("body") or "").lower()
+                except Exception:
+                    body_now = ""
+                # Screen has transitioned if none of the captcha prompts remain
+                captcha_active = any(k in body_now for k in (
+                    "can't read this text",
+                    "hear this code",
+                    "enter the code from the image",
+                    "enter the code",
+                ))
+                if not captcha_active:
+                    self.log(f'[✔] Image captcha submitted and screen transitioned! URL: {page.url}')
+                    return True
+                if any(err in body_now for err in ("incorrect code", "try again", "wrong code", "invalid code")):
+                    self.log(f'[⚠️] Captcha code "{code}" was rejected; retrying with refreshed image…')
+                    break
+
+        return False
 
     def _meta_selfie_checkpoint(self, page, timeout=900):
         """Checkpoint flow with dashboard-ordered solvers (ordered).
@@ -272,10 +533,18 @@ class CaptchaMixin:
         (a single transient failure must not wedge the run — the old code
         uploaded once and then spun on a disabled Continue), and the generic
         file-input photo checkpoint is handled too (engine helpers).
+
+        Returns True when no selfie was required or the upload was ACCEPTED
+        (prompt gone). Returns False when a selfie upload was attempted but
+        the checkpoint never cleared — the caller must NOT drive the account
+        onward (Meta answers with the phone wall). Never raises for Stop:
+        when the worker is stopping the result is untrusted, so True.
         """
         end = time.time() + timeout
         uploaded = False
         accepted = False
+        saw_selfie = False
+        uploaded_ever = False
         last_attempt = 0.0
         first_attempt_done = False
 
@@ -291,6 +560,7 @@ class CaptchaMixin:
             try:
                 if page.get_by_text("Upload a verification selfie",
                                     exact=False).first.is_visible():
+                    saw_selfie = True
                     # Attempt IMMEDIATELY the first time (no 5s throttle), then
                     # retry every 5s so a single transient miss can't wedge.
                     due = (not first_attempt_done) or (time.time() - last_attempt) > 5
@@ -298,6 +568,7 @@ class CaptchaMixin:
                         last_attempt = time.time()
                         first_attempt_done = True
                         uploaded = bool(self._upload_selfie(page))
+                        uploaded_ever = uploaded_ever or uploaded
                     if uploaded:
                         self._try_click(page, "Continue", timeout=8000)
                         self._poll_checkpoint_settled(page, timeout=8)
@@ -329,7 +600,9 @@ class CaptchaMixin:
             # selfie screen (no "Upload a verification selfie" text).
             try:
                 if self._try_image_upload_if_present(page):
+                    saw_selfie = True
                     uploaded = True
+                    uploaded_ever = True
                     self._try_click(page, "Continue", timeout=8000)
                     self._poll_checkpoint_settled(page, timeout=8)
                     continue
@@ -353,6 +626,19 @@ class CaptchaMixin:
                      'as NOT verified.</b></font>')
         else:
             self.log('[⚠️] Selfie checkpoint ended without a confirmed upload.')
+        if not self.w.is_running:
+            return True
+        if not saw_selfie:
+            # No selfie UI ever appeared — nothing to gate on.
+            return True
+        if not accepted and uploaded_ever:
+            # The clear may have landed via a later Continue (captcha leg)
+            # after the last _cleared() check — re-evaluate once now.
+            try:
+                accepted = _cleared()
+            except Exception:
+                accepted = False
+        return accepted
 
     def _wait_meta_provisioned(self, page, timeout: int = 90) -> bool:
         """Poll until Meta has actually finished creating the account.

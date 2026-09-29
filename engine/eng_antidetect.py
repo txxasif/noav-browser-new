@@ -57,15 +57,15 @@ _PC_MOBILE_DEVICES = (
         "model": "SM-S918B",
         "android_version": "13",
         "screen": {"width": 412, "height": 915, "pixelRatio": 3},
-        "gpu_vendor": "Intel Inc.",
-        "gpu_renderer": "Intel Iris OpenGL Engine",
+        "gpu_vendor": "Qualcomm",
+        "gpu_renderer": "Adreno (TM) 740",
     },
     {
         "model": "Pixel 6",
         "android_version": "12",
         "screen": {"width": 411, "height": 914, "pixelRatio": 3},
-        "gpu_vendor": "Intel Inc.",
-        "gpu_renderer": "Intel Iris OpenGL Engine",
+        "gpu_vendor": "ARM",
+        "gpu_renderer": "Mali-G78",
     },
 )
 

@@ -56,15 +56,43 @@ def log(slot_id, m):
     print(f"[cookie:{slot_id}] {m}", flush=True)
 
 
+def _flow_tag(bot_target, task):
+    """The flow tag for a (bot, task) — 'cookie' | 'cookie_2fa' | '2fa' | None."""
+    try:
+        import tg_tasks
+        tid, _ = tg_tasks.resolve(bot_target, task)
+        if tid:
+            return (tg_tasks.TASKS.get(str(bot_target), {}).get(tid) or {}).get("flow")
+    except Exception:
+        pass
+    return None
+
+
 def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
                           captcha_mode="extension", mail_provider="mailtd",
-                          stop_event=None, add_email=False):
-    """Run ONE PayGo Cookies task cycle. Returns ``(ok, detail)``.
+                          stop_event=None, add_email=False,
+                          tg_task=None, tg_bot="paygo"):
+    """Run ONE cookie-family task cycle. Returns ``(ok, detail)``.
 
-    ``add_email`` is accepted for call-site stability but IGNORED: the
-    ``cookie`` flow has no email step (see ``tg_flows.FLOWS``). Import-safe for
+    Parametrized so it serves BOTH cookie flows:
+      * PayGo  ``cookie``      — ig_join → cookie_export → submit_cookie
+      * Taskly ``cookie_2fa``  — ig_join → 2fa → cookie_export → submit_cookie
+    The step list comes from ``tg_flows.resolve_steps(tg_bot, task)`` (data).
+
+    ``add_email`` is accepted for call-site stability but IGNORED: the cookie
+    flows have no email step (see ``tg_flows.FLOWS``). Import-safe for
     ``worker.py`` (lazy ``AISlotWorker`` import — no import cycle).
     """
+    task = tg_task or COOKIE_TASK
+    bot_id = str(tg_bot or "paygo")
+    try:
+        from tg_flows import resolve_steps as _resolve_steps, needs_2fa as _needs_2fa
+        flow_steps = _resolve_steps(bot_id, task)
+        flow_needs_2fa = _needs_2fa(_flow_tag(bot_id, task))
+    except Exception:
+        flow_steps = ["ig_join", "cookie_export", "submit_cookie"]
+        flow_needs_2fa = False
+
     if worker_factory is None:
         from worker import AISlotWorker as _W
         worker_factory = _W
@@ -79,12 +107,12 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
         return False, "stopped"
 
     if add_email:
-        log(slot_id, "[i] 'Extra email after 2FA + password' ignored — the Cookie task "
-                     "has no email/2FA step (tg_flows: cookie = ig_join → cookie_export → submit_cookie).")
+        log(slot_id, "[i] 'Extra email after 2FA + password' ignored — cookie tasks "
+                     f"have no email step (steps: {' → '.join(flow_steps)}).")
 
     worker = worker_factory(slot_id=slot_id, is_headless=is_headless)
     runner = MetaInstaRunner(
-        worker, twofa=False, telegram=False, tg_task=COOKIE_TASK,
+        worker, twofa=flow_needs_2fa, telegram=False, tg_task=task,
         captcha_mode=captcha_mode, mail_provider=mail_provider, target="telegram",
     )
     if os.path.exists(SELFIE_PATH):
@@ -122,15 +150,15 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
         log(slot_id, f"Meta created ({runner.email})")
 
         # -- Shared preamble: Step 2 TG lease + task + creds --------------
-        tg_acct = tg_manager.acquire(timeout=60)
+        tg_acct = tg_manager.acquire(timeout=60, bot=bot_id)
         if not tg_acct:
             raise RuntimeError("No Telegram profile slot available")
         log(slot_id, f"leased {tg_acct['id']} (balance not probed — dashboard Get Balance is the source)")
 
-        clog = lambda m, _id=tg_acct["id"]: print(f"[tg:{_id}:paygo] {m}", flush=True)
+        clog = lambda m, _id=tg_acct["id"]: print(f"[tg:{_id}:{bot_id}] {m}", flush=True)
         if _stopped():
             raise RuntimeError("stopped")
-        bot = _make_tg_bot(tg_acct, "paygo", is_headless, clog)
+        bot = _make_tg_bot(tg_acct, bot_id, is_headless, clog)
         ok_boot, msg_boot = _boot_bot(bot)
         if not ok_boot:
             raise RuntimeError(f"bot boot: {msg_boot}")
@@ -147,12 +175,12 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
 
         threading.Thread(target=_beat, daemon=True).start()
 
-        if not bot.choose_task(COOKIE_TASK):
-            raise RuntimeError(f"Could not select {COOKIE_TASK} in PayGoBot")
+        if not bot.choose_task(task):
+            raise RuntimeError(f"Could not select {task} in {bot_id}")
         creds = bot.start_task() or {}
         login = _clean_username(creds.get("login") or "")
         if not (login and _is_valid_ig_username(login) and creds.get("password")):
-            raise RuntimeError(f"PayGo returned no usable credentials (got {creds})")
+            raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")
         t0 = time.monotonic()  # bot TTL anchor: counts from task Start
         creds["login"] = login
         cname = _sanitize_name(creds.get("first_name") or "")
@@ -163,7 +191,7 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
         if cname:
             runner.name = cname
         runner.tg_id = tg_acct["id"]
-        runner.tg_bot = "paygo"
+        runner.tg_bot = bot_id
 
         # -- Flow steps (data-driven via tg_flows) ------------------------
         # Each step is a callable keyed by the names in tg_flows.FLOWS[flow].
@@ -180,6 +208,23 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
             ig_page = runner._ig_tab()
             if runner._has_human_check(ig_page):
                 raise RuntimeError("Instagram human checkpoint on fresh account — dead end")
+
+        def _step_2fa(ctx):
+            # Taskly's cookie task asks for the 2FA KEY before the cookie:
+            # set up 2FA on IG, submit the key to the bot, read the code back,
+            # confirm it in Accounts Center. (PayGo's cookie flow skips this.)
+            emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
+                        "detail": f"IG 2FA setup + {bot_id} submit…"})
+            require_window("2FA submit")
+            secret = runner.ig_2fa_begin()
+            if not secret:
+                raise RuntimeError("Could not retrieve 2FA secret key from Instagram")
+            code = bot.submit_2fa_key(secret, allow_local_fallback=False)
+            if not code:
+                raise RuntimeError(f"{bot.bot_name} did not return OTP code for 2FA key")
+            log(slot_id, f"Received OTP from {bot.bot_name}; confirming on IG…")
+            if not runner.ig_2fa_confirm(code):
+                raise RuntimeError("Instagram rejected the 2FA code")
 
         def _step_cookie_export(ctx):
             try:
@@ -226,16 +271,17 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
 
         _STEPS = {
             "ig_join": _step_ig_join,
+            "2fa": _step_2fa,
             "cookie_export": _step_cookie_export,
             "submit_cookie": _step_submit_cookie,
         }
         ctx = {}
-        for _step in steps_of(COOKIE_FLOW):
+        for _step in flow_steps:
             require_window(step_label(_step))
             _fn = _STEPS.get(_step)
             if _fn is None:
                 raise RuntimeError(
-                    f"flow '{COOKIE_FLOW}': step '{_step}' has no implementation")
+                    f"flow for {bot_id}/{task!r}: step '{_step}' has no implementation")
             _fn(ctx)
         return True, rec_id
 
@@ -279,15 +325,19 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="One-shot PayGo Cookies task cycle")
+    ap = argparse.ArgumentParser(description="One-shot cookie-family task cycle")
     ap.add_argument("--slot", type=int, default=91)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--captcha", default="extension", choices=("extension", "audio"))
     ap.add_argument("--mail", default="mailtd")
+    ap.add_argument("--task", default=COOKIE_TASK,
+                    help='task label, e.g. "🍪 Create Inst (No mail)"')
+    ap.add_argument("--bot", default="paygo", help="bot id: paygo | taskly")
     args = ap.parse_args()
     ok, _detail = run_cookie_cycle_once(
         slot_id=args.slot, is_headless=args.headless,
-        captcha_mode=args.captcha, mail_provider=args.mail)
+        captcha_mode=args.captcha, mail_provider=args.mail,
+        tg_task=args.task, tg_bot=args.bot)
     return ok
 
 

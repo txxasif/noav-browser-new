@@ -60,6 +60,9 @@ license_data/
 # Build and release artifacts
 dist/
 worker/license/dist/
+test/artifacts/
+test/latest_credentials.json
+engine/captcha_img*.png
 
 # OS and editor files
 .DS_Store

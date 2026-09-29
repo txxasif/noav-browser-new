@@ -49,6 +49,8 @@ class IgAcReauthMixin:
                 try:
                     opt = p.locator(sel).first
                     if opt.count() and opt.is_visible():
+                        if "emails from meta" in (opt.inner_text() or "").lower():
+                            continue
                         self._tap_or_click(p, opt, timeout=3000)
                         break
                 except Exception:
@@ -85,7 +87,7 @@ class IgAcReauthMixin:
                     # newest first, 8-digit — never a stale/foreign code.
                     try:
                         code = fetcher("instagram", timeout=wait_sec,
-                                       subject_hint="authenticate your profile",
+                                       subject_hint="authenticate your profile|authenticate|security code|meta account code",
                                        prefer_len=8)
                     except TypeError:
                         code = fetcher("instagram", timeout=wait_sec)
@@ -159,99 +161,202 @@ class IgAcReauthMixin:
             except Exception:
                 pass
 
-        filled = False
-        for tgt in targets:
-            for sel in (
-                'input[placeholder*="Code" i]',
-                'input[name="code"]',
-                'input[name="verificationCode"]',
-                'input[name="confirmationCode"]',
-                'input[name="security_code"]',
-                'input[inputmode="numeric"]',
-                'input[type="text"]',
-                'input[type="tel"]',
-                'input',
+        # Locate candidate code inputs (strictly targeting the active topmost dialog first)
+        target_inps = []
+        active_dlg = None
+        try:
+            for dlg_sel in (
+                'div[role="dialog"]:has-text("Check your email")',
+                'div[role="dialog"]:has-text("Two Step Verification")',
+                'div[role="dialog"]',
             ):
-                try:
-                    inp = tgt.locator(sel).first
-                    if inp.count() and inp.is_visible():
-                        inp.click(force=True, timeout=3000)
-                        inp.fill(str(code))
-                        p.wait_for_timeout(200)
-                        if inp.input_value() == str(code):
-                            filled = True
-                            self.log(f'[ac] filled security code into {sel}')
-                            break
-                        # Retry with evaluate
-                        tgt.evaluate("""({sel, val}) => {
-                            const el = document.querySelector(sel);
-                            if (el) {
-                                el.value = val;
-                                el.dispatchEvent(new Event('input', {bubbles: true}));
-                                el.dispatchEvent(new Event('change', {bubbles: true}));
-                            }
-                        }""", {"sel": sel, "val": str(code)})
-                        p.wait_for_timeout(200)
-                        filled = True
-                        break
-                except Exception:
-                    continue
-            if filled:
-                break
+                cand_dlg = p.locator(dlg_sel).last
+                if cand_dlg.count() and cand_dlg.is_visible():
+                    active_dlg = cand_dlg
+                    break
+        except Exception:
+            pass
 
-        if not filled:
-            self.log('[⚠️] Could not find code input on "Check your email" dialog.')
-            return False
-
-        if filled:
+        if active_dlg is not None:
             try:
-                p.keyboard.press("Enter")
-                p.wait_for_timeout(1000)
+                for cand in active_dlg.locator('input:not([type="password"]):not([type="submit"]):not([type="checkbox"])').all():
+                    if cand.is_visible():
+                        target_inps.append(cand)
             except Exception:
                 pass
 
-        p.wait_for_timeout(500)
+        if not target_inps:
+            try:
+                for cand in p.get_by_label("Code", exact=True).all():
+                    if cand.is_visible():
+                        target_inps.append(cand)
+            except Exception:
+                pass
 
+        if not target_inps:
+            try:
+                for cand in p.locator('label:has-text("Code") ~ input, div:has(> label:has-text("Code")) input:not([type="password"]), input:has(+ label:has-text("Code"))').all():
+                    if cand.is_visible():
+                        target_inps.append(cand)
+            except Exception:
+                pass
+
+        if not target_inps:
+            for tgt in targets:
+                for sel in (
+                    'input[placeholder*="Code" i]:not([type="password"])',
+                    'input[aria-label*="Code" i]:not([type="password"])',
+                    'input[name="code"]',
+                    'input[name="verificationCode"]',
+                    'input[name="confirmationCode"]',
+                    'input[name="security_code"]',
+                    'input[inputmode="numeric"]:not([type="password"])',
+                    'input[autocomplete="one-time-code"]',
+                ):
+                    try:
+                        for cand in tgt.locator(sel).all():
+                            if cand.is_visible():
+                                target_inps.append(cand)
+                    except Exception:
+                        pass
+                if target_inps:
+                    break
+
+        if not target_inps:
+            self.log('[⚠️] Could not find code input on "Check your email" dialog.')
+            return False
+
+        # Fill the code into candidate input elements (topmost/active dialog first)
+        filled = False
+        primary_inp = target_inps[-1]  # The latest/active input
+        for inp in target_inps:
+            try:
+                inp.click(force=True, timeout=2000)
+                p.wait_for_timeout(100)
+                inp.fill("")
+                p.wait_for_timeout(100)
+                # Use sequential typing so React/Bloks native key listeners trigger state change
+                inp.press_sequentially(str(code), delay=40)
+                p.wait_for_timeout(200)
+                if inp.input_value() != str(code):
+                    inp.evaluate("""(el, val) => {
+                        el.focus();
+                        const proto = HTMLInputElement.prototype;
+                        const d = Object.getOwnPropertyDescriptor(proto, 'value');
+                        if (d && d.set) { d.set.call(el, val); } else { el.value = val; }
+                        const tracker = el._valueTracker;
+                        if (tracker) { tracker.setValue(''); }
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }""", str(code))
+                p.wait_for_timeout(200)
+                filled = True
+                self.log(f'[ac] filled security code into dialog input (val={inp.input_value()})')
+            except Exception as exc:
+                self.log(f'[⚠️] Error filling security code: {exc}')
+
+        # Click submit / continue inside the active dialog
         clicked = False
-        for tgt in targets:
+        btn = None
+        btn_containers = []
+        if active_dlg is not None:
+            btn_containers.append(active_dlg)
+        btn_containers.extend(targets)
+
+        for container in btn_containers:
             for sel in (
+                'div[role="button"]:has-text("Continue")',
                 'button:has-text("Continue")',
                 '[role="button"]:has-text("Continue")',
-                'div[role="button"]:has-text("Continue")',
+                'div[role="button"]:has-text("Confirm")',
                 'button:has-text("Confirm")',
                 '[role="button"]:has-text("Confirm")',
-                'div[role="button"]:has-text("Confirm")',
-                'button:has-text("Next")',
-                '[role="button"]:has-text("Next")',
                 'div[role="button"]:has-text("Next")',
-                'button[type="submit"]',
-                'input[type="submit"]',
+                'button:has-text("Next")',
             ):
                 try:
-                    btn = tgt.locator(sel).first
-                    if btn.count() and btn.is_visible():
-                        if not self._tap_or_click(p, btn, timeout=4000):
-                            btn.click(force=True, timeout=4000)
-                        clicked = True
-                        self.log(f'[ac] clicked "{sel}" on email security dialog')
+                    cand = container.locator(sel).last
+                    if cand.count() and cand.is_visible():
+                        btn = cand
                         break
                 except Exception:
                     continue
-            if clicked:
+            if btn is not None:
                 break
 
-        for _ in range(16):
+        if btn is not None:
+            # Wait for button to become enabled (aria-disabled clears or is not true)
+            for wait_i in range(16):
+                if btn.get_attribute("aria-disabled") != "true" and not btn.is_disabled():
+                    break
+                p.wait_for_timeout(250)
+                if wait_i in (4, 8):
+                    for inp in target_inps:
+                        try:
+                            inp.evaluate("e => { e.dispatchEvent(new Event('input', {bubbles: true})); e.dispatchEvent(new Event('change', {bubbles: true})); e.dispatchEvent(new Event('blur', {bubbles: true})); }")
+                        except Exception:
+                            pass
+
+            try:
+                if self._tap_or_click(p, btn, timeout=3000):
+                    clicked = True
+                    self.log('[ac] clicked Continue button on email security dialog')
+            except Exception:
+                pass
+
+            if not clicked:
+                try:
+                    btn.click(force=True, timeout=3000)
+                    clicked = True
+                    self.log('[ac] force clicked Continue button')
+                except Exception:
+                    pass
+
+            try:
+                btn.evaluate("""el => {
+                    el.removeAttribute('aria-disabled');
+                    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window}));
+                    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window}));
+                    el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                }""")
+                clicked = True
+            except Exception:
+                pass
+
+            try:
+                primary_inp.press("Enter")
+            except Exception:
+                pass
+
+        # Verify dialog actually closed / dismissed (wait up to 25s for Meta backend to verify and dismiss)
+        dialog_closed = False
+        for poll_i in range(50):
             p.wait_for_timeout(500)
+            is_open = False
             try:
                 cur = (p.inner_text("body") or "").lower()
+                if any(k in cur for k in ("enter the code we sent", "check your email", "enter code we sent")):
+                    is_open = True
             except Exception:
-                cur = ""
-            if not any(k in cur for k in ("check your email", "enter the code we sent", "enter code we sent")):
-                clicked = True
+                is_open = False
+            if not is_open:
+                dialog_closed = True
+                p.wait_for_timeout(1000)
                 break
 
-        self.log(f'[ac] email security challenge result: filled={filled}, clicked={clicked}')
-        return filled and clicked
+            # If dialog remains open after 3s and 7s, re-trigger submit
+            if poll_i in (6, 14) and btn is not None:
+                try:
+                    if btn.is_visible():
+                        self.log('[ac] Re-triggering Continue button on email security dialog…')
+                        self._tap_or_click(p, btn, timeout=2000)
+                        btn.evaluate("el => el.click()")
+                        primary_inp.press("Enter")
+                except Exception:
+                    pass
+
+        self.log(f'[ac] email security challenge result: filled={filled}, clicked={clicked}, closed={dialog_closed}')
+        return filled and dialog_closed
 
     def _dismiss_extra_protection_upsell(self, p) -> bool:
         """Close the post-password "Set up extra protection for your Meta
@@ -329,22 +434,14 @@ class IgAcReauthMixin:
             # 1. First check and solve email OTP challenge if present
             if self._ac_solve_email_challenge(p):
                 solved_any = True
-                # Poll for the challenge to clear / the form to appear instead of
-                # a blind 3s freeze after typing the OTP.
+                self.log('[ac] Email security challenge solved and dismissed.')
+                # Poll for the change-password form to appear
                 for _ in range(12):
                     p.wait_for_timeout(250)
-                    try:
-                        low = (p.inner_text("body") or "").lower()
-                    except Exception:
-                        low = ""
-                    if not any(k in low for k in ("check your email", "enter the code we sent",
-                                                  "enter code we sent", "get a new code",
-                                                  "sent a code to", "enter the 6-digit code")):
-                        break
                     if (p.locator('input[type="password"]').count() >= 2
                             or p.get_by_text("Current password", exact=False).count() > 0):
                         break
-                continue
+                break
 
             # 2. Check for password re-auth prompt
             targets = [p] + list(getattr(p, "frames", []))

@@ -99,6 +99,15 @@ class EngineMailMixin:
             return None
 
         old = (getattr(self, "email", "") or "").strip().lower()
+        # Snapshot the CURRENT mailbox's API context (account id + token) BEFORE
+        # clicking "New". fetch_code() reads these LIVE from localStorage, so if
+        # they have not switched to the new mailbox by the time the OTP is polled,
+        # the lookup hits the OLD inbox and the extra email NEVER completes
+        # (observed 2026-09-28 on the FastPay/Taskly extra-email step).
+        try:
+            old_ctx = self._mailtd_api_ctx() or {}
+        except Exception:
+            old_ctx = {}
         create_responses = []
 
         def on_response(response):
@@ -188,6 +197,11 @@ class EngineMailMixin:
                             )
                         except Exception:
                             pass
+                        # Wait until mail.td PERSISTS the new mailbox's
+                        # token/account id. fetch_code() reads them live; a stale
+                        # token points the OTP lookup at the OLD inbox, so the
+                        # extra email is never confirmed ("doesn't complete").
+                        self._wait_mailtd_ctx_switch(old_ctx, timeout=20)
                         return addr
 
             if create_responses:
@@ -230,7 +244,7 @@ class EngineMailMixin:
                 EngineMailMixin._flatten_values(v, out, depth + 1)
         return out
 
-    def _pick_code(self, text, keyword, stale):
+    def _pick_code(self, text, keyword, stale, prefer_len=None):
         """Extract the confirmation code from mail text (shared by API + DOM).
 
         Meta signup mails carry 6 digits; Meta/IG security mails
@@ -245,13 +259,22 @@ class EngineMailMixin:
             clean = _html.unescape(re.sub(r"<[^>]+>", " ", clean))
         except Exception:
             pass
-        if (keyword or "").lower() == "meta":
-            pats = [r"(?:code|verification|verify|confirm|otp)[^\d]{0,60}(\d{6})(?!\d)",
-                    r"\b(\d{6})\b"]
+        if prefer_len == 8:
+            pats = [
+                r"(?:code|verification|verify|confirm|otp|authenticate|identity)[^\d]{0,60}(\d{8})(?!\d)",
+                r"\b(\d{8})\b",
+            ]
+        elif (keyword or "").lower() == "meta" or prefer_len == 6:
+            pats = [
+                r"(?:code|verification|verify|confirm|otp)[^\d]{0,60}(\d{6})(?!\d)",
+                r"\b(\d{6})\b",
+            ]
         else:
-            pats = [r"(?:code|verification|verify|confirm|otp|authenticate|identity)[^\d]{0,60}(\d{8}|\d{6})",
-                    r"\b(\d{8})\b",
-                    r"\b(\d{6})\b"]
+            pats = [
+                r"(?:code|verification|verify|confirm|otp|authenticate|identity)[^\d]{0,60}(\d{8}|\d{6})",
+                r"\b(\d{8})\b",
+                r"\b(\d{6})\b",
+            ]
         for pat in pats:
             for m in re.finditer(pat, clean, re.IGNORECASE):
                 g = m.group(1)
@@ -278,7 +301,43 @@ class EngineMailMixin:
             pass
         return None
 
-    def _mailtd_api_code(self, keyword, timeout, stale):
+    def _wait_mailtd_ctx_switch(self, old_ctx, timeout=20):
+        """Block until mail.td's stored mailbox id/token differ from ``old_ctx``.
+
+        ``new_mailtd_address()`` returns as soon as the on-page ADDRESS changes,
+        but the mail.td SPA persists the new mailbox's credential a moment later.
+        ``fetch_code`` reads the credential LIVE, so returning early made the OTP
+        lookup hit the OLD inbox — the extra email was minted but NEVER confirmed
+        ("doesn't complete"). Best-effort, hard-capped.
+        """
+        old_id = str((old_ctx or {}).get("id") or "")
+        old_tok = str((old_ctx or {}).get("token") or "")
+        end = time.time() + max(1, timeout)
+        while time.time() < end:
+            try:
+                ctx = self._mailtd_api_ctx() or {}
+            except Exception:
+                ctx = {}
+            cid, ctok = str(ctx.get("id") or ""), str(ctx.get("token") or "")
+            if cid and (cid != old_id or (ctok and old_tok and ctok != old_tok)):
+                try:
+                    self.log(f'[📧] mail.td mailbox switched (id={cid[:8]}…) — '
+                             'the extra-email OTP will be read from the NEW inbox.')
+                except Exception:
+                    pass
+                return True
+            try:
+                self.mail.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+        try:
+            self.log('[⚠️] mail.td did not persist the new mailbox in time — the '
+                     'extra-email OTP may be read from the OLD inbox.')
+        except Exception:
+            pass
+        return False
+
+    def _mailtd_api_code(self, keyword, timeout, stale, subject_hint=None, prefer_len=None):
         """Poll mail.td's REST API for the OTP — no Refresh/row clicks/DOM reads.
 
         The LIST endpoint returns only metadata (id/sender/subject/preview) — the
@@ -307,31 +366,49 @@ class EngineMailMixin:
             except Exception:
                 return None
             msgs = res.get("messages") or []
+
+            # Sort newest messages first so we never match an old email's code
+            try:
+                msgs = sorted(
+                    msgs,
+                    key=lambda m: str(m.get("createdAt") or m.get("updatedAt") or m.get("id") or ""),
+                    reverse=True,
+                )
+            except Exception:
+                pass
+
             for msg in msgs:
                 mid = msg.get("id")
+                subject = str(msg.get("subject") or "").lower()
+                sender = str(msg.get("from") or "").lower()
+
+                # If subject_hint is specified, skip messages that don't match
+                if subject_hint:
+                    hints = [h.strip().lower() for h in str(subject_hint).split("|") if h.strip()]
+                    if not any(h in subject or h in sender for h in hints):
+                        continue
+
+                # Body is in the detail endpoint — fetch it for the candidate message
                 text = seen.get(mid)
-                if text is None:
-                    text = " ".join(self._flatten_values(msg))
-                    if not self._pick_code(text, keyword, stale) and mid:
-                        # Body is ONLY in the detail endpoint.
-                        try:
-                            body = self.mail.evaluate("""async ({id, mid, token}) => {
-                                try {
-                                    const r = await fetch('/api/accounts/' + id + '/messages/' + mid,
-                                        {headers: {Authorization: 'Bearer ' + token}});
-                                    if (!r.ok) return '';
-                                    const j = await r.json();
-                                    return [j.html_body || '', j.text_body || '', j.text || '', j.body || ''].join(' ');
-                                } catch (e) { return ''; }
-                            }""", {"id": ctx["id"], "mid": mid, "token": ctx["token"]})
-                            if body:
-                                text = text + " " + body
-                        except Exception:
-                            pass
+                if text is None and mid:
+                    try:
+                        detail = self.mail.evaluate("""async ({id, mid, token}) => {
+                            try {
+                                const r = await fetch('/api/accounts/' + id + '/messages/' + mid,
+                                    {headers: {Authorization: 'Bearer ' + token}});
+                                if (!r.ok) return '';
+                                const j = await r.json();
+                                return [j.subject || '', j.html_body || '', j.text_body || '', j.text || '', j.body || ''].join(' ');
+                            } catch (e) { return ''; }
+                        }""", {"id": ctx["id"], "mid": mid, "token": ctx["token"]})
+                        text = detail or " ".join(self._flatten_values(msg))
+                    except Exception:
+                        text = " ".join(self._flatten_values(msg))
                     seen[mid] = text
-                code = self._pick_code(text, keyword, stale)
+
+                code = self._pick_code(text or "", keyword, stale, prefer_len=prefer_len)
                 if code:
-                    self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (API): {code}</b></font>')
+                    self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (API): {code} (subject: {subject[:40]})</b></font>')
                     return code
             # Heartbeat: never poll silently (a silent wait looks like a hang and
             # gets the run killed). Message count tells "no mail" from "mail but
@@ -346,7 +423,7 @@ class EngineMailMixin:
             self.mail.wait_for_timeout(1500)
         return None
 
-    def fetch_code(self, keyword, timeout=240):
+    def fetch_code(self, keyword, timeout=240, subject_hint=None, prefer_len=None, **kwargs):
         end = time.time() + timeout
         last_refresh = 0.0
         kw_in = (keyword or "").strip().lower()
@@ -382,7 +459,13 @@ class EngineMailMixin:
         # Fast path: mail.td REST API (Bearer token, no DOM clicking). Falls
         # through to the DOM scraper if the API is unavailable/challenged.
         try:
-            api_code = self._mailtd_api_code(kw, timeout=min(timeout, 60), stale=stale)
+            api_code = self._mailtd_api_code(
+                kw,
+                timeout=min(timeout, 60),
+                stale=stale,
+                subject_hint=subject_hint,
+                prefer_len=prefer_len,
+            )
             if api_code:
                 try:
                     used = getattr(self, "_used_email_codes", None) or set()

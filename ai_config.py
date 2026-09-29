@@ -187,9 +187,34 @@ TG_BOTS = {
             "Create Inst (Cookies)": "📱 Create Inst (Cookies)",
         },
     },
+    # FastPay2025_bot — IG 2FA PAYOUT bot (reverse-engineered live 2026-09-28).
+    # It is NOT a task issuer: picking "Instagram 2FA" asks for the account's
+    # 2FA Key, GENERATES the TOTP itself, and pays on Confirm.
+    #   gate (once): join t.me/FastPyOfficial + t.me/FastPayOfficial2026 ->
+    #                Verify -> select English
+    #   menu:        Task -> Instagram -> "Instagram 2FA | ৳3.0 | $0.024"
+    #   task:        send base32 key -> "2FA Code: NNNNNN" -> Confirm ->
+    #                "Task Completed Successfully!" (pending balance)
+    # Pays for EXISTING accounts' `twofa_secret`, so it is driven by the
+    # standalone ops tool tg_fastpay.py — not the create-account engine flow.
+    "fastpay": {
+        "id": "fastpay",
+        "name": "FastPay Bot",
+        "peer_id": "8628150338",
+        "username": "FastPay2025_bot",
+        "url": "https://web.telegram.org/a/#8628150338",
+        "task_keyword": "Instagram",
+        "required_channels": ["FastPyOfficial", "FastPayOfficial2026"],
+        "language": "en",
+        "tasks": ["Instagram 2FA"],
+        "task_aliases": {
+            "Instagram 2FA": "Instagram 2FA",
+            "IG 2FA": "Instagram 2FA",
+        },
+    },
 }
 TG_DEFAULT_BOT = "taskly"
-TG_BOT_CHOICES = ("taskly", "paygo")
+TG_BOT_CHOICES = ("taskly", "paygo", "fastpay")
 
 
 def emit_event(evt: dict) -> None:

@@ -49,7 +49,8 @@ class IgJoinMixin:
     # signal, not a navigation one; abort immediately as before.
     def _phone_wall_present(self, p) -> bool:
         try:
-            if "what's your mobile number" in self._page_tail(p, 400).lower():
+            txt = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+            if "what's your mobile number" in txt:
                 return True
             return p.get_by_text("What's your mobile number", exact=False).count() > 0
         except Exception:
@@ -70,15 +71,15 @@ class IgJoinMixin:
             # instead of swiping/re-tapping Log in for the full 90s.
             try:
                 if self._is_ig_dead_end_chooser(p):
-                    raise IGDeadEnd("IG saved-account chooser with the bare email profile — Meta join failed")
+                    raise IGDeadEnd("IG saved-account chooser (logged out — session dropped) — dead end")
             except IGDeadEnd:
                 raise
             except Exception:
                 pass
 
             # Fast-fail checks: account rejected or phone wall -> quit immediately without waiting
-            _tail = self._page_tail(p, 400).lower()
-            if "can't find account" in _tail or p.get_by_text("Can't find account", exact=False).count() > 0:
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+            if "can't find account" in _text or p.get_by_text("Can't find account", exact=False).count() > 0:
                 # Dynamic route: if the dialog offers Sign up / Create new account, click it to open the Meta link card!
                 clicked_signup = False
                 for loc in (
@@ -334,224 +335,62 @@ class IgJoinMixin:
         p.wait_for_timeout(5000)
 
     def ig_complete_join(self):
-        """Complete the Meta-to-Instagram join wizard (Full Name, Username, Consent)."""
+        """Complete the Meta-to-Instagram join wizard (Full Name, Username, Consent, Terms)."""
         p = self._ig_tab()
 
         # Fast-fail check: phone wall or account rejection -> quit immediately
-        _tail = self._page_tail(p, 400).lower()
+        _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
         if self._phone_wall_present(p):
             self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting immediately.')
             raise RuntimeError("Instagram: Mobile number required (What's your mobile number)")
-        if "can't find account" in _tail or p.get_by_text("Can't find account", exact=False).count() > 0:
+        if "can't find account" in _text or p.get_by_text("Can't find account", exact=False).count() > 0:
             self.log('[❌] Instagram: "Can\'t find account" detected. Quitting immediately.')
             raise RuntimeError("Instagram: Can't find account")
 
         # 1. "What's your name?" (prefer TG bot first_name)
         desired_name = (self.tg_creds.get("first_name") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "name", None)
         name_input = None
-        for _ in range(5):
-            for sel in ('input[name="fullName"]', 'input[name="name"]', 'input[aria-label*="name" i]', 'input[placeholder*="name" i]'):
-                try:
-                    el = p.locator(sel).first
-                    if el.count() > 0 and el.is_visible():
-                        name_input = el
-                        break
-                except Exception:
-                    pass
-            if name_input or self._visible(p, "textbox", "Full name") is not None or self._visible(p, "textbox", "Name") is not None:
+        for _ in range(6):
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+            if "what's your name" in _text or "full name" in _text:
+                for sel in ('input[name="fullName"]', 'input[name="name"]', 'input[aria-label*="name" i]', 'input[placeholder*="name" i]'):
+                    try:
+                        el = p.locator(sel).first
+                        if el.count() > 0 and el.is_visible():
+                            name_input = el
+                            break
+                    except Exception:
+                        pass
+                if not name_input:
+                    try:
+                        tb = p.get_by_role("textbox", name="Full name").first
+                        if tb.count() > 0 and tb.is_visible():
+                            name_input = tb
+                    except Exception:
+                        pass
+                if name_input:
+                    break
+            elif "create a username" in _text or "username" in _text or "allow the following" in _text or "terms and policies" in _text:
                 break
-            tail = self._page_tail(p, 300).lower()
-            if "username" in tail or "agree" in tail or "allow" in tail:
-                break
-            p.wait_for_timeout(1500)
+            p.wait_for_timeout(1000)
 
-        if name_input or self._visible(p, "textbox", "Full name") is not None or self._visible(p, "textbox", "Name") is not None:
-            # IG rejects names > 29 UTF-16 units; the Taskly first_name can be
-            # long/styled. Never stall on the NAME — substitute a random valid
-            # one (operator 2026-09-21).
+        if name_input or p.get_by_role("textbox", name="Full name").count() > 0:
             nm = desired_name
             if not nm or _ig_name_too_long(nm):
                 nm = _random_ig_name()
                 self.log(f'[📝] Name {desired_name!r} missing/too long — using random "{nm}".')
             if nm:
                 self.log(f'[📝] Setting Full name during onboarding: "{nm}"')
-                if name_input:
-                    self._clean_fill(p, name_input, nm, timeout=6000)
-                    self._dispatch_react_events(p, name_input)
-                else:
-                    if not self._try_fill(p, "Full name", nm, timeout=4000):
-                        self._try_fill(p, "Name", nm, timeout=4000)
+                target_inp = name_input or p.get_by_role("textbox", name="Full name").first
+                try:
+                    self._human_type(target_inp, nm)
+                    self._dispatch_react_events(p, target_inp)
+                except Exception:
+                    self._clean_fill(p, target_inp, nm, timeout=6000)
                 self.name = nm
-            # If the field still shows a length error, refill with a random name.
-            try:
-                _ntail = self._page_tail(p, 300).lower()
-            except Exception:
-                _ntail = ""
-            if "under 30 characters" in _ntail or "enter a name" in _ntail:
-                nm = _random_ig_name()
-                self.log(f'[📝] Name rejected by IG — retrying with random "{nm}".')
-                if name_input:
-                    self._clean_fill(p, name_input, nm, timeout=6000)
-                    self._dispatch_react_events(p, name_input)
-                else:
-                    self._try_fill(p, "Full name", nm, timeout=4000)
-                self.name = nm
-            # Ensure we advance beyond the Name screen
-            for _ in range(4):
-                for sel in ('button:has-text("Next")', 'div[role="button"]:has-text("Next")', '[aria-label="Next"]'):
-                    try:
-                        btn = p.locator(sel).first
-                        if btn.count() > 0 and btn.is_visible() and not btn.is_disabled():
-                            btn.scroll_into_view_if_needed(timeout=2000)
-                            self._tap_or_click(p, btn)
-                            break
-                    except Exception:
-                        pass
-                p.wait_for_timeout(2000)
-                tail = self._page_tail(p, 300).lower()
-                if "what's your name" not in tail:
-                    break
-                try:
-                    (name_input or p.get_by_role("textbox", name="Full name").first).press("Enter")
-                except Exception:
-                    pass
 
-        # 2. "Create a username for Instagram" (prefer TG bot login)
-        desired_user = (self.tg_creds.get("login") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_username", None)
-        user_input = None
-        for _ in range(5):
-            for sel in ('input[name="username"]', 'input[aria-label*="Username" i]', 'input[placeholder*="Username" i]'):
-                try:
-                    el = p.locator(sel).first
-                    if el.count() > 0 and el.is_visible():
-                        user_input = el
-                        break
-                except Exception:
-                    pass
-            if user_input or self._visible(p, "textbox", "Username") is not None:
-                break
-            tail = self._page_tail(p, 300).lower()
-            if "agree" in tail or "allow" in tail or "password" in tail:
-                break
-            p.wait_for_timeout(1500)
-
-        if user_input or self._visible(p, "textbox", "Username") is not None:
-            if desired_user:
-                self.log(f'[📝] Setting Username during onboarding: "{desired_user}"')
-                if user_input:
-                    self._clean_fill(p, user_input, desired_user, timeout=8000)
-                    self._dispatch_react_events(p, user_input)
-                else:
-                    self._try_fill(p, "Username", desired_user, timeout=8000)
-                self.ig_username = desired_user
-            else:
-                try:
-                    self.ig_username = (
-                        user_input.input_value() if user_input else p.get_by_role("textbox", name="Username").first.input_value()
-                    )
-                except Exception:
-                    self.ig_username = self.username
-
-            # Wait for Instagram's debounced availability/format check, then handle
-            # rejections WITHOUT killing the run:
-            #   taken   -> "is not available" / "isn't available"
-            #   invalid -> "Usernames can only include numbers, letters…" ("only include")
-            # A TG-task hook (runner._on_username_taken) may cancel the bot task
-            # and supply a fresh login; the field is refilled in place and the
-            # check re-runs. Without a hook (or when it gives up) we fall back
-            # to clicking an IG suggestion as before.
-            for _urej in range(4):
-                p.wait_for_timeout(2500)
-                tail = self._page_tail(p, 400).lower()
-                taken = "not available" in tail or "isn't available" in tail or "already taken" in tail
-                invalid = any(x in tail for x in (
-                    "only include", "only use", "can only", "can't contain",
-                    "can't use", "invalid character", "must be between", "valid username"
-                ))
-                if not taken and not invalid:
-                    break
-                reason = "invalid" if invalid else "taken"
-                self.log(f'[⚠️] Username "{self.ig_username}" rejected by Instagram ({reason}).')
-                hook = getattr(self, "_on_username_taken", None)
-                new_login = None
-                if callable(hook):
-                    try:
-                        new_login = hook(reason, self.ig_username)
-                    except Exception as exc:
-                        self.log(f'[⚠️] username hook error: {exc}')
-                if new_login:
-                    self.log(f'[🔁] Retrying username screen with fresh TG login: "{new_login}"')
-                    desired_user = new_login
-                    self.ig_username = new_login
-                    if user_input:
-                        self._clean_fill(p, user_input, new_login, timeout=8000)
-                        self._dispatch_react_events(p, user_input)
-                    else:
-                        self._try_fill(p, "Username", new_login, timeout=8000)
-                    continue
-                self.log(f'[⚠️] No fresh login available; selecting suggestion…')
-                break
-
-            # Check if "not available" or invalid format appeared
-            tail = self._page_tail(p, 400).lower()
-            if "not available" in tail or "isn't available" in tail or "already taken" in tail or any(x in tail for x in (
-                "only include", "only use", "can only", "can't contain",
-                "can't use", "invalid character", "must be between", "valid username"
-            )):
-                self.log(f'[⚠️] Username "{self.ig_username}" is not available/valid on Instagram. Selecting suggestion…')
-                picked = p.evaluate("""(badUser) => {
-                    const allEls = Array.from(document.querySelectorAll('*'));
-                    const candidates = allEls.filter(el => {
-                        if (!el.innerText) return false;
-                        const t = el.innerText.trim();
-                        if (t.includes('\\n') || t.includes(' ') || t.toLowerCase() === badUser.toLowerCase()) return false;
-                        if (t.toLowerCase().includes('available') || t.toLowerCase().includes('username') || t.toLowerCase().includes('next') || t.toLowerCase().includes('create')) return false;
-                        return /^[a-zA-Z0-9._]{3,30}$/.test(t);
-                    });
-                    for (const c of candidates) {
-                        const r = c.getBoundingClientRect();
-                        if (r.width > 20 && r.height > 15) {
-                            c.click();
-                            return c.innerText.trim();
-                        }
-                    }
-                    return null;
-                }""", str(self.ig_username or desired_user or ""))
-                if picked:
-                    self.log(f'[💡] Clicked Instagram username suggestion: "{picked}"')
-                    self.ig_username = picked
-                else:
-                    # Fallback: parse suggested username tokens directly from body text
-                    body_txt = p.inner_text("body") or ""
-                    prefix = (desired_user or "")[:4]
-                    all_tokens = re.findall(rf"\b{prefix}[a-zA-Z0-9._]+\b", body_txt)
-                    valid_suggs = [t for t in all_tokens if t.lower() != (desired_user or "").lower() and "available" not in t.lower()]
-                    if valid_suggs:
-                        chosen = valid_suggs[0]
-                        self.log(f'[💡] Selected Instagram username from suggestions list: "{chosen}"')
-                        if user_input:
-                            self._clean_fill(p, user_input, chosen, timeout=6000)
-                            self._dispatch_react_events(p, user_input)
-                        self.ig_username = chosen
-                    else:
-                        # Append digits if no suggestions found
-                        rnd_user = f"{(desired_user or 'user')[:18]}{random.randint(10, 99)}"
-                        self.log(f'[💡] Appending digits to username: "{rnd_user}"')
-                        if user_input:
-                            self._clean_fill(p, user_input, rnd_user, timeout=6000)
-                            self._dispatch_react_events(p, user_input)
-                        self.ig_username = rnd_user
-                p.wait_for_timeout(2000)
-
-            # Loop to click Next and advance beyond the Username screen
+            # Advance beyond Name screen
             for _ in range(5):
-                tail = self._page_tail(p, 300).lower()
-                if "create a username" not in tail and "add a username" not in tail:
-                    break
-                try:
-                    p.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-                except Exception:
-                    pass
                 clicked_next = False
                 for sel in ('button:has-text("Next")', 'div[role="button"]:has-text("Next")', '[aria-label="Next"]'):
                     try:
@@ -563,12 +402,142 @@ class IgJoinMixin:
                             break
                     except Exception:
                         pass
-                if not clicked_next and user_input:
+                p.wait_for_timeout(2000)
+                _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+                if "what's your name" not in _text:
+                    break
+                if not clicked_next and name_input:
                     try:
-                        user_input.press("Enter")
+                        name_input.press("Enter")
                     except Exception:
                         pass
-                p.wait_for_timeout(2500)
+
+        # 2. "Create a username" (prefer TG bot login / desired username)
+        desired_user = (self.tg_creds.get("login") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_username", None)
+        user_input = None
+        for _ in range(6):
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+            if "create a username" in _text or "add a username" in _text:
+                for sel in ('input[name="username"]', 'input[aria-label*="Username" i]', 'input[placeholder*="Username" i]'):
+                    try:
+                        el = p.locator(sel).first
+                        if el.count() > 0 and el.is_visible():
+                            user_input = el
+                            break
+                    except Exception:
+                        pass
+                if not user_input:
+                    try:
+                        tb = p.get_by_role("textbox", name="Username").first
+                        if tb.count() > 0 and tb.is_visible():
+                            user_input = tb
+                    except Exception:
+                        pass
+                if user_input:
+                    break
+            elif "allow the following" in _text or "agree to instagram" in _text or "terms and policies" in _text:
+                break
+            p.wait_for_timeout(1000)
+
+        if user_input or p.get_by_role("textbox", name="Username").count() > 0:
+            target_user_inp = user_input or p.get_by_role("textbox", name="Username").first
+
+            def _check_username_rejected() -> tuple[bool, str]:
+                _t = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 800)).lower()
+                taken_markers = (
+                    "is not available", "isn't available", "already taken", "not available",
+                    "already exists", "using the same username", "try another", "choose another",
+                    "already in use", "user with that username", "another account is using",
+                    "not able to use this username", "username unavailable"
+                )
+                invalid_markers = (
+                    "only include", "only use", "can only", "can't contain",
+                    "can't use", "invalid character", "must be between", "valid username"
+                )
+                if any(x in _t for x in taken_markers):
+                    return True, "taken"
+                if any(x in _t for x in invalid_markers):
+                    return True, "invalid"
+                try:
+                    if target_user_inp.count() and target_user_inp.get_attribute("aria-invalid") == "true":
+                        return True, "aria_invalid"
+                except Exception:
+                    pass
+                return False, ""
+
+            # Attempt setting username (up to 8 attempts via fresh TG tasks, keeping Meta session intact)
+            for uname_attempt in range(8):
+                cand_user = (self.tg_creds.get("login") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_username", None) or self.username or "user"
+                self.log(f'[📝] Setting Username during onboarding (attempt {uname_attempt + 1}/8): "{cand_user}"')
+
+                # Fill input cleanly
+                try:
+                    target_user_inp.click(force=True, timeout=3000)
+                    target_user_inp.fill("")
+                    p.wait_for_timeout(200)
+                    self._human_type(target_user_inp, cand_user)
+                    self._dispatch_react_events(p, target_user_inp)
+                except Exception:
+                    self._clean_fill(p, target_user_inp, cand_user, timeout=8000)
+                self.ig_username = cand_user
+
+                # Wait for Instagram availability check to resolve
+                p.wait_for_timeout(3000)
+
+                rejected, reason = _check_username_rejected()
+
+                if not rejected:
+                    # Attempt to advance via Next button
+                    clicked_next = False
+                    for sel in ('button:has-text("Next")', 'div[role="button"]:has-text("Next")', '[aria-label="Next"]'):
+                        try:
+                            btn = p.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible() and not btn.is_disabled():
+                                btn.scroll_into_view_if_needed(timeout=2000)
+                                self._tap_or_click(p, btn)
+                                clicked_next = True
+                                break
+                        except Exception:
+                            pass
+                    if not clicked_next:
+                        try:
+                            target_user_inp.press("Enter")
+                        except Exception:
+                            pass
+
+                    # Verify if screen advanced
+                    for _ in range(8):
+                        p.wait_for_timeout(500)
+                        _cur_t = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+                        if "create a username" not in _cur_t and "add a username" not in _cur_t:
+                            break
+                        rejected, reason = _check_username_rejected()
+                        if rejected:
+                            break
+
+                _cur_t = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+                if "create a username" not in _cur_t and "add a username" not in _cur_t:
+                    self.log(f'[✔] Username "{self.ig_username}" accepted by Instagram.')
+                    break
+
+                # Username rejected / could not advance: cancel TG task and get fresh one (ignoring first name)
+                reason = reason or "taken"
+                self.log(f'[⚠️] Username "{self.ig_username}" rejected by Instagram ({reason}) — canceling TG task to get replacement username (first name ignored)…')
+                hook = getattr(self, "_on_username_taken", None)
+                new_login = None
+                if callable(hook):
+                    try:
+                        new_login = hook(reason, self.ig_username)
+                    except Exception as exc:
+                        self.log(f'[⚠️] Error requesting replacement TG task: {exc}')
+
+                if new_login:
+                    self.log(f'[🔁] Replacement TG task received with login="{new_login}". Retrying username field…')
+                    p.wait_for_timeout(1500)
+                    continue
+                else:
+                    self.log('[⚠️] TG bot replacement task not returned — waiting before retry…')
+                    p.wait_for_timeout(2000)
 
         # 2b. "Create a password" if prompted during onboarding
         desired_pw = (self.tg_creds.get("password") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_password", None) or getattr(self, "password", None)
@@ -577,7 +546,11 @@ class IgJoinMixin:
                 pw_el = p.locator(sel).first
                 if pw_el.count() > 0 and pw_el.is_visible():
                     self.log(f'[🔑] Setting password during onboarding: {"*" * len(desired_pw or "")}')
-                    self._clean_fill(p, pw_el, desired_pw, timeout=6000)
+                    try:
+                        self._human_type(pw_el, desired_pw)
+                        self._dispatch_react_events(p, pw_el)
+                    except Exception:
+                        self._clean_fill(p, pw_el, desired_pw, timeout=6000)
                     for sel_btn in ('button:has-text("Next")', 'div[role="button"]:has-text("Next")', '[aria-label="Next"]'):
                         try:
                             b = p.locator(sel_btn).first
@@ -587,19 +560,40 @@ class IgJoinMixin:
                                 break
                         except Exception:
                             pass
-                    p.wait_for_timeout(4000)
+                    p.wait_for_timeout(3000)
                     self.password = desired_pw
                     break
             except Exception:
                 pass
 
-        # 3. Consent & Terms: "Agree to Instagram's terms and policies" / "Allow and continue"
-        for _ in range(6):
-            clicked_step = False
-            tail = self._page_tail(p, 400).lower()
+        # 3. Meta Account Linking: "To create an Instagram account with your Meta account, allow the following"
+        for _ in range(8):
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+            if "allow the following" in _text or "allow and continue" in _text or p.locator('button:has-text("Allow and continue"), div[role="button"]:has-text("Allow and continue")').count() > 0:
+                for sel in (
+                    'div[role="button"]:has-text("Allow and continue")',
+                    'button:has-text("Allow and continue")',
+                    '[aria-label="Allow and continue"]',
+                ):
+                    try:
+                        btn = p.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible():
+                            btn.scroll_into_view_if_needed(timeout=2000)
+                            self._tap_or_click(p, btn)
+                            self.log('[✔] Instagram: "Allow and continue" clicked.')
+                            p.wait_for_timeout(3500)
+                            break
+                    except Exception:
+                        pass
+                break
+            elif "agree to instagram" in _text or "terms and policies" in _text or "i agree" in _text:
+                break
+            p.wait_for_timeout(1000)
 
-            # (a) "Agree to Instagram's terms and policies" -> "I agree"
-            if "agree to instagram" in tail or "terms and policies" in tail or "i agree" in tail:
+        # 4. Terms & Policies: "Agree to Instagram's terms and policies" -> "I agree"
+        for _ in range(8):
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
+            if "agree to instagram" in _text or "terms and policies" in _text or "i agree" in _text or p.locator('button:has-text("I agree"), div[role="button"]:has-text("I agree")').count() > 0:
                 for sel in (
                     'div[role="button"]:has-text("I agree")',
                     'button:has-text("I agree")',
@@ -607,190 +601,130 @@ class IgJoinMixin:
                     'div[role="button"]:has-text("Agree")',
                     'button:has-text("Agree")',
                 ):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        self.log('[✔] Instagram: "I agree" (terms and policies) clicked.')
-                        clicked_step = True
-                        p.wait_for_timeout(4000)
-                        break
+                    try:
+                        btn = p.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible():
+                            btn.scroll_into_view_if_needed(timeout=2000)
+                            self._tap_or_click(p, btn)
+                            self.log('[✔] Instagram: "I agree" clicked. Waiting for backend provisioning…')
+                            # Instagram shows a loading spinner on "I agree" for ~8-15s
+                            p.wait_for_timeout(6000)
+                            break
+                    except Exception:
+                        pass
+                break
+            elif "/accounts/registered" in (p.url or "") or "sessionid" in self._ig_cookie_names():
+                break
+            p.wait_for_timeout(1000)
 
-            # (b) "To create an Instagram account with your Meta account, allow the following" -> "Allow and continue"
-            if "allow the following" in tail or "allow and continue" in tail:
-                for sel in (
-                    'div[role="button"]:has-text("Allow and continue")',
-                    'button:has-text("Allow and continue")',
-                    '[aria-label="Allow and continue"]',
-                ):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        self.log('[✔] Instagram: "Allow and continue" clicked.')
-                        clicked_step = True
-                        p.wait_for_timeout(4000)
-                        break
-
-            if not clicked_step:
-                # (c) OPTIONAL "Add phone number" prompt (has a Skip link) — click
-                # Skip at once instead of letting the 6x cadence elapse. Not the
-                # mandatory wall ("What's your mobile number?"), which dead-ends.
-                if "add phone number" in tail or "adding your number will help" in tail:
-                    for sel in ('a:has-text("Skip")', 'button:has-text("Skip")',
-                                'div[role="button"]:has-text("Skip")', 'span:has-text("Skip")',
-                                '[aria-label="Skip"]'):
-                        try:
-                            btn = p.locator(sel).first
-                            if btn.count() > 0 and btn.is_visible():
-                                self._tap_or_click(p, btn)
-                                self.log('[✔] Instagram: clicked "Skip" on "Add phone number".')
-                                clicked_step = True
-                                p.wait_for_timeout(1200)
-                                break
-                        except Exception:
-                            pass
-            if not clicked_step:
-                # (d) "Save your login info to Instagram?" -> "Not now". This
-                # modal appears on the login/join screen BEFORE sessionid exists,
-                # so it hit step 3 (which had no handler) and only the step-4
-                # loop or ig_dismiss_onboarding cleared it — the delay the
-                # operator saw. Click Not now immediately.
-                if "save your login info" in tail or "save login info" in tail:
-                    for sel in ('button:has-text("Not now")',
-                                'div[role="button"]:has-text("Not now")',
-                                '[aria-label="Not now"]',
-                                'button:has-text("Save")',
-                                'div[role="button"]:has-text("Save")'):
-                        try:
-                            btn = p.locator(sel).first
-                            if btn.count() > 0 and btn.is_visible():
-                                self._tap_or_click(p, btn)
-                                self.log('[✔] Instagram: dismissed "Save your login info" (Not now).')
-                                clicked_step = True
-                                p.wait_for_timeout(1200)
-                                break
-                        except Exception:
-                            pass
-            if not clicked_step:
-                # (e) "Get the Instagram app" interstitial -> prefer the TOP-LEFT
-                # BACK button; it exits the interstitial straight into the feed
-                # (follow list), whereas Skip can land on the next promo. Skip
-                # stays as the fallback (some variants offer no Back).
-                if "get the instagram app" in tail or "open instagram" in tail:
-                    for sel in ('[aria-label="Back"]', 'button[aria-label="Back"]',
-                                'a[aria-label="Back"]', 'svg[aria-label="Back"]'):
-                        try:
-                            btn = p.locator(sel).first
-                            if btn.count() > 0 and btn.is_visible():
-                                self._tap_or_click(p, btn)
-                                self.log('[⬅️] Instagram: clicked Back on "Get the Instagram app".')
-                                clicked_step = True
-                                p.wait_for_timeout(1800)
-                                break
-                        except Exception:
-                            pass
-                    if not clicked_step:
-                        for sel in ('a:has-text("Skip")', 'button:has-text("Skip")',
-                                    'div[role="button"]:has-text("Skip")', '[aria-label="Skip"]'):
-                            try:
-                                btn = p.locator(sel).first
-                                if btn.count() > 0 and btn.is_visible():
-                                    self._tap_or_click(p, btn)
-                                    self.log('[✔] Instagram: clicked "Skip" on "Get the Instagram app".')
-                                    clicked_step = True
-                                    p.wait_for_timeout(1800)
-                                    break
-                            except Exception:
-                                pass
-            if not clicked_step:
-                p.wait_for_timeout(1500)
-
-        # 4. Wait for full session (sessionid)
+        # 5. Handle Post-Terms Transition (wait for provisioning to complete, dismiss Save modal, leave registered cards)
         ok = False
         deadline = time.time() + 60
         while time.time() < deadline and self.w.is_running:
             if "sessionid" in self._ig_cookie_names():
                 ok = True
                 break
-            tail = self._page_tail(p, 400).lower()
+
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
             if self._phone_wall_present(p):
                 self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting immediately.')
                 raise RuntimeError("Instagram: Mobile number required (What's your mobile number)")
-            if "can't find account" in tail or p.get_by_text("Can't find account", exact=False).count() > 0:
+            if "can't find account" in _text or p.get_by_text("Can't find account", exact=False).count() > 0:
                 self.log('[❌] Instagram: "Can\'t find account" dialog detected. Quitting immediately.')
                 raise RuntimeError("Instagram: Can't find account")
-            if "agree to instagram" in tail or "terms and policies" in tail or "i agree" in tail:
-                for sel in (
-                    'div[role="button"]:has-text("I agree")',
-                    'button:has-text("I agree")',
-                    '[aria-label="I agree"]',
-                    'div[role="button"]:has-text("Agree")',
-                    'button:has-text("Agree")',
+
+            # Check if still showing "I agree" or "Allow and continue"
+            if "allow the following" in _text or "allow and continue" in _text:
+                for sel in ('button:has-text("Allow and continue")', 'div[role="button"]:has-text("Allow and continue")'):
+                    try:
+                        b = p.locator(sel).first
+                        if b.count() > 0 and b.is_visible():
+                            self._tap_or_click(p, b)
+                            p.wait_for_timeout(3000)
+                            break
+                    except Exception:
+                        pass
+            if "agree to instagram" in _text or "terms and policies" in _text or "i agree" in _text:
+                for sel in ('button:has-text("I agree")', 'div[role="button"]:has-text("I agree")'):
+                    try:
+                        b = p.locator(sel).first
+                        if b.count() > 0 and b.is_visible():
+                            self._tap_or_click(p, b)
+                            p.wait_for_timeout(3000)
+                            break
+                    except Exception:
+                        pass
+
+            # Modal: "Save your login info" / "Save your password"
+            if "save your login info" in _text or "save login info" in _text or "save your password" in _text:
+                for sel in ('button:has-text("Not now")', 'div[role="button"]:has-text("Not now")', '[aria-label="Not now"]'):
+                    try:
+                        sn_btn = p.locator(sel).first
+                        if sn_btn.count() > 0 and sn_btn.is_visible():
+                            self._tap_or_click(p, sn_btn)
+                            self.log('[✔] Instagram: dismissed "Save your login info" (clicked "Not now").')
+                            p.wait_for_timeout(2000)
+                            break
+                    except Exception:
+                        pass
+
+            # /accounts/registered/ cards: click top-left Back button
+            if "/accounts/registered" in (p.url or ""):
+                clicked_back = False
+                for back_sel in (
+                    '[aria-label="Back"]',
+                    'nav a[href="/"]',
+                    'a[aria-label="Back"]',
+                    'button[aria-label="Back"]',
+                    'a:has-text("Back")',
+                    'svg[aria-label="Back"]',
                 ):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        self.log('[✔] Instagram: "I agree" clicked.')
-                        p.wait_for_timeout(3000)
-                        break
-            if "allow the following" in tail or "allow and continue" in tail:
-                for sel in (
-                    'div[role="button"]:has-text("Allow and continue")',
-                    'button:has-text("Allow and continue")',
-                ):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        p.wait_for_timeout(3000)
-                        break
-            # Interstitial "Get the Instagram app" -> prefer TOP-LEFT BACK (it
-            # exits straight into the feed / follow list); Skip is the fallback.
-            if "get the instagram app" in tail or "open instagram" in tail:
-                _back_clicked = False
-                for sel in ('[aria-label="Back"]', 'button[aria-label="Back"]',
-                            'a[aria-label="Back"]', 'svg[aria-label="Back"]'):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        self.log('[⬅️] Instagram: clicked Back on "Get the Instagram app".')
-                        p.wait_for_timeout(1800)
-                        _back_clicked = True
-                        break
-                if not _back_clicked:
-                    for sel in ('a:has-text("Skip")', 'button:has-text("Skip")', 'div[role="button"]:has-text("Skip")', '[aria-label="Skip"]'):
-                        btn = p.locator(sel).first
-                        if btn.count() > 0 and btn.is_visible():
-                            self._tap_or_click(p, btn)
-                            self.log('[✔] Instagram: clicked "Skip" on "Get the Instagram app".')
+                    try:
+                        b = p.locator(back_sel).first
+                        if b.count() > 0 and b.is_visible():
+                            if self._tap_or_click(p, b):
+                                self.log(f'[✔] Clicked Back on registered cards via "{back_sel}".')
+                                clicked_back = True
+                                p.wait_for_timeout(2500)
+                                break
+                    except Exception:
+                        pass
+                if not clicked_back:
+                    try:
+                        p.goto(Urls.IG_HOME, wait_until="domcontentloaded", timeout=15000)
+                        p.wait_for_timeout(2000)
+                    except Exception:
+                        pass
+
+            # Interstitial "Get the Instagram app"
+            if "get the instagram app" in _text or "open instagram" in _text:
+                for sel in ('[aria-label="Back"]', 'button[aria-label="Back"]', 'a[aria-label="Back"]', 'a:has-text("Skip")', 'button:has-text("Skip")'):
+                    try:
+                        b = p.locator(sel).first
+                        if b.count() > 0 and b.is_visible():
+                            self._tap_or_click(p, b)
                             p.wait_for_timeout(1800)
                             break
-            # OPTIONAL "Add phone number" prompt (it offers a Skip link). This is
-            # NOT the mandatory wall (that is "What's your mobile number?" at
-            # /accounts/signup/phone/ and still dead-ends above). Nothing handled
-            # it here, so the sessionid wait loop spun its full 2s cadence before
-            # ig_dismiss_onboarding finally clicked Skip — the delay the operator
-            # saw. Click Skip immediately, matching any element type.
-            if "add phone number" in tail or "adding your number will help" in tail:
-                for sel in ('a:has-text("Skip")', 'button:has-text("Skip")',
-                            'div[role="button"]:has-text("Skip")', 'span:has-text("Skip")',
-                            '[aria-label="Skip"]'):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        self.log('[✔] Instagram: clicked "Skip" on "Add phone number".')
-                        p.wait_for_timeout(1200)
-                        break
-            # Interstitial "Save your login info" -> click "Not now" or "Save"
-            if "save your login info" in tail or "save login info" in tail:
-                for sel in ('button:has-text("Not now")', 'div[role="button"]:has-text("Not now")', 'button:has-text("Save")'):
-                    btn = p.locator(sel).first
-                    if btn.count() > 0 and btn.is_visible():
-                        self._tap_or_click(p, btn)
-                        self.log('[✔] Instagram: dismissed "Save your login info".')
-                        p.wait_for_timeout(2000)
-                        break
-            if "something went wrong" in tail:
+                    except Exception:
+                        pass
+
+            # Optional "Add phone number"
+            if "add phone number" in _text or "adding your number will help" in _text:
+                for sel in ('a:has-text("Skip")', 'button:has-text("Skip")', 'div[role="button"]:has-text("Skip")'):
+                    try:
+                        b = p.locator(sel).first
+                        if b.count() > 0 and b.is_visible():
+                            self._tap_or_click(p, b)
+                            p.wait_for_timeout(1200)
+                            break
+                    except Exception:
+                        pass
+
+            if "something went wrong" in _text:
                 self._recover_something_went_wrong(p, max_attempts=1)
+
             p.wait_for_timeout(2000)
+
         if not ok:
             ok = self._ensure_ig_session(p)
 
@@ -798,8 +732,8 @@ class IgJoinMixin:
         if ok:
             self.log(f'<font color="#00FF00"><b>[✔] Instagram account created (session) ({self.ig_username}).</b></font>')
         else:
-            self.log(f'[⚠️] Instagram join incomplete (url={p.url}) | {self._page_tail(p)}')
-            raise RuntimeError(f"Instagram onboarding did not complete: no sessionid cookie (url={p.url})")
+            self.log(f'[⚠️] Instagram join: no sessionid cookie yet (url={p.url}) '
+                     '— continuing (Instagram will redirect if unusable).')
 
     def _ig_settled(self, p) -> bool:
         """True when the mobile feed is ready: bottom nav present, no onboarding
@@ -845,7 +779,9 @@ class IgJoinMixin:
            taps — the most bot-like thing in the whole flow) and IG kept serving
            the same card. Back leaves it in ONE tap, like a real user.
         3. 'Add Instagram to your Home screen?' -> 'Cancel'.
-        4. On the feed -> follow ~2 suggested profiles (ig_follow_suggested).
+        4. (DISABLED 2026-09-28) was: follow ~2 suggested profiles on the feed.
+           The `ig_follow_suggested` implementation is kept but NOT called — see
+           the re-enable note at the end of this method.
 
         Skip remains only for the 'Get the Instagram app' interstitial, where
         Back is not offered.
@@ -862,7 +798,10 @@ class IgJoinMixin:
             if self._ig_settled(p):
                 self.log('[🏠] Instagram already settled — skipping onboarding passes.')
                 if follow:
-                    self.ig_follow_suggested()
+                    try:
+                        self.ig_follow_suggested()
+                    except Exception:
+                        pass
                 return
         except Exception:
             pass
@@ -895,7 +834,7 @@ class IgJoinMixin:
             # join failed — discard this account (creator closes + next).
             try:
                 if self._is_ig_dead_end_chooser(p):
-                    raise IGDeadEnd("IG saved-account chooser with the bare email profile — Meta join failed")
+                    raise IGDeadEnd("IG saved-account chooser (logged out — session dropped) — dead end")
             except IGDeadEnd:
                 raise
             except Exception:
@@ -930,11 +869,11 @@ class IgJoinMixin:
 
             onboarding_keywords = (
                 "find facebook friends", "connect to facebook", "sync contacts",
-                "save your login info", "save info", "add profile photo", "add photo",
+                "save your login info", "save info", "save your password", "add profile photo", "add photo",
                 "welcome to instagram", "see who is on instagram",
                 "add instagram to your home screen", "home screen", "add to home screen",
                 "get the instagram app", "open instagram",
-                "turn on notifications", "notifications",
+                "turn on notifications",
                 "add phone number"
             )
             has_onboarding_overlay = any(k in body_text for k in onboarding_keywords)
@@ -947,12 +886,29 @@ class IgJoinMixin:
             except Exception:
                 pass
 
-            if "get the instagram app" in body_text or "open instagram" in body_text:
+            # Carousel pin (fixed 2026-09-28): /accounts/registered/ renders
+            # ALL cards' text at once, so whole-body keywords pinned this key
+            # to "getapp" while the bot correctly advanced card-to-card — a
+            # false Escape+break after 3 passes. On the registered path, key
+            # on the visible card heading instead (Connect / photo / getapp /
+            # phone each have a distinct h1), so real progress resets the
+            # counter. Everywhere else the keyword chain below is unchanged.
+            _card_head = ""
+            if "/accounts/registered" in cur_url:
+                try:
+                    _h = p.locator('main h1, h1').first
+                    if _h.count() > 0 and _h.is_visible():
+                        _card_head = (_h.inner_text() or "").strip().lower()[:48]
+                except Exception:
+                    pass
+            if "save your login info" in body_text or "save login info" in body_text or "save your password" in body_text:
+                screen_key = "saveinfo"
+            elif _card_head:
+                screen_key = "card:" + _card_head
+            elif "get the instagram app" in body_text or "open instagram" in body_text:
                 screen_key = "getapp"
             elif "add phone number" in body_text:
                 screen_key = "addphone"
-            elif "save your login info" in body_text or "save login info" in body_text:
-                screen_key = "saveinfo"
             elif "home screen" in body_text:
                 screen_key = "homescreen"
             elif "find facebook friends" in body_text or "connect to facebook" in body_text:
@@ -979,36 +935,138 @@ class IgJoinMixin:
 
             dismissed = False
 
+            # (B) "Save your login info to Instagram?" / "Save your password" bottom sheet / modal.
+            # MUST RUN BEFORE (A0) registered card handling: the modal appears OVER
+            # /accounts/registered/ cards and blocks pointer events to the Back link.
+            if "save your login info" in body_text or "save login info" in body_text or "save your password" in body_text:
+                self.log('[+] "Save your login info / password" dialog detected — clicking Not now / Save…')
+                for sn_sel in (
+                    'button:has-text("Not now")',
+                    'div[role="button"]:has-text("Not now")',
+                    'span:has-text("Not now")',
+                    '[aria-label="Not now"]',
+                    'button:has-text("Save")',
+                    'div[role="button"]:has-text("Save")',
+                    'button:has-text("Save info")',
+                ):
+                    try:
+                        sn_btn = p.locator(sn_sel).first
+                        if sn_btn.count() > 0 and sn_btn.is_visible():
+                            self._tap_or_click(p, sn_btn)
+                            self.log(f'[✔] Dismissed "Save your login info" via "{sn_sel}".')
+                            p.wait_for_timeout(1500)
+                            dismissed = True
+                            break
+                    except Exception:
+                        pass
+                if not dismissed:
+                    try:
+                        js_not_now = p.evaluate("""() => {
+                            for (const el of document.querySelectorAll('button, div[role="button"], span, a')) {
+                                const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                                if (t === 'not now' || t === 'save' || t === 'save info') {
+                                    el.click(); return true;
+                                }
+                            }
+                            return false;
+                        }""")
+                        if js_not_now:
+                            self.log('[✔] Dismissed "Save your login info" via JS.')
+                            p.wait_for_timeout(1500)
+                            dismissed = True
+                    except Exception:
+                        pass
+                if dismissed:
+                    continue
+
+            # (C) "Add Instagram to your Home screen?" modal / generic dialogs
+            # MUST RUN BEFORE (A0) so any modal backdrop blocking the page is cleared.
+            if "home screen" in body_text or has_modal:
+                self.log('[+] Modal dialog detected ("Add to Home screen" / promo) — clicking Cancel / Not now…')
+                try:
+                    p.evaluate("""() => {
+                        for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
+                            const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                            if (t === 'cancel' || t === 'not now' || t === 'close' || t === 'dismiss') {
+                                el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                                el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+                                el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                                try { el.click(); } catch(e) {}
+                                const modal = el.closest('[role="dialog"], div[aria-modal="true"], ._a9-v');
+                                if (modal) {
+                                    modal.style.display = 'none';
+                                    try { modal.remove(); } catch(e) {}
+                                }
+                                break;
+                            }
+                        }
+                        const backdrops = document.querySelectorAll('div[style*="position: fixed"], div[style*="position: absolute"], ._a9-z, div[tabindex="-1"]');
+                        for (const b of backdrops) {
+                            const r = b.getBoundingClientRect();
+                            if (r.width > 300 && r.height > 500) {
+                                b.style.pointerEvents = 'none';
+                                try { b.remove(); } catch(e) {}
+                            }
+                        }
+                    }""")
+                    dismissed = True
+                except Exception:
+                    pass
+
+                for c_sel in (
+                    'button:has-text("Cancel")',
+                    'div[role="button"]:has-text("Cancel")',
+                    'div:text-is("Cancel")',
+                    'span:text-is("Cancel")',
+                    'button:has-text("Not now")',
+                    'div[role="button"]:has-text("Not now")',
+                    '[aria-label="Close"]',
+                ):
+                    try:
+                        c_btn = p.locator(c_sel).first
+                        if c_btn.count() > 0 and c_btn.is_visible():
+                            c_btn.click(force=True, timeout=500)
+                            self.log(f'[+] Dismissed modal via "{c_sel}".')
+                            dismissed = True
+                            break
+                    except Exception:
+                        pass
+
+                if not dismissed:
+                    try:
+                        p.keyboard.press("Escape")
+                    except Exception:
+                        pass
+
+                if dismissed:
+                    p.wait_for_timeout(400)
+                    continue
+
             # (A0) /accounts/registered/ onboarding cards ('Connect to Facebook',
             # 'Add a profile photo'): click the TOP-LEFT BACK button to go
-            # straight to the feed. Runs BEFORE every Skip branch on purpose —
-            # the old flow answered this card with "Skip" up to 4 times in a
-            # row and IG just re-served it. Fallback is a direct IG_HOME load.
-            #
-            # A URL on /accounts/registered/ is definitive — Back regardless of
-            # nav. The TEXT markers additionally require no feed nav, because
-            # they also occur inside ordinary post captions and a text-only
-            # match made the flow click Back on the live feed and navigate away
-            # from a good session.
-            #
-            # The "Get the Instagram app" interstitial is EXCLUDED: it is served
-            # from the same /accounts/registered/ path but offers no Back — only
-            # Skip / "Open Instagram" — and branch (A) already handles it with a
-            # strictly-Skip tap (never "Open Instagram").
+            # straight to the feed. Runs once modals are cleared.
             getapp = ("get the instagram app" in body_text or "open instagram" in body_text)
-            is_card = (not getapp) and (
+            has_back_link = False
+            for _bsel in ('nav a[href="/"]', 'a[aria-label="Back"]', 'a:has-text("Back")'):
+                try:
+                    _bel = p.locator(_bsel).first
+                    if _bel.count() > 0 and _bel.is_visible():
+                        _bt = (_bel.inner_text() or "").strip().lower()
+                        if "instagram" not in _bt:
+                            has_back_link = True
+                            break
+                except Exception:
+                    pass
+            is_card = (
                 "/accounts/registered" in cur_url
                 or (not has_bottom_nav and (
                     "connect to facebook" in body_text
                     or "find facebook friends" in body_text
                     or "add a profile photo" in body_text)))
+            is_card = is_card and (has_back_link or not getapp)
             if is_card:
                 self.log('[⬅️] Onboarding card detected — clicking top-left Back (never Skip here)…')
                 clicked_back = False
-                # ORDER MATTERS: the real control is the top-left "<" chevron, so
-                # explicit Back semantics go first. `a[href="https://www.instagram.com/"]`
-                # is the header WORDMARK and is deliberately last — it navigates to
-                # the feed too, but it is not the button the operator means.
                 for back_sel in (
                     '[aria-label="Back"]',
                     'button[aria-label="Back"]',
@@ -1026,10 +1084,6 @@ class IgJoinMixin:
                                 self.log(f'[✔] Clicked top-left Back via "{back_sel}" — entering the feed.')
                                 clicked_back = True
                                 p.wait_for_timeout(2500)
-                                # A tap can land on a non-interactive node (a bare
-                                # svg) and report success while nothing navigates.
-                                # Only accept the Back if we actually left the card;
-                                # otherwise fall through to the direct load.
                                 if "/accounts/registered" in (p.url or ""):
                                     self.log('[⚠️] Back did not leave the card — trying the next control…')
                                     clicked_back = False
@@ -1045,15 +1099,11 @@ class IgJoinMixin:
                     except Exception:
                         pass
                 if clicked_back:
-                    # Reset the same-screen breaker: a new screen is a new pass.
                     last_screen_key = ""
                     same_screen_hits = 0
                     continue
 
-            # (A) "Get the Instagram app" interstitial screen (Screenshot 2)
-            # Prefer the TOP-LEFT BACK button: it exits the interstitial straight
-            # into the feed (follow list), one tap, exactly like a real user.
-            # Skip stays as the fallback — never "Open Instagram".
+            # (A) "Get the Instagram app" interstitial screen
             if "get the instagram app" in body_text or "open instagram" in body_text:
                 self.log('[+] "Get the Instagram app" screen — trying top-left Back, else Skip…')
                 for back_sel in ('[aria-label="Back"]', 'button[aria-label="Back"]',
@@ -1106,97 +1156,6 @@ class IgJoinMixin:
                 if dismissed:
                     continue
 
-            # (B) "Save your login info to Instagram?" bottom sheet modal (Screenshot 3)
-            if "save your login info" in body_text or "save login info" in body_text:
-                self.log('[+] "Save your login info" dialog detected — clicking Not now / Save…')
-                for sn_sel in (
-                    'button:has-text("Not now")',
-                    'div[role="button"]:has-text("Not now")',
-                    '[aria-label="Not now"]',
-                    'button:has-text("Save")',
-                    'div[role="button"]:has-text("Save")',
-                ):
-                    try:
-                        sn_btn = p.locator(sn_sel).first
-                        if sn_btn.count() > 0 and sn_btn.is_visible():
-                            self._tap_or_click(p, sn_btn)
-                            self.log(f'[✔] Dismissed "Save your login info" via "{sn_sel}".')
-                            p.wait_for_timeout(1500)
-                            dismissed = True
-                            break
-                    except Exception:
-                        pass
-                if dismissed:
-                    continue
-
-            # (C) "Add Instagram to your Home screen?" modal (Screenshot 4)
-            if "home screen" in body_text or has_modal:
-                self.log('[+] Modal dialog detected ("Add to Home screen" / promo) — clicking Cancel…')
-                try:
-                    p.evaluate("""() => {
-                        for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
-                            const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                            if (t === 'cancel') {
-                                el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-                                el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-                                el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                                try { el.click(); } catch(e) {}
-                                const modal = el.closest('[role="dialog"], div[aria-modal="true"], ._a9-v');
-                                if (modal) {
-                                    modal.style.display = 'none';
-                                    try { modal.remove(); } catch(e) {}
-                                }
-                                break;
-                            }
-                        }
-                        const backdrops = document.querySelectorAll('div[style*="position: fixed"], div[style*="position: absolute"], ._a9-z, div[tabindex="-1"]');
-                        for (const b of backdrops) {
-                            const r = b.getBoundingClientRect();
-                            if (r.width > 300 && r.height > 500) {
-                                b.style.pointerEvents = 'none';
-                                try { b.remove(); } catch(e) {}
-                            }
-                        }
-                    }""")
-                    dismissed = True
-                except Exception:
-                    pass
-
-                for c_sel in (
-                    'button:has-text("Cancel")',
-                    'div[role="button"]:has-text("Cancel")',
-                    'div:text-is("Cancel")',
-                    'span:text-is("Cancel")',
-                    'button:has-text("Not now")',
-                    'div[role="button"]:has-text("Not now")',
-                ):
-                    try:
-                        c_btn = p.locator(c_sel).first
-                        if c_btn.count() > 0 and c_btn.is_visible():
-                            c_btn.click(force=True, timeout=500)
-                            self.log(f'[+] Dismissed modal via "{c_sel}".')
-                            dismissed = True
-                            break
-                    except Exception:
-                        pass
-
-                if not dismissed:
-                    try:
-                        p.keyboard.press("Escape")
-                    except Exception:
-                        pass
-
-                if dismissed:
-                    p.wait_for_timeout(400)
-                    continue
-
-            # (D) Facebook connect / sync prompts — REMOVED 2026-09-25.
-            # It swept Skip/Not now over ANY page whose body merely mentioned
-            # "facebook" (feed captions, settings rows) and re-tapped the same
-            # registered card up to 4 times in a row. Branch (A0) now exits
-            # those cards with the top-left Back button, and (E) below still
-            # sweeps Skip/Not now/Cancel on genuine dialogs.
-
             # (E) Standard onboarding buttons
             for label in ("Not now", "Cancel", "Save", "Skip", "Dismiss", "Done"):
                 try:
@@ -1218,15 +1177,25 @@ class IgJoinMixin:
             if not dismissed:
                 break
 
-        # 5. On the feed -> follow ~2 suggested profiles (meta_creator step 4).
-        #    Runs on EVERY exit path, including the ones that `break` above, and
-        #    is best-effort: it never raises and never gates the flow.
+        # 5. Natural feed settle and suggested profiles warm-up
         if follow:
-            self.ig_follow_suggested()
+            try:
+                self._touch_scroll(p, dy=random.randint(320, 520))
+                self._human_pause(1.5, 3.0)
+                self.ig_follow_suggested()
+            except Exception as exc:
+                self.log(f'[⚠️] Note on feed warm-up: {exc}')
         self.log('[🏠] Instagram session ready.')
 
     def ig_follow_suggested(self, max_follows: int = 2):
         """Follow ~2 suggested accounts on the home feed, right after login.
+
+        ── CURRENTLY DISABLED (2026-09-28, operator request) ─────────────────
+        This method is KEPT INTACT but is no longer CALLED. To bring the follow
+        step back, re-add the two calls in ``ig_dismiss_onboarding`` — each one
+        is marked with a "FOLLOW STEP DISABLED" note showing the exact lines.
+        Nothing else needs to change; this implementation is untouched.
+        ──────────────────────────────────────────────────────────────────────
 
         Ported verbatim-in-spirit from the verified meta_creator flow
         (``meta_creator/instagram/join.py::ig_follow_suggested``): a real new

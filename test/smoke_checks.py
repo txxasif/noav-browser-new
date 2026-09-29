@@ -39,7 +39,14 @@ import sys
 import time
 
 AI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-os.chdir(AI_DIR)
+if AI_DIR not in sys.path:
+    sys.path.insert(0, AI_DIR)
+try:
+    from ai_config import run as _engine_run
+    _engine_run._point_playwright_at_browsers()
+except Exception:
+    pass
+
 PY = os.path.join(AI_DIR, ".venv", "bin", "python")
 if not os.path.isfile(PY):
     PY = sys.executable
@@ -142,6 +149,11 @@ def _headless_parity():
     the good path: with channel="chromium" the worker MUST be alive.
     """
     try:
+        from ai_config import run as _engine_run
+        _engine_run._point_playwright_at_browsers()
+    except Exception:
+        pass
+    try:
         from playwright.sync_api import sync_playwright
     except Exception as exc:  # pragma: no cover
         return (True, f"skipped (no playwright: {exc})")
@@ -182,7 +194,10 @@ def _headless_parity():
                     pass
 
     good = worker_alive("chromium")
-    bad = worker_alive(None)
+    try:
+        bad = worker_alive(None)
+    except Exception:
+        bad = False
     # The gate only means something if it DISCRIMINATES: new-headless must load
     # the extension and the plain headless shell must not.
     discriminating = good and not bad
@@ -372,18 +387,28 @@ def _ac_guards():
 
 @check("engine_slots")
 def _engine_slots():
-    """Per-pipeline slots in the single-file server (AGENTS.md invariant 9).
+    """Per-pipeline slots in the Node backend (AGENTS.md invariant 9).
 
-    meta_creator has no server/lib/util.js Engine: server.js keeps
+    meta_creator has no server/lib/util.js Engine: server/context.js keeps
     ``engineSlots = { metainsta, tg }`` and ``setEngine()`` must be called at
-    the handler entry from the pathname, with ``reapDeadEngine()``
+    the server.js handler entry from the pathname, with ``reapDeadEngine()``
     self-healing a stale handle (exitCode !== null). This asserts the shape
-    survives future edits.
+    survives future edits (server.js + server/*.js are scanned together).
     """
+    import glob as _glob
     try:
-        src = open(os.path.join(AI_DIR, "server.js"), encoding="utf-8").read()
+        files = [os.path.join(AI_DIR, "server.js")] + sorted(
+            _glob.glob(os.path.join(AI_DIR, "server", "*.js")))
+        src = ""
+        for f in files:
+            try:
+                src += open(f, encoding="utf-8").read() + "\n"
+            except OSError:
+                pass
+        if not src.strip():
+            return (False, "no server JS found")
     except OSError as exc:
-        return (False, f"cannot read server.js: {exc}")
+        return (False, f"cannot read server JS: {exc}")
     has_slots = "engineSlots" in src and "metainsta" in src
     has_set = "function setEngine" in src or "setEngine(" in src
     has_reap = "reapDeadEngine" in src and "exitCode" in src

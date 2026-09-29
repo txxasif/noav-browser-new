@@ -206,6 +206,37 @@ body {
   color: var(--accent-cyan);
 }
 
+/* TG bot submenu: parent (collapsible) + indented bot items. */
+.nav-parent { position: relative; }
+.nav-caret {
+  margin-left: auto;
+  width: auto !important;
+  font-size: 0.7rem !important;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+.nav-parent[aria-expanded="false"] .nav-caret { transform: rotate(-90deg); }
+.nav-submenu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 2px 14px;
+  padding-left: 8px;
+  border-left: 2px solid var(--border-color);
+}
+.nav-submenu.collapsed { display: none; }
+.nav-sub {
+  font-size: 0.82rem;
+  padding: 0.45rem 0.7rem;
+  color: var(--text-muted);
+}
+.nav-sub i { width: 16px !important; font-size: 0.8rem !important; }
+.nav-sub.active {
+  border-left: none;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.16), rgba(6, 182, 212, 0.10));
+}
+.nav-sub.active i { color: var(--accent-cyan); }
+
 .nav-pill {
   margin-left: auto;
   font-size: 0.7rem;
@@ -2131,6 +2162,14 @@ body {
 .tg-settings-info-val { font-size: 0.82rem; font-weight: 600; color: var(--text-main); }
 .tg-settings-info-sub { font-size: 0.68rem; color: var(--text-dim); }
 
+/* Active-bot badge on the bot-scoped pages (the page IS the bot). */
+.tg-bot-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 0.75rem; font-weight: 700; color: var(--text-main);
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--radius-full); padding: 5px 12px;
+}
+
 /* Telegram Profiles — pooled-login cards (mirrors meta_auto_ai poolCard:
    line 1 = name + id + mode pill + status pill, line 2 = phone number). */
 .tg-profile-row {
@@ -2183,6 +2222,55 @@ body {
 }
 .tg-profile-phone { font-family: var(--font-mono); color: #cbd5e1; }
 .tg-profile-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+
+/* ===== TG Manager (connect / lease / balance) ===== */
+.tgm-bots {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px; margin-bottom: 1rem;
+}
+.tgm-bot {
+  position: relative; overflow: hidden;
+  background: var(--bg-card); border: 1px solid var(--border-color);
+  border-radius: var(--radius-md); padding: 12px 14px;
+}
+.tgm-bot::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--accent-purple); opacity: .85;
+}
+.tgm-bot h4 {
+  font-size: 0.9rem; margin: 0 0 2px; color: var(--text-main);
+  display: flex; align-items: center; gap: 8px;
+}
+.tgm-bot .tgm-sub { font-size: 0.68rem; color: var(--text-dim); }
+.tgm-metrics { display: flex; gap: 16px; margin-top: 8px; }
+.tgm-metric { font-size: 0.68rem; color: var(--text-dim); }
+.tgm-metric b {
+  display: block; font-size: 1.05rem; color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+}
+.tgm-acct {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; margin-top: 8px;
+  background: var(--bg-input); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.tgm-acct.tgm-busy { border-color: rgba(245, 158, 11, 0.5); }
+.tgm-acct-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tgm-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #10b981; }
+.tgm-dot.busy { background: #f59e0b; }
+.tgm-dot.off { background: #64748b; }
+.tgm-dot.dead { background: #ef4444; }
+.tgm-acct-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tgm-acct-title strong { font-size: 0.85rem; color: var(--text-main); }
+.tgm-acct-meta { font-size: 0.68rem; color: var(--text-dim); margin-top: 2px; }
+.tgm-acct-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.tgm-bal { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.tgm-bal th {
+  text-align: left; color: var(--text-dim); font-size: 0.68rem;
+  text-transform: uppercase; letter-spacing: 0.05em; padding: 6px;
+}
+.tgm-bal td { padding: 6px; border-top: 1px solid var(--border-color); }
+.tgm-bal th.r, .tgm-bal td.r { text-align: right; }
 .tg-icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 32px; height: 32px; flex: none;
@@ -2318,4 +2406,23 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ===================================================================
+   DIAGNOSTICS & RUN LOGS PANELS (meta_auto_ai parity)
+   =================================================================== */
+.diag-card {
+  contain: layout style;
+}
+.diag-details summary::-webkit-details-marker {
+  display: none;
+}
+.diag-details summary {
+  list-style: none;
+}
+.diag-details summary:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+.diag-details[open] summary .diag-chevron {
+  transform: rotate(180deg);
 }

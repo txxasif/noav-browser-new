@@ -115,16 +115,16 @@ class IgAcNavMixin:
                 self.log('[ac] Error screen recovered pre-nav; continuing…')
         except Exception:
             pass
-        # Session may have dropped mid-flow (login wall) — restore it with
-        # owned creds before navigating anywhere. Fail FAST when dead: every
-        # downstream tap burns TG TTL on a logged-out page (2026-09-19).
-        try:
-            if not self._ig_relogin_if_needed(p):
-                self.log('[⚠️] AC entry failed: IG session dead, re-login failed.')
-                return False
-        except Exception as exc:
-            self.log(f'[⚠️] AC entry failed: session check note: {exc}')
-            return False
+        # NO re-login retry. A login wall or the saved-account chooser means
+        # Instagram already dropped the session — that IS the dead end. Quit so
+        # the slot closes and opens a NEW task (operator decision 2026-09-28:
+        # "no retry login; if that page comes it's a dead end").
+        if self._is_ig_dead_end_chooser(p):
+            raise IGDeadEnd(
+                "IG saved-account chooser (logged out — session dropped) — dead end")
+        if "/accounts/login" in (p.url or ""):
+            raise IGDeadEnd(
+                f"IG login wall — session dropped ({(p.url or '')[:80]})")
         # Check for "Connect to Facebook" page (media_1789674958994.png)
         try:
             b_txt = (p.inner_text("body") or "").lower()
@@ -183,6 +183,11 @@ class IgAcNavMixin:
                     for _ in range(5):
                         p.wait_for_timeout(1000)
                         cur_url = p.url or ""
+                        # FAST bail: a login wall / chooser is terminal — quit
+                        # now, do not grind the retries.
+                        if self._walled_or_chooser(p):
+                            raise IGDeadEnd(
+                                "IG login wall/chooser during AC nav (fast dead end)")
                         if (user and f"/{user}" in cur_url) or p.locator(
                                 'a[href*="/accounts/settings/"], svg[aria-label="Options"], [aria-label="Options"]').count() > 0:
                             navigated = True
@@ -242,6 +247,9 @@ class IgAcNavMixin:
                         p.reload(wait_until="domcontentloaded", timeout=30000)
                         for _ in range(8):
                             p.wait_for_timeout(1000)
+                            if self._walled_or_chooser(p):
+                                raise IGDeadEnd(
+                                    "IG login wall/chooser during AC nav (fast dead end)")
                             if "/accounts/settings" in (p.url or "") or p.locator(
                                     'a[href*="/accounts/settings/"], svg[aria-label="Options"], [aria-label="Options"]').count() > 0:
                                 break
@@ -256,11 +264,17 @@ class IgAcNavMixin:
                                wait_until="domcontentloaded", timeout=30000)
                         for _ in range(8):
                             p.wait_for_timeout(1000)
+                            # FAST bail: a login wall / chooser is terminal.
+                            if self._walled_or_chooser(p):
+                                raise IGDeadEnd(
+                                    "IG login wall/chooser during AC nav (fast dead end)")
                             cur_url = p.url or ""
                             if "/accounts/settings" in cur_url or p.locator(
                                     'a[href*="accountscenter"], [aria-label*="Accounts Center" i]').count() > 0:
                                 settings_reached = True
                                 break
+                    except IGDeadEnd:
+                        raise
                     except Exception as exc:
                         self.log(f'[ac] Step 2 direct-settings note: {exc}')
 
@@ -672,6 +686,10 @@ class IgAcNavMixin:
             for _ in range(5):
                 p.wait_for_timeout(1000)
                 cur_url = p.url or ""
+                # FAST bail: a login wall / chooser is terminal — quit now.
+                if self._walled_or_chooser(p):
+                    raise IGDeadEnd(
+                        "IG login wall/chooser during AC nav (fast dead end)")
                 if "/accounts/settings" in cur_url or p.locator(
                         'a[href*="accountscenter"], [aria-label*="Accounts Center" i]').count() > 0:
                     return True
@@ -741,6 +759,48 @@ class IgAcNavMixin:
             self.log(f"[ac] Step 2 probe note: {exc}")
             return False
 
+    # The terminal dead state for a fresh account (IG runbook obs. #1): until
+    # the "Confirm you're human to use your profile" checkpoint is cleared, IG
+    # gives "Can't find account" and every later AC step fails. It is NOT
+    # solvable offline, so we STOP here — but only AFTER trying to reach
+    # Accounts Center, never before.
+    _HUMAN_CONFIRM_MARKERS = (
+        "confirm you're human", "confirm you\u2019re human", "confirm you are human",
+    )
+
+    def _walled_or_chooser(self, p) -> bool:
+        """FAST dead-end probe: login wall, saved-account chooser, or the
+        logged-out "Remove profile" surface.
+
+        Checked inside the Step 1/2 retry loops so the cycle quits the MOMENT
+        Instagram bounces to /accounts/login (e.g. the ``__coig_login=1`` login
+        wall) or shows a logged-out account surface — instead of burning
+        ~60-90s on 3 profile taps + 3 gear taps + a reload + a direct
+        /accounts/settings/ goto first (operator report 2026-09-28: "it takes
+        time to quit — make it fast").
+        """
+        try:
+            if self._is_ig_dead_end_chooser(p):
+                return True
+            if "/accounts/login" in (p.url or ""):
+                return True
+            # Logged-out "Remove profile" sheet: a saved profile + a red
+            # "Remove profile" action + the "Learn more … remove it" copy.
+            t = (p.inner_text("body") or "").lower()
+            if "remove profile" in t and "learn more" in t:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _is_human_confirm_page(self, p) -> bool:
+        """True on Instagram's 'Confirm you're human to use your profile' page."""
+        try:
+            t = (p.inner_text("body") or "").lower()
+        except Exception:
+            return False
+        return any(m in t for m in self._HUMAN_CONFIRM_MARKERS)
+
     def _ac_section(self, section_path: str = "/password_and_security/", label: str = "Password and security"):
         """Open Accounts Center reliably and navigate to a target section strictly via in-app UI clicks (no jumping)."""
         p = self._ig_tab()
@@ -758,13 +818,42 @@ class IgAcNavMixin:
                 p = page
                 break
 
-        # If not in Accounts Center, navigate via in-app UI clicks (Profile -> Gear -> Accounts Center)
+        # If not in Accounts Center, navigate via in-app UI clicks (Profile ->
+        # Gear -> Accounts Center). RETRY instead of quitting: a transient miss
+        # (half-rendered SPA, a gear not yet in the DOM, "Something went wrong")
+        # must NOT abort the whole task. Keep pushing toward Accounts Center
+        # until we ARRIVE — or we hit a TRUE dead state: the
+        # "Confirm you're human to use your profile" checkpoint (terminal, per
+        # the IG runbook) or an unrecoverable login wall.
         if "accountscenter.instagram.com" not in (p.url or ""):
-            self._recover_something_went_wrong(p, max_attempts=2)
-            try:
-                self._ac_navigate_in_app(p, section_path=section_path, label=label)
-            except Exception as exc:
-                self.log(f'[ac] in-app navigation note: {exc}')
+            for _try in range(3):
+                if self._is_human_confirm_page(p):
+                    self.log("[🛡️] Human confirm page encountered during AC nav — attempting captcha solve…")
+                    if hasattr(self, "_solve_captcha_ordered"):
+                        self._solve_captcha_ordered(p)
+                    if self._is_human_confirm_page(p):
+                        raise IGDeadEnd(
+                            "Instagram 'Confirm you're human to use your profile' checkpoint "
+                            "— terminal dead state (not solvable offline)")
+                self._recover_something_went_wrong(p, max_attempts=2)
+                try:
+                    self._ac_navigate_in_app(p, section_path=section_path, label=label)
+                except IGDeadEnd:
+                    raise
+                except Exception as exc:
+                    self.log(f'[ac] in-app navigation note (try {_try + 1}/3): {exc}')
+                # Arrived? (Accounts Center can open in a new tab.)
+                for page in self.w.context.pages:
+                    if not page.is_closed() and "accountscenter.instagram.com" in (page.url or ""):
+                        self.insta_page = page
+                        p = page
+                        break
+                if "accountscenter.instagram.com" in (p.url or ""):
+                    break
+                if _try < 2:
+                    self.log(f'[ac] Not in Accounts Center yet (try {_try + 1}/3) '
+                             '— retrying navigation (not quitting)…')
+                    p.wait_for_timeout(1500)
 
         # Double check pages in case Accounts Center opened in new tab
         for page in self.w.context.pages:
@@ -781,17 +870,26 @@ class IgAcNavMixin:
             raise IGDeadEnd(
                 "IG email risky contact point (email_risky_contactpoint) — closing")
 
-        # Dead-end guard: an IG login wall / saved-account chooser here means the
-        # session was dropped. We own the creds, so try a bounded re-login first
-        # (observed 2026-09-21: a Reload on the AC route landed on the chooser and
-        # the run dead-ended); only dead-end if the re-login cannot restore it.
-        if "/accounts/login" in (p.url or "") or self._is_ig_dead_end_chooser(p):
-            if self._chooser_relogin(p):
-                self.log('[✔] Recovered AC session via re-login — continuing.')
-                p = self._ig_tab()
-            else:
+        # Terminal dead states — NO retry login (operator decision 2026-09-28:
+        # "no retry login; if that page comes it's a dead end"). The session is
+        # already gone, so quit and move to the NEXT account:
+        #   * the saved-account chooser  (logged out, saved account offered)
+        #   * /accounts/login            (login wall)
+        #   * "Confirm you're human"     (not solvable offline)
+        if self._is_human_confirm_page(p):
+            self.log("[🛡️] Human confirm page encountered — attempting captcha solve…")
+            if hasattr(self, "_solve_captcha_ordered"):
+                self._solve_captcha_ordered(p)
+            if self._is_human_confirm_page(p):
                 raise IGDeadEnd(
-                    f"IG login wall during Accounts Center navigation ({(p.url or '')[:90]})")
+                    "Instagram 'Confirm you're human to use your profile' checkpoint "
+                    "— terminal dead state (not solvable offline)")
+        if self._is_ig_dead_end_chooser(p):
+            raise IGDeadEnd(
+                "IG saved-account chooser (logged out — session dropped) — dead end")
+        if "/accounts/login" in (p.url or ""):
+            raise IGDeadEnd(
+                f"IG login wall during Accounts Center navigation ({(p.url or '')[:90]})")
 
         # 1. One-tap interstitial ("Continue as <user>") if present
         try:
@@ -880,6 +978,12 @@ class IgAcNavMixin:
                     cur_path = (p.url or "").split("?")[0].rstrip("/")
 
                 if not self._ac_in_section(cur_path, clean_path):
+                    # Ensure no lingering dialog overlays block navigation
+                    if p.locator('div[role="dialog"]').count() > 0:
+                        try:
+                            getattr(self, "_dismiss_contact_modal", lambda *a: None)(p)
+                        except Exception:
+                            pass
                     labels = [label]
                     if "password" in (section_path + label).lower():
                         labels.extend(["Login and security", "Password and security"])
@@ -922,7 +1026,17 @@ class IgAcNavMixin:
                                 break
                         if reached:
                             break
-                        self.log(f'[ac] Section tap {_nav + 1}/2 missed "{clean_path}" (still at {cur_path[:80]}) — re-locating…')
+                        self.log(f'[ac] Section tap {_nav + 1}/2 missed "{clean_path}" (still at {cur_path[:80]}) — attempting direct navigation…')
+                        try:
+                            # Direct URL navigation bypasses nested subpages / stalled root lists
+                            p.goto(f"https://accountscenter.instagram.com/{clean_path}/", wait_until="domcontentloaded", timeout=15000)
+                            p.wait_for_timeout(1500)
+                            cur_path = (p.url or "").split("?")[0].rstrip("/")
+                            if self._ac_in_section(cur_path, clean_path):
+                                reached = True
+                                break
+                        except Exception:
+                            pass
                         # Live 2026-09-19: AC root can render "content no longer
                         # available" — re-tapping the same dead DOM never works.
                         # Recover the transient screen before the next tap.
@@ -996,6 +1110,17 @@ class IgAcNavMixin:
             # under "Accounts Center unreachable" (69× on 2026-09-21). A missing
             # sessionid means IG dropped the fresh account's session (the
             # fresh-account login wall) — a DEAD END, not a navigation bug.
+            # The "Confirm you're human to use your profile" checkpoint is the
+            # other TERMINAL state (not solvable offline) — name it explicitly
+            # so the caller stops there instead of retrying forever.
+            if self._is_human_confirm_page(p):
+                self.log("[🛡️] Human confirm page encountered — attempting captcha solve…")
+                if hasattr(self, "_solve_captcha_ordered"):
+                    self._solve_captcha_ordered(p)
+                if self._is_human_confirm_page(p):
+                    raise IGDeadEnd(
+                        "Instagram 'Confirm you're human to use your profile' checkpoint "
+                        "— terminal dead state (not solvable offline)")
             _dead = False
             try:
                 _names = self._ig_cookie_names()
@@ -1004,6 +1129,10 @@ class IgAcNavMixin:
                 _dead = bool(_names) and "sessionid" not in _names
             except Exception:
                 pass
+            # A loaded IG surface (feed / bottom nav) means we ARE logged in —
+            # the missing cookie is a false negative, not a dropped session.
+            if _dead and self._ig_logged_in_ui(p):
+                _dead = False
             if _dead:
                 self.log('[⚠️] Could not reach Accounts Center — IG session dropped (ig login wall)')
                 raise IGDeadEnd(
@@ -1104,14 +1233,22 @@ class IgAcNavMixin:
                 f"{ig_name} · Instagram",
                 ig_name,
             ])
-        if not prefer_instagram and self.name:
-            candidates.extend([
-                f"{self.name} · Meta",
-                f"{self.name}, Meta",
-                f"{self.name} Meta",
-                self.name,
-                "Meta",
-            ])
+        meta_original_name = f"{getattr(self, 'first', '')} {getattr(self, 'last', '')}".strip()
+        if not prefer_instagram:
+            if meta_original_name:
+                candidates.extend([
+                    f"{meta_original_name} · Meta",
+                    f"{meta_original_name}, Meta",
+                    f"{meta_original_name} Meta",
+                    meta_original_name,
+                ])
+            if self.name and self.name != meta_original_name:
+                candidates.extend([
+                    f"{self.name} · Meta",
+                    f"{self.name}, Meta",
+                    f"{self.name} Meta",
+                    self.name,
+                ])
         for name in candidates:
             if self._try_click(p, name, timeout=4000) or self._try_click(p, name, role="button", timeout=3000):
                 self.log(f'[ac] chose account row: "{name}"')
@@ -1119,22 +1256,34 @@ class IgAcNavMixin:
                 return True
         if prefer_instagram:
             try:
-                el = p.locator('div[role="button"]:has-text("Instagram"), button:has-text("Instagram")').first
-                if el.is_visible():
-                    if not self._tap_or_click(p, el):
-                        self._human_click(p, el, 5000)
-                    self.log('[ac] chose Instagram account row (has-text fallback)')
+                loc = p.locator('div[role="button"]:has-text("Instagram"), button:has-text("Instagram")')
+                for i in range(min(loc.count(), 6)):
+                    btn = loc.nth(i)
+                    if not btn.is_visible():
+                        continue
+                    t = (btn.inner_text() or btn.get_attribute("aria-label") or "").lower()
+                    if any(bad in t for bad in ("back to instagram settings", "login and security", "password and security")):
+                        continue
+                    if not self._tap_or_click(p, btn):
+                        self._human_click(p, btn, 5000)
+                    self.log(f'[ac] chose Instagram account row ({t[:40]}...)')
                     p.wait_for_timeout(3000)
                     return True
             except Exception:
                 pass
         else:
             try:
-                el = p.locator('div[role="button"]:has-text("Meta"), button:has-text("Meta")').first
-                if el.is_visible():
-                    if not self._tap_or_click(p, el):
-                        self._human_click(p, el, 5000)
-                    self.log('[ac] chose Meta account row (has-text fallback)')
+                loc = p.locator('div[role="button"]:has-text("Meta"), button:has-text("Meta")')
+                for i in range(min(loc.count(), 6)):
+                    btn = loc.nth(i)
+                    if not btn.is_visible():
+                        continue
+                    t = (btn.inner_text() or btn.get_attribute("aria-label") or "").lower()
+                    if any(bad in t for bad in ("emails from meta", "security checkup", "meta pay", "back to")):
+                        continue
+                    if not self._tap_or_click(p, btn):
+                        self._human_click(p, btn, 5000)
+                    self.log(f'[ac] chose Meta account row ({t[:40]}...)')
                     p.wait_for_timeout(3000)
                     return True
             except Exception:

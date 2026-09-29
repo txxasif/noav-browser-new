@@ -16,20 +16,68 @@ except ImportError:  # pragma: no cover - top-level import path
 class IgLoginMixin:
     """Instagram authentication & direct login."""
 
+    def _ig_has_login_form(self, p) -> bool:
+        try:
+            for sel in ('input[name="username"]', 'input[autocomplete="username"]'):
+                el = p.locator(sel).first
+                if el.count() > 0 and el.is_visible():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _ig_open_login_form(self, p) -> bool:
+        """Front-door entry to the login form (homepage taps, no deep link).
+
+        A straight goto to /accounts/login/ is the same deep-landing signal
+        as the signup URL (learned 2026-09-28: deep-landed sessions get
+        rejected downstream while click-through validates). Walk in via the
+        homepage "Log in" entry; the login URL itself stays as the fallback
+        (it is the normal auth entry, not a funnel deep link), and a blocked
+        entry fails loud instead of spinning the stall loop.
+        """
+        try:
+            p.goto(Urls.IG_HOME, wait_until="domcontentloaded", timeout=60000)
+            p.wait_for_timeout(3000)
+        except Exception:
+            pass
+        for _ in range(4):
+            if self._ig_has_login_form(p):
+                return True
+            handled = False
+            for bt in ("Allow all cookies", "Only allow essential cookies", "Decline optional cookies"):
+                try:
+                    if self._try_click(p, bt, timeout=2500):
+                        p.wait_for_timeout(1000)
+                        handled = True
+                        break
+                except Exception:
+                    pass
+            if handled:
+                continue
+            tapped = False
+            for role in ("button", "link"):
+                try:
+                    if self._try_click(p, "Log in", role=role, timeout=3000):
+                        self.log('[➡️] Instagram: tapped front-door "Log in".')
+                        tapped = True
+                        break
+                except Exception:
+                    pass
+            p.wait_for_timeout(3000 if tapped else 2000)
+        try:
+            p.goto(Urls.IG_LOGIN, wait_until="domcontentloaded", timeout=60000)
+            p.wait_for_timeout(3000)
+            return self._ig_has_login_form(p)
+        except Exception:
+            return False
+
     def ig_login(self):
         """Open Instagram and log in with the Meta email/password."""
         p = self._ig_tab()
         self.log('[🌐] Instagram: opening login…')
-        p.goto(Urls.IG_LOGIN, wait_until="domcontentloaded", timeout=60000)
-        # Poll for the login form instead of a blind 3.5s sleep (faster when the
-        # form is already rendered; still bounded to the same ~3.2s max).
-        for _ in range(8):
-            try:
-                if p.locator('input[name="username"], input[autocomplete="username"], input[type="text"]').first.is_visible():
-                    break
-            except Exception:
-                pass
-            p.wait_for_timeout(400)
+        if not self._ig_open_login_form(p):
+            raise RuntimeError("Instagram login entry blocked (no login form) — refusing blind stall loop")
         self._require_ig_rendered(p, "Instagram login")
 
         # 1. Cookie banners & sheets
@@ -77,7 +125,11 @@ class IgLoginMixin:
                 try:
                     el = p.locator(sel).first
                     if el.count() > 0 and el.is_visible():
-                        self._clean_fill(p, el, self.email, timeout=6000)
+                        try:
+                            self._human_type(el, self.email)
+                            self._dispatch_react_events(p, el)
+                        except Exception:
+                            self._clean_fill(p, el, self.email, timeout=6000)
                         filled_email = True
                         break
                 except Exception:
@@ -95,7 +147,11 @@ class IgLoginMixin:
                 try:
                     el = p.locator(sel).first
                     if el.count() > 0 and el.is_visible():
-                        self._clean_fill(p, el, self.password, timeout=6000)
+                        try:
+                            self._human_type(el, self.password)
+                            self._dispatch_react_events(p, el)
+                        except Exception:
+                            self._clean_fill(p, el, self.password, timeout=6000)
                         filled_pwd = True
                         break
                 except Exception:
@@ -215,8 +271,8 @@ class IgLoginMixin:
             p.wait_for_timeout(2500)
 
             # Fast fail checks: account rejected or phone wall -> quit immediately
-            _tail = self._page_tail(p, 400).lower()
-            if "can't find account" in _tail or p.get_by_text("Can't find account", exact=False).count() > 0:
+            _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 1000)).lower()
+            if "can't find account" in _text or p.get_by_text("Can't find account", exact=False).count() > 0:
                 # Dynamic route (fresh Meta, no IG profile yet): the dialog
                 # offers Sign up — that IS the onboarding entry. Click through
                 # and return "needs_join" so the caller proceeds to the Meta
@@ -244,32 +300,35 @@ class IgLoginMixin:
                 self.log('[❌] Instagram: "Can\'t find account" detected — Meta account not recognized. Quitting immediately.')
                 raise RuntimeError("Instagram: Can't find account (Meta credentials invalid or rejected)")
 
-            if "what's your mobile number" in _tail or p.get_by_text("What's your mobile number", exact=False).count() > 0:
+            if "what's your mobile number" in _text or p.get_by_text("What's your mobile number", exact=False).count() > 0:
                 self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting immediately.')
                 raise RuntimeError("Instagram: Phone number verification required (What's your mobile number)")
 
             # Wrong password -> fail fast with a clear error (no blind rounds).
-            if "password was incorrect" in _tail or "incorrect password" in _tail:
+            if "password was incorrect" in _text or "incorrect password" in _text:
                 self.log('[❌] Instagram: wrong password rejected. Quitting immediately.')
                 raise RuntimeError("Instagram: incorrect password (login rejected)")
 
             if (
                 p.get_by_text("No Instagram account found", exact=False).count() > 0
                 or p.get_by_text("No Instagram profile found", exact=False).count() > 0
-                or "no instagram profile found" in _tail
+                or "no instagram profile found" in _text
+                or p.locator('[aria-label*="View Meta account details" i]').count() > 0
+                or p.locator('button:has-text("View Meta account details")').count() > 0
                 or p.get_by_text("Meta Horizon", exact=False).count() > 0
                 or "sessionid" in self._ig_cookie_names()
                 or "/accounts/login" not in p.url
             ):
                 break
 
-            # DEAD END: the bare saved-account chooser (profile named after the
-            # email local part + "Use another profile"/"Create new account")
-            # means the Meta join failed. Abort instead of tapping "Continue"
-            # into a session that will never link.
+            # DEAD END: the saved-account CHOOSER ('Continue' + 'Use another
+            # profile' + 'Create new account', profile named in the screenshot
+            # style frankvasquezvr13940 / teresa_thompsonokl_47769). The browser
+            # is logged OUT — abort instead of tapping "Continue" into a session
+            # that will never link (operator decision 2026-09-28).
             try:
                 if self._is_ig_dead_end_chooser(p):
-                    raise IGDeadEnd("IG saved-account chooser with the bare email profile — Meta join failed")
+                    raise IGDeadEnd("IG saved-account chooser (logged out — session dropped) — dead end")
             except IGDeadEnd:
                 raise
             except Exception:
@@ -333,8 +392,9 @@ class IgLoginMixin:
         """
         p = self._ig_tab()
         self.log(f'[🌐] Instagram direct login for user: {username}…')
-        p.goto(Urls.IG_LOGIN, wait_until="domcontentloaded", timeout=60000)
-        p.wait_for_timeout(3000)
+        if not self._ig_open_login_form(p):
+            self.log('[❌] Instagram: login entry blocked (no login form).')
+            return False
         self._require_ig_rendered(p, "Instagram login")
         self._dismiss_ig_sheets(p)
 
