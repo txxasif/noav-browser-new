@@ -360,17 +360,21 @@ function consumeWorkerLine(line, engineName = null) {
   diag.observe(trimmed);
   const eng = engineName || activeEngine || 'metainsta';
   const pipeline = (eng === 'tg') ? 'telegram' : 'meta';
-  const tag = (eng === 'tg') ? '[TG]' : (eng === 'ig' ? '[IG]' : '[Meta]');
+  const currentBot = (eng === 'tg' && engineSlots.tg && engineSlots.tg.config) ? engineSlots.tg.config.tg_bot : null;
+  const tag = (eng === 'tg') ? `[TG:${currentBot || 'bot'}]` : (eng === 'ig' ? '[IG]' : '[Meta]');
   if (trimmed.startsWith('__EVENT__')) {
     try {
       const evt = JSON.parse(trimmed.slice(9));
       if (!evt.pipeline) evt.pipeline = pipeline;
       if (!evt.engine) evt.engine = eng;
+      if (currentBot && !evt.tg_bot) evt.tg_bot = currentBot;
       broadcastEvent(evt);
     } catch (e) {}
   } else {
     console.log(`${tag} ${trimmed}`);
-    broadcastEvent({ type: 'log', message: trimmed, pipeline, engine: eng });
+    const evt = { type: 'log', message: trimmed, pipeline, engine: eng };
+    if (currentBot) evt.tg_bot = currentBot;
+    broadcastEvent(evt);
   }
 }
 

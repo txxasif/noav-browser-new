@@ -41,6 +41,7 @@ _REPORT_REJECT_HITS = (
 _REPORT_ACCEPT_HITS = (
     "report has been received", "report has been accepted",
     "task completed", "please wait", "action completed", "registered",
+    "balance", "credited", "reward", "added to balance", "successfully",
 )
 
 
@@ -438,8 +439,13 @@ class TelegramTasklyBot:
             except Exception:
                 pass
 
-        # 5. Try searching for the bot via search input
-        bot_search_term = "tasklyBux_bot" if self.bot_target == "taskly" else "PayGoBot"
+        # 5. Try searching for the bot via search input.
+        # Search by the live @handle from ai_config.TG_BOTS — never a
+        # hardcoded string. Taskly migrated @tasklyBux_bot → @Taskl1_bot
+        # (2026-09-30) and the old bot is ToS-banned; a stale literal here
+        # silently opened a dead chat.
+        bot_search_term = (TG_BOTS.get(self.bot_target, {}).get("username")
+                           or TG_BOTS["taskly"]["username"])
         for s_sel in (
             "#telegram-search-input",
             "input.input-field-input",

@@ -123,8 +123,31 @@ function killOrphanEngines() {
   } catch (e) {}
 }
 
+function resetStaleTgAccounts() {
+  try {
+    const f = ctx.path.join(ctx.ROOT_DIR, 'data', 'tg_accounts.json');
+    if (!ctx.fs.existsSync(f)) return;
+    const raw = JSON.parse(ctx.fs.readFileSync(f, 'utf8'));
+    let changed = false;
+    const list = Array.isArray(raw) ? raw : (raw.accounts || []);
+    for (const a of list) {
+      if (a.status === 'busy') {
+        a.status = 'idle';
+        a.busy_bot = null;
+        a.leased_at = null;
+        changed = true;
+      }
+    }
+    if (changed) {
+      ctx.fs.writeFileSync(f, JSON.stringify(raw, null, 2), 'utf8');
+      console.log('[MetaCreator] Auto-healed stale busy TG account lease(s) to idle.');
+    }
+  } catch (e) {}
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   killOrphanEngines();
+  resetStaleTgAccounts();
   console.log(`[MetaCreator] Nova Meta UI active on http://localhost:${PORT}`);
   console.log(`[MetaCreator] Python interpreter: ${ctx.PYTHON_BIN}`);
 });

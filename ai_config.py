@@ -134,18 +134,29 @@ TG_DEFAULT_MODE = "web"       # "web" (Telegram Web browser) | "mtproto" (Teleth
 DEFAULT_CREATE_PARALLEL = 5   # default parallel Instagram creations
 MAX_CREATE_PARALLEL = 10      # hard cap on parallel creations
 TELEGRAM_URL = "https://web.telegram.org/a/"
-TG_BOT_NAME = "Taskly Bot"
+TG_BOT_NAME = "Taksly Bot"
 TG_DEFAULT_TASK = "Create Inst (No mail)"
 # TG browsers follow the pipeline Background/Visible switch directly
 # (headless flag threaded through worker → tg_worker → PooledTelegramBot).
 # No separate TG visibility knob — one switch, both browsers.
 TG_BOTS = {
+    # Taskly/Taksly — BOT MIGRATED 2026-09-30.
+    # The old @tasklyBux_bot (peer 8661341341) is DEAD: it now answers every
+    # message with "This bot can't be displayed because it violated Telegram's
+    # Terms of Service." (verified over MTProto). The operator's own news
+    # channel @tasklybux_news (id 3856090156) posted "New Bot : @Taskl1_bot".
+    # NOTE the deliberate spelling traps in the new handle: "Taskl" + the
+    # DIGIT 1, display name "Taksly Bot" (with a k). Matching on the display
+    # name or on "taskly_bot" will not resolve — use `username` verbatim.
     "taskly": {
         "id": "taskly",
-        "name": "Taskly Bot",
-        "peer_id": "8661341341",
-        "username": "tasklyBux_bot",
-        "url": "https://web.telegram.org/a/#8661341341",
+        "name": "Taksly Bot",
+        "peer_id": "8793845158",
+        "username": "Taskl1_bot",
+        "url": "https://web.telegram.org/a/#8793845158",
+        # Operator news channel (announces bot moves + task list changes).
+        "news_username": "tasklybux_news",
+        "news_peer_id": "3856090156",
         "task_keyword": "Create Inst",
         "tasks": ["📱 Create Inst (2FA)", "🔥 Create Inst (No mail)"],
         "task_aliases": {

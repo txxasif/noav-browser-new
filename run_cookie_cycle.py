@@ -51,9 +51,23 @@ COOKIE_TASK = "📱 Create Inst (Cookies)"
 COOKIE_FLOW = "cookie"
 TASK_WINDOW = 420  # bot ~8-min TTL; fail fast past it
 
+_profile_pacing_lock = threading.Lock()
+_profile_last_start: dict[str, float] = {}
+
 
 def log(slot_id, m):
     print(f"[cookie:{slot_id}] {m}", flush=True)
+
+
+def _is_account_dead_error(msg: str) -> bool:
+    """Return True if error indicates the account is banned, checkpointed, or has a dead session."""
+    low = str(msg or "").lower()
+    return any(p in low for p in (
+        "checkpoint", "suspended", "login_required", "logged_out",
+        "challenge", "unauthorized", "forbidden", "401", "403",
+        "feedback_required", "disabled", "banned", "user_has_logged_out",
+        "session expired", "invalid cookie", "user not found"
+    ))
 
 
 def change_ig_username_fast(cookie_str: str, target_username: str, ua: str = None) -> tuple[bool, str]:
@@ -182,16 +196,35 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         threading.Thread(target=_beat, daemon=True).start()
 
+        # Profile pacing: wait at least 8.0s between task starts on the SAME Telegram profile
+        with _profile_pacing_lock:
+            last_t = _profile_last_start.get(tg_acct["id"], 0.0)
+            wait_rem = 8.0 - (time.time() - last_t)
+            if wait_rem > 0:
+                time.sleep(wait_rem)
+            _profile_last_start[tg_acct["id"]] = time.time()
+
         if not bot.choose_task(task):
+            recent_err = ""
+            try:
+                for t in (bot._call("_recent_texts", 4) if hasattr(bot, "_call") else bot._recent_texts(4)):
+                    if any(ph in t.lower() for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
+                        recent_err = t.strip()
+                        break
+            except Exception:
+                pass
+            if recent_err:
+                raise RuntimeError(f"PayGo hourly limit reached: {recent_err}")
             raise RuntimeError(f"Could not select {task} in {bot_id}")
 
+        log(slot_id, f"[task] Selected '{task}' on {bot_id} (TG {tg_acct['id']})")
         creds = bot.start_task() or {}
         if creds.get("error") == "limit_reached":
             raise RuntimeError(f"PayGo hourly limit reached: {creds.get('detail', '')}")
         login = _clean_username(creds.get("login") or "")
         if not (login and _is_valid_ig_username(login)):
             raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")
-        clog(f"creds: login='{login}'")
+        log(slot_id, f"[creds] PayGo issued target username: '{login}'")
 
         # Claim an account from the pool (skip any that turn out to be checkpointed/dead)
         pool_acc = None
@@ -201,7 +234,8 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 break
             cand_id = cand["id"]
             cand_user = cand.get("username") or cand.get("instagram_username") or "unknown"
-            log(slot_id, f"[pool] Claimed account {cand_id} (current username: '{cand_user}')")
+            log(slot_id, f"[pool] Claimed IG Creator account {cand_id} (current username: '{cand_user}')")
+            log(slot_id, f"⚡ [api] Changing username: '{cand_user}' -> '{login}' via direct IG Web API…")
             emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
                         "detail": f"Fast IG username change: {cand_user} -> {login}…"})
             ok_name, name_msg = change_ig_username_fast(
@@ -209,13 +243,24 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             )
             if ok_name:
                 pool_acc = cand
-                log(slot_id, f"[pool] Username updated to '{login}' in ~0.4s ({name_msg})")
+                log(slot_id, f"✅ [api] IG username updated successfully to '{login}' in ~0.4s ({name_msg})")
+                clog(f"⚡ [username] Updated Instagram username: '{cand_user}' -> '{login}' (in 0.4s)")
                 break
-            # If checkpointed / suspended, permanently mark dead and try next account
-            if "checkpoint" in str(name_msg).lower() or "suspended" in str(name_msg).lower():
-                log(slot_id, f"[pool] Account {cand_id} is checkpointed/dead on IG ({name_msg}) — marking Failed.")
-                store.mark_ig_creator_dead(cand_id, name_msg)
+            # If checkpointed / suspended / banned / session dead, permanently delete from list and try next account
+            if _is_account_dead_error(name_msg):
+                log(slot_id, f"⚠️ [pool] Account {cand_id} ({cand_user}) is dead/banned on IG ({name_msg}) — permanently removing from accounts list.")
+                store.delete_record(cand_id)
+                if cand.get("session_file") and os.path.exists(cand["session_file"]):
+                    try:
+                        os.remove(cand["session_file"])
+                    except Exception:
+                        pass
+                emit_event({"type": "account_deleted", "account_id": cand_id})
+                emit_event({"type": "accounts_updated"})
+                continue
             else:
+                # Proposed username was rejected by IG (e.g. taken/invalid) but account itself may be fine
+                log(slot_id, f"[pool] Target username '{login}' rejected by IG ({name_msg}) — restoring account {cand_id} to pool.")
                 store.restore_ig_creator_account(cand_id)
                 raise RuntimeError(f"Direct IG username change failed: {name_msg}")
 
@@ -225,18 +270,32 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         acc_id = pool_acc["id"]
 
         # Submit cookie to PayGo
+        log(slot_id, f"[submit] Submitting {len(pool_acc['cookies'])} chars IG cookie string to {bot_id}…")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                     "detail": "Submitting IG cookie to PayGoBot…"})
         ok_cookie, reply = bot.submit_cookie(pool_acc["cookies"], timeout=25)
         if not ok_cookie:
-            store.restore_ig_creator_account(acc_id)
+            if _is_account_dead_error(reply):
+                log(slot_id, f"⚠️ [pool] PayGo rejected dead/banned account {acc_id} ({reply[:100]}) — permanently removing from accounts list.")
+                store.delete_record(acc_id)
+                if pool_acc.get("session_file") and os.path.exists(pool_acc["session_file"]):
+                    try:
+                        os.remove(pool_acc["session_file"])
+                    except Exception:
+                        pass
+                emit_event({"type": "account_deleted", "account_id": acc_id})
+                emit_event({"type": "accounts_updated"})
+            else:
+                store.restore_ig_creator_account(acc_id)
             pool_acc = None
             raise RuntimeError(f"PayGo rejected cookie: {reply[:200]}")
+
+        log(slot_id, f"✅ [paygo] Cookie accepted by {bot_id} — confirming registration…")
 
         # Register confirm
         submitted = bot.mark_registered()
         if not submitted:
-            log(slot_id, "register receipt not seen — one more tap…")
+            log(slot_id, "register receipt not seen — retrying confirm tap…")
             submitted = bot.mark_registered()
         if not submitted:
             store.restore_ig_creator_account(acc_id)
@@ -250,7 +309,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 os.remove(pool_acc["session_file"])
             except Exception:
                 pass
-        log(slot_id, f"[pool] Account {acc_id} consumed and removed from IG creator list.")
+        log(slot_id, f"[pool] Account {acc_id} successfully consumed and removed from pool.")
         pool_acc = None
 
         from tg_stats import record_submission
@@ -261,7 +320,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                     "account_id": rec_id})
         emit_event({"type": "account_deleted", "account_id": acc_id})
         emit_event({"type": "accounts_updated"})
-        log(slot_id, f"SUBMITTED ({rec_id})")
+        log(slot_id, f"🎉 [SUBMITTED] Registration confirmed (+ $0.02) -> record {rec_id} for user '{login}'")
         ok = True
         return True, rec_id
 

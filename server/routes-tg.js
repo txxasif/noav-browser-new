@@ -1,7 +1,64 @@
-'use strict';
-/** Telegram APIs (/api/tg/*): balance, pool, MTProto, FastPay, manager, Classic. */
+const paygoOrchestrator = require('./paygo-orchestrator');
+let _orchestratorInit = false;
+
 module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
+  if (!_orchestratorInit) {
+    _orchestratorInit = true;
+    paygoOrchestrator.init(ctx);
+  }
   const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove } = ctx;
+
+  // ---- TG balance: single-flight + short TTL cache ------------------------
+  // A .session file serves ONE Telethon client at a time. Two concurrent
+  // `tg_balance.py` processes would both try to open all six session files and
+  // collide with "database is locked" (observed 2026-09-30: two workers were
+  // running and a double-clicked button produced "database is locked" rows).
+  // So the server runs AT MOST ONE balance reader, shares it with every caller
+  // that asks while it is in flight, and answers a re-click inside BAL_TTL_MS
+  // straight from cache. `?fresh=1` bypasses the TTL (still serialized).
+  const BAL_TTL_MS = 30000;
+  let _balCache = null;      // { at, data }
+  let _balInFlight = null;   // shared Promise
+  let _balLock = Promise.resolve();   // mutex: no two readers, ever
+
+  function withBalLock(fn) {
+    const run = _balLock.then(() => fn());
+    _balLock = run.then(() => {}, () => {});
+    return run;
+  }
+
+  async function balanceAll(fresh) {
+    if (!fresh && _balCache && (Date.now() - _balCache.at) < BAL_TTL_MS) {
+      return { data: Object.assign({}, _balCache.data, { cached: true }), logged: false };
+    }
+    if (_balInFlight) return { data: await _balInFlight, logged: false };
+    _balInFlight = withBalLock(async () => {
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py',
+        ['--all', '--json'], 300000);
+      const data = r || { ok: false, error: 'no result' };
+      if (data.ok) _balCache = { at: Date.now(), data };
+      return data;
+    });
+    try {
+      return { data: await _balInFlight, logged: true };
+    } finally {
+      _balInFlight = null;
+    }
+  }
+
+  function logBalances(r) {
+    try {
+      const t = (r && r.totals) || {};
+      const parts = [];
+      if (t.taskly != null) parts.push('Taskly $' + Number(t.taskly || 0).toFixed(2));
+      if (t.paygo != null) parts.push('PayGo $' + Number(t.paygo || 0).toFixed(2));
+      if (t.fastpay != null) parts.push('FastPay $' + Number(t.fastpay || 0).toFixed(2));
+      const secs = (r && r.elapsed_s != null) ? (' in ' + r.elapsed_s + 's') : '';
+      broadcastEvent({ type: 'log', pipeline: 'telegram',
+        message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): '
+          + parts.join(' · ') + ' · TOTAL $' + Number(t.grand || 0).toFixed(2) + secs });
+    } catch (e) {}
+  }
 
   // ---- TG balance (both bots: Taskly + PayGo) ----
   // Reads the 💰 Balance key from the account's Telethon session. A .session
@@ -14,7 +71,8 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
       const id = String(b.id || '').trim();
       if (!id) { sendJson(req, res, { ok: false, error: 'id required' }, 400); return; }
-      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py', ['--id', id, '--json'], 120000);
+      const r = await withBalLock(() => runPythonJson(PYTHON_BIN, ROOT_DIR,
+        'tg_balance.py', ['--id', id, '--json'], 120000));
       sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 500);
     });
     return true;
@@ -22,18 +80,10 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
 
   if (pathname === '/api/tg/mtproto/balance_all' && req.method === 'POST') {
     (async () => {
-      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py', ['--all', '--json'], 900000);
-      try {
-        const t = (r && r.totals) || {};
-        const parts = [];
-        if (t.taskly != null) parts.push('Taskly $' + Number(t.taskly || 0).toFixed(2));
-        if (t.paygo != null) parts.push('PayGo $' + Number(t.paygo || 0).toFixed(2));
-        if (t.fastpay != null) parts.push('FastPay $' + Number(t.fastpay || 0).toFixed(2));
-        broadcastEvent({ type: 'log', pipeline: 'telegram',
-          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): '
-            + parts.join(' · ') + ' · TOTAL $' + Number(t.grand || 0).toFixed(2) });
-      } catch (e) {}
-      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 500);
+      const fresh = urlObj.searchParams.get('fresh') === '1';
+      const { data, logged } = await balanceAll(fresh);
+      if (logged) logBalances(data);
+      sendJson(req, res, data, data && data.ok ? 200 : 500);
     })();
     return true;
   }
@@ -360,19 +410,10 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
   }
   if (pathname === '/api/tg/manager/balance' && req.method === 'POST') {
     (async () => {
-      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py',
-        ['--all', '--json'], 900000);
-      try {
-        const t = (r && r.totals) || {};
-        const parts = [];
-        if (t.taskly != null) parts.push('Taskly $' + Number(t.taskly || 0).toFixed(2));
-        if (t.paygo != null) parts.push('PayGo $' + Number(t.paygo || 0).toFixed(2));
-        if (t.fastpay != null) parts.push('FastPay $' + Number(t.fastpay || 0).toFixed(2));
-        broadcastEvent({ type: 'log', pipeline: 'telegram',
-          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): '
-            + parts.join(' · ') + ' · TOTAL $' + Number(t.grand || 0).toFixed(2) });
-      } catch (e) {}
-      sendJson(req, res, r || { ok: false, error: 'no result' });
+      const fresh = urlObj.searchParams.get('fresh') === '1';
+      const { data, logged } = await balanceAll(fresh);
+      if (logged) logBalances(data);
+      sendJson(req, res, data || { ok: false, error: 'no result' });
     })();
     return true;
   }
@@ -564,6 +605,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
         if (slot().proc) slot().proc = null;
       });
+      const procRef = slot().proc;
       slot().proc.on('close', code => {
         flushWorkerBuffer();
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
@@ -571,7 +613,10 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg',
           message: `[engine] TG worker exited (code ${code})` });
         broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', exit_code: code });
-        slot().proc = null;
+        if (slot().proc === procRef) slot().proc = null;
+        if (!procRef || !procRef.__preemptKilled) {
+          paygoOrchestrator.notifyLoopStopped(procRef);
+        }
       });
       releaseStartTg();
       sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine started.', config: slot().config });
@@ -594,10 +639,28 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       slot().config = null;
       broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopped by user request.' });
       sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopped.' });
+      paygoOrchestrator.notifyUserStopped();
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ERROR', error: 'Stop failed: ' + e.message }));
     }
+    return true;
+  }
+
+  // ---- PayGo Auto-Mining & Preemption Routes ----
+  if (pathname === '/api/tg/paygo-auto/status' && req.method === 'GET') {
+    sendJson(req, res, { ok: true, status: paygoOrchestrator.getStatus() });
+    return true;
+  }
+
+  if (pathname === '/api/tg/paygo-auto/toggle' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const st = paygoOrchestrator.toggle(b.enabled, b.concurrency);
+      sendJson(req, res, { ok: true, status: st });
+    });
     return true;
   }
   // =============== end TG Classic ===============

@@ -15,6 +15,7 @@
 
   var root = null, timer = null;
   var state = { running: false, igMode: null, bot: 'taskly', pool: [], log: [], cfg: { headless: true } };
+  var botLogs = { taskly: [], paygo: [], fastpay: [] };
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -37,7 +38,9 @@
   // The page IS the bot (set by the TG submenu) — there is no "Mining bot"
   // picker on a page that is already scoped to a bot.
   var BOT_META = {
-    taskly: { name: 'Taskly Bot', logo: 'taskly',
+    // Taskly migrated to @Taskl1_bot (display "Taksly Bot") on 2026-09-30 — the
+    // old @tasklyBux_bot is ToS-banned/dead.
+    taskly: { name: 'Taksly Bot', logo: 'taskly',
       tasks: [['📱 Create Inst (2FA)', '📱 Create Inst (2FA) — 2FA flow'],
               ['🍪 Create Inst (No mail)', '🍪 Create Inst (No mail) — 2FA + cookie flow'],
               ['🔥 Create Inst (No mail)', '🔥 Create Inst (No mail) — 2FA flow']] },
@@ -143,12 +146,34 @@
     var isPayGo = (state.bot === 'paygo');
     var igPoolField = $('tg-igpool-field');
     var igPoolSw = $('tg-igpool-sw');
+    var autoSw = $('tg-paygo-auto-sw');
+    var cardPool = $('tg-paygo-card-pool');
+    var cardAuto = $('tg-paygo-card-automine');
 
     if (igPoolField) {
       igPoolField.style.display = isPayGo ? 'flex' : 'none';
       if (!isPayGo && igPoolSw) {
         igPoolSw.checked = false;
       }
+    }
+
+    if (cardPool && igPoolSw) {
+      if (igPoolSw.checked) cardPool.classList.add('is-active');
+      else cardPool.classList.remove('is-active');
+    }
+    if (cardAuto && autoSw) {
+      if (autoSw.checked) cardAuto.classList.add('is-active');
+      else cardAuto.classList.remove('is-active');
+    }
+
+    if (igPoolSw && !igPoolSw.dataset.cardWired) {
+      igPoolSw.dataset.cardWired = '1';
+      igPoolSw.addEventListener('change', function () {
+        if (cardPool) {
+          if (igPoolSw.checked) cardPool.classList.add('is-active');
+          else cardPool.classList.remove('is-active');
+        }
+      });
     }
 
     var isIgPoolActive = isPayGo && !!(igPoolSw && igPoolSw.checked);
@@ -168,7 +193,10 @@
           ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
           : (native ? 'Not used by the native 2FA task — email + code come from the bot.' : 'Fresh mail.td email before the task registers.'));
     }
-    if (fieldAdde) fieldAdde.style.opacity = offAdde ? '0.4' : '1';
+    if (fieldAdde) {
+      fieldAdde.style.display = offAdde ? 'none' : 'flex';
+      fieldAdde.style.opacity = offAdde ? '0.4' : '1';
+    }
 
     // When IG Creator Accounts is chosen, disable the rest, leaving ONLY headless and ON/OFF:
     var concInput = $('tg-conc');
@@ -178,11 +206,12 @@
     var taskSection = document.querySelector('.creator-task-service');
     var servicesPanel = document.querySelector('.creator-services');
 
-    if (concInput) concInput.disabled = isIgPoolActive;
-    if (concField) concField.style.opacity = isIgPoolActive ? '0.4' : '1';
+    // Parallel and Target stay enabled so users can drain pool in parallel with N slots
+    if (concInput) concInput.disabled = false;
+    if (concField) concField.style.opacity = '1';
 
-    if (targetInput) targetInput.disabled = isIgPoolActive;
-    if (targetField) targetField.style.opacity = isIgPoolActive ? '0.4' : '1';
+    if (targetInput) targetInput.disabled = false;
+    if (targetField) targetField.style.opacity = '1';
 
     if (taskSection) {
       taskSection.style.opacity = isIgPoolActive ? '0.4' : '1';
@@ -190,8 +219,9 @@
     }
 
     if (servicesPanel) {
-      servicesPanel.style.opacity = isIgPoolActive ? '0.4' : '1';
+      servicesPanel.style.opacity = isIgPoolActive ? '0.25' : '1';
       servicesPanel.style.pointerEvents = isIgPoolActive ? 'none' : 'auto';
+      servicesPanel.style.filter = isIgPoolActive ? 'grayscale(0.85)' : 'none';
       var serviceInputs = servicesPanel.querySelectorAll('input');
       for (var s = 0; s < serviceInputs.length; s++) {
         serviceInputs[s].disabled = isIgPoolActive;
@@ -202,6 +232,26 @@
     var headlessSw = $('tg-headless-sw');
     if (headlessSw) {
       headlessSw.disabled = false;
+    }
+
+    var autoSw = $('tg-paygo-auto-sw');
+    var autoConc = $('tg-paygo-auto-conc');
+    if (autoSw && !autoSw.dataset.wired) {
+      autoSw.dataset.wired = '1';
+      autoSw.addEventListener('change', function () {
+        var conc = parseInt((autoConc && autoConc.value) || 6, 10);
+        post('/api/tg/paygo-auto/toggle', { enabled: autoSw.checked, concurrency: conc })
+          .then(function (j) { if (j && j.status) updatePayGoAutoUI(j.status); });
+      });
+    }
+    if (autoConc && !autoConc.dataset.wired) {
+      autoConc.dataset.wired = '1';
+      autoConc.addEventListener('change', function () {
+        var conc = Math.max(1, Math.min(10, parseInt(autoConc.value || 6, 10)));
+        autoConc.value = conc;
+        post('/api/tg/paygo-auto/toggle', { enabled: autoSw ? autoSw.checked : true, concurrency: conc })
+          .then(function (j) { if (j && j.status) updatePayGoAutoUI(j.status); });
+      });
     }
 
     if (isIgPoolActive) {
@@ -219,6 +269,8 @@
     renderTaskOptions(bot);
     updateBotBadge(bot);
     applyFlowGuards();
+    state.log = (botLogs[bot] || []).slice();
+    paintLog();
     refresh();  // re-scope the per-bot KPIs immediately (don't wait 5s)
   };
 
@@ -316,6 +368,66 @@
           '</div>' +
           '<span class="tg-bot-badge" id="tg-bot-badge"></span>' +
         '</div>' +
+        '<div class="paygo-modules-container" id="tg-igpool-field" style="display:none;">' +
+          '<div class="paygo-feature-card paygo-feature-pool" id="tg-paygo-card-pool">' +
+            '<div class="paygo-feature-main">' +
+              '<div class="paygo-feature-icon">' +
+                '<i class="fa-solid fa-bolt"></i>' +
+              '</div>' +
+              '<div class="paygo-feature-text">' +
+                '<div class="paygo-feature-title">' +
+                  'DRAIN FROM IG CREATOR ACCOUNTS' +
+                  '<span class="paygo-feature-badge pool-badge">Instant Drain</span>' +
+                '</div>' +
+                '<div class="paygo-feature-desc">' +
+                  'Fast direct API username update in ~0.4s &amp; cookie submission into PayGo. Zero browser creation overhead.' +
+                '</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="paygo-feature-controls">' +
+              '<label class="switch" title="Drain pre-created accounts directly from the IG Creator list (PayGo only)">' +
+                '<input type="checkbox" id="tg-igpool-sw">' +
+                '<span class="slider"></span>' +
+              '</label>' +
+            '</div>' +
+          '</div>' +
+          '<div class="paygo-feature-card paygo-feature-automine" id="tg-paygo-card-automine" style="flex-direction:column;align-items:stretch;">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;gap:1.25rem;width:100%;">' +
+              '<div class="paygo-feature-main">' +
+                '<div class="paygo-feature-icon">' +
+                  '<i class="fa-solid fa-clock-rotate-left"></i>' +
+                '</div>' +
+                '<div class="paygo-feature-text">' +
+                  '<div class="paygo-feature-title">' +
+                    'AUTO-MINE ON HOURLY REFILL (:00)' +
+                    '<span class="paygo-feature-badge automine-badge">Autonomous Scheduler</span>' +
+                  '</div>' +
+                  '<div class="paygo-feature-desc">' +
+                    'Zero-contention background engine: auto-preempts running bot at :00, drains PayGo at max speed, then restores previous task.' +
+                  '</div>' +
+                '</div>' +
+              '</div>' +
+              '<div class="paygo-feature-controls">' +
+                '<span id="tg-paygo-auto-pill" class="paygo-status-pill">Auto-Mine Off</span>' +
+                '<label class="switch" title="Auto-Mine PayGo: When stock refills, pauses running bot, drains PayGo pool, then resumes previous bot">' +
+                  '<input type="checkbox" id="tg-paygo-auto-sw">' +
+                  '<span class="slider"></span>' +
+                '</label>' +
+              '</div>' +
+            '</div>' +
+            '<div class="paygo-automine-config" id="tg-paygo-auto-config-row">' +
+              '<div class="paygo-automine-slots">' +
+                '<span><i class="fa-solid fa-users-gear" style="color:var(--accent-cyan);"></i> Auto-Mine Parallel Slots:</span>' +
+                '<input id="tg-paygo-auto-conc" class="form-control paygo-conc-input" type="number" min="1" max="10" value="6" title="Number of parallel creators spawned when PayGo refills">' +
+                '<span style="font-size:0.72rem;color:var(--text-muted);">(parallel drain slots at :00)</span>' +
+              '</div>' +
+              '<div class="paygo-automine-explainer">' +
+                '<i class="fa-solid fa-circle-info"></i>' +
+                '<span><strong>Autonomous Mode:</strong> Runs on its own at :00 — <u>no need to click Start</u>. (If you start Taskly/FastPay manually, it will auto-pause at :00, drain, and resume).</span>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
         '<div class="creator-service creator-task-service" style="margin-bottom:0.9rem;">' +
           '<div class="creator-service-title"><i class="fa-solid fa-list-check" style="color:var(--accent-purple);"></i> SELECT TASK</div>' +
           '<div class="creator-options" id="tg-task-options"></div>' +
@@ -334,7 +446,7 @@
           '<div class="creator-field creator-field--switch">' +
             '<label>Headless</label>' +
             '<label class="switch" title="Run browsers headless (no visible window)">' +
-              '<input type="checkbox" id="tg-headless-sw">' +
+              '<input type="checkbox" id="tg-headless-sw" checked>' +
               '<span class="slider"></span>' +
             '</label>' +
           '</div>' +
@@ -342,13 +454,6 @@
             '<label>Extra Email</label>' +
             '<label class="switch" title="Fresh mail.td email before task registration">' +
               '<input type="checkbox" id="tg-adde-sw" checked>' +
-              '<span class="slider"></span>' +
-            '</label>' +
-          '</div>' +
-          '<div class="creator-field creator-field--switch" id="tg-igpool-field" style="display:none;">' +
-            '<label style="color:var(--accent-green);font-weight:700;">IG Creator Accounts</label>' +
-            '<label class="switch" title="Drain pre-created accounts directly from the IG Creator list (PayGo only)">' +
-              '<input type="checkbox" id="tg-igpool-sw">' +
               '<span class="slider"></span>' +
             '</label>' +
           '</div>' +
@@ -467,8 +572,8 @@
           var task = ($('tg-task') || {}).value ||
             ((BOT_META[bot] || BOT_META.taskly).tasks[0] || [''])[0];
           var isIgPool = (bot === 'paygo') && !!($('tg-igpool-sw') && $('tg-igpool-sw').checked);
-          var effConc = isIgPool ? 1 : parseInt(($('tg-conc') || {}).value || 1, 10);
-          var effTarget = isIgPool ? 0 : parseInt(($('tg-target') || {}).value || 0, 10);
+          var effConc = parseInt(($('tg-conc') || {}).value || 1, 10);
+          var effTarget = parseInt(($('tg-target') || {}).value || 0, 10);
           var effAddEmail = (isIgPool || isCookieTask(task) || isNativeTask(task)) ? false : addEmail;
           var captchaEl = document.querySelector('input[name="tg-captcha"]:checked');
           var captchaChoice = captchaEl ? captchaEl.value : 'extension';
@@ -504,6 +609,7 @@
     window.__setTgBot(state.bot);
     if ($('tg-task')) $('tg-task').addEventListener('change', applyFlowGuards);
     if ($('tg-igpool-sw')) $('tg-igpool-sw').addEventListener('change', applyFlowGuards);
+    if ($('tg-conc')) $('tg-conc').addEventListener('input', function () { setStatus(state.running, state.igMode); });
     if ($('tg-headless-sw')) $('tg-headless-sw').addEventListener('change', function () { setWindow($('tg-headless-sw').checked); });
     if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; });
     if ($('tg-refresh')) $('tg-refresh').addEventListener('click', refresh);
@@ -736,25 +842,97 @@
   }
 
   /* ---------------- engine state ---------------- */
-  function setStatus(running, igMode) {
+  function setStatus(running, igMode, activeBot, engineCfg) {
     state.running = running; state.igMode = igMode || null;
     var badge = $('tg-badge'), title = $('tg-title'), sub = $('tg-sub'), start = $('tg-start');
+    var bot = state.bot || 'taskly';
+    var isCurrentBotRunning = running && (activeBot === bot);
+    var isOtherBotRunning = running && activeBot && (activeBot !== bot);
+    var botName = bot === 'paygo' ? 'PayGo' : bot === 'fastpay' ? 'FastPay' : 'Taskly';
+    var activeBotName = activeBot === 'paygo' ? 'PayGo' : activeBot === 'fastpay' ? 'FastPay' : (activeBot ? 'Taskly' : '');
+    var isIgPool = (bot === 'paygo') && !!($('tg-igpool-sw') && $('tg-igpool-sw').checked);
+    var effConc = parseInt(($('tg-conc') || {}).value || 1, 10);
+    var runningConc = (engineCfg && engineCfg.concurrency) || effConc;
+    var pSt = window.__paygoAutoStatus;
+
     if (badge) {
-      badge.textContent = running ? 'RUNNING' : 'IDLE';
-      badge.style.background = running ? 'var(--accent-green)' : 'var(--bg-input)';
-      badge.style.color = running ? '#04140d' : 'var(--text-dim)';
-      badge.style.borderColor = running ? 'var(--accent-green)' : 'var(--border-color)';
+      if (isCurrentBotRunning) {
+        badge.textContent = 'RUNNING';
+        badge.style.background = 'var(--accent-green)';
+        badge.style.color = '#04140d';
+        badge.style.borderColor = 'var(--accent-green)';
+      } else if (isOtherBotRunning) {
+        badge.textContent = activeBotName.toUpperCase() + ' RUNNING';
+        badge.style.background = 'rgba(245, 158, 11, 0.2)';
+        badge.style.color = '#fbbf24';
+        badge.style.borderColor = 'rgba(245, 158, 11, 0.45)';
+      } else if (pSt && pSt.enabled) {
+        badge.textContent = 'AUTO-MINE ARMED';
+        badge.style.background = 'rgba(245, 158, 11, 0.2)';
+        badge.style.color = '#fbbf24';
+        badge.style.borderColor = 'rgba(245, 158, 11, 0.45)';
+      } else {
+        badge.textContent = 'IDLE';
+        badge.style.background = 'var(--bg-input)';
+        badge.style.color = 'var(--text-dim)';
+        badge.style.borderColor = 'var(--border-color)';
+      }
     }
-    if (title) title.textContent = running ? 'TG ENGINE RUNNING' : 'TG ENGINE STOPPED';
-    if (sub) sub.textContent = running
-      ? 'Creators are running \u2014 one browser per task, coupled cycle.'
-      : 'Idle. Creators will make accounts for Telegram only.';
-    // Instagram-Creator behaviour: exactly ONE action button is visible —
-    // Start when idle, Stop when running. Never both at once.
+    if (title) {
+      if (isCurrentBotRunning) {
+        title.textContent = isIgPool ? 'PAYGO POOL DRAIN RUNNING' : ('TG ENGINE RUNNING (' + botName.toUpperCase() + ')');
+      } else if (isOtherBotRunning) {
+        title.textContent = botName.toUpperCase() + ' (IDLE · ' + activeBotName.toUpperCase() + ' RUNNING)';
+      } else if (pSt && pSt.enabled) {
+        title.textContent = 'AUTO-MINE ARMED (STANDBY)';
+      } else {
+        title.textContent = 'TG ENGINE STOPPED';
+      }
+    }
+    if (sub) {
+      if (isCurrentBotRunning) {
+        sub.textContent = isIgPool
+          ? ('Instant account drain active (' + runningConc + ' parallel slots). Direct IG Web API & cookie submit.')
+          : ('Creators are running (' + runningConc + ' parallel slots) — one browser per task, coupled cycle.');
+      } else if (isOtherBotRunning) {
+        sub.textContent = '⚡ ' + activeBotName + ' is currently running in the background (' + runningConc + ' parallel slots). Only one Telegram bot can run at a time. Stop ' + activeBotName + ' to start ' + botName + '.';
+      } else if (pSt && pSt.enabled) {
+        var m = Math.floor(pSt.wait_seconds / 60);
+        var s = pSt.wait_seconds % 60;
+        var sStr = s < 10 ? '0' + s : s;
+        sub.textContent = 'Armed for :00 refill (in ' + m + 'm ' + sStr + 's). Will auto-launch ' + (pSt.concurrency || 6) + ' parallel slots. (Click Start below if you want to run ' + botName + ' in the meantime).';
+      } else {
+        sub.textContent = 'Idle. Click Start below to launch ' + botName + ' creators.';
+      }
+    }
+    // Dynamic Action Buttons
     var stopBtn = $('tg-stop');
-    if (start)   start.style.display   = running ? 'none' : '';
-    if (stopBtn) stopBtn.style.display = running ? '' : 'none';
-    if (start) start.disabled = !!running;
+    if (start) {
+      if (isCurrentBotRunning) {
+        start.style.display = 'none';
+        start.disabled = true;
+      } else if (isOtherBotRunning) {
+        start.style.display = '';
+        start.disabled = true;
+        start.innerHTML = '<i class="fa-solid fa-lock"></i> Start Blocked (' + activeBotName + ' Active)';
+      } else {
+        start.style.display = '';
+        start.disabled = false;
+        if (isIgPool) {
+          start.innerHTML = '<i class="fa-solid fa-bolt"></i> Start PayGo Pool Drain (Manual · ' + effConc + ' Slots)';
+        } else {
+          start.innerHTML = '<i class="fa-solid fa-play"></i> Start ' + botName + ' Engine (' + effConc + ' Slots)';
+        }
+      }
+    }
+    if (stopBtn) {
+      if (isCurrentBotRunning) {
+        stopBtn.style.display = '';
+        stopBtn.innerHTML = '<i class="fa-solid fa-stop"></i> Stop ' + botName;
+      } else {
+        stopBtn.style.display = 'none';
+      }
+    }
     if (running && !state.startedAt) state.startedAt = Date.now();
     if (!running) state.startedAt = null;
   }
@@ -774,7 +952,7 @@
     if (!root) return;
     fetch('/api/tg/status', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
-        if (!s) { setStatus(false, null); return; }
+        if (!s) { setStatus(false, null, null, null); return; }
         // Follow the build manifest: a single-bot build (e.g. --bots fastpay)
         // must not stay on a 'taskly' that was never shipped.
         var eb = s.enabled_bots || [];
@@ -784,7 +962,8 @@
           updateBotBadge(state.bot);
           applyFlowGuards();
         }
-        setStatus(!!s.running, s.ig_mode);
+        var activeBot = (s.running && s.engine && s.engine.tg_bot) ? s.engine.tg_bot : null;
+        setStatus(!!s.running, s.ig_mode, activeBot, s.engine);
         renderPool(s.pool && s.pool.accounts ? s.pool.accounts : s.pool);
         // ALL KPIs are PER BOT — Taskly, PayGo and FastPay never share a number.
         // (Unassigned parked records count toward every bot: any submitter can
@@ -810,35 +989,97 @@
         }
         // SUBMITTING = in-flight slots, but only when the RUNNING bot is this page's bot.
         var runBot = s.engine && s.engine.tg_bot ? String(s.engine.tg_bot).toLowerCase() : null;
-        kpi('tg-kpi-submitting', (s.running && (!runBot || runBot === bot)) ? (s.concurrency || 0) : 0);
+        // Refresh PayGo Auto-Mining status
+        fetch('/api/tg/paygo-auto/status', { cache: 'no-store' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (j) { if (j && j.status) updatePayGoAutoUI(j.status); })
+          .catch(function () {});
       })
       .catch(function () { setStatus(false, null); });
   }
 
+  function updatePayGoAutoUI(st) {
+    if (!st) return;
+    window.__paygoAutoStatus = st;
+    var sw = $('tg-paygo-auto-sw');
+    var autoConc = $('tg-paygo-auto-conc');
+    var pill = $('tg-paygo-auto-pill');
+    var cardAuto = $('tg-paygo-card-automine');
+
+    if (sw && document.activeElement !== sw) sw.checked = !!st.enabled;
+    if (autoConc && document.activeElement !== autoConc && st.concurrency) {
+      autoConc.value = st.concurrency;
+    }
+    if (cardAuto) {
+      if (st.enabled || st.is_paygo_active) cardAuto.classList.add('is-active');
+      else cardAuto.classList.remove('is-active');
+    }
+    var concDisplay = st.concurrency || 6;
+    if (pill) {
+      if (st.is_paygo_active) {
+        pill.textContent = '⚡ Active (Draining ' + concDisplay + ' Slots)';
+        pill.style.background = 'rgba(16,185,129,0.18)';
+        pill.style.borderColor = 'rgba(16,185,129,0.4)';
+        pill.style.color = '#34d399';
+        pill.style.fontWeight = '700';
+      } else if (st.enabled) {
+        var m = Math.floor(st.wait_seconds / 60);
+        var s = st.wait_seconds % 60;
+        var sStr = s < 10 ? '0' + s : s;
+        if (state.running) {
+          pill.textContent = '🛡️ Preempting in ' + m + 'm ' + sStr + 's (' + concDisplay + ' slots)';
+        } else {
+          pill.textContent = '⏳ Armed: Refill in ' + m + 'm ' + sStr + 's (' + concDisplay + ' slots)';
+        }
+        pill.style.background = 'rgba(245,158,11,0.14)';
+        pill.style.borderColor = 'rgba(245,158,11,0.35)';
+        pill.style.color = '#fbbf24';
+        pill.style.fontWeight = '600';
+      } else {
+        pill.textContent = 'Auto-Mine Off';
+        pill.style.background = 'rgba(255,255,255,0.04)';
+        pill.style.borderColor = 'rgba(255,255,255,0.08)';
+        pill.style.color = 'var(--text-muted)';
+        pill.style.fontWeight = '600';
+      }
+    }
+    if (!state.running) {
+      setStatus(false, state.igMode);
+    }
+  }
+
   /* ---------------- log ---------------- */
-  function append(line) {
-    state.log.push('[' + new Date().toLocaleTimeString() + '] ' + line);
-    if (state.log.length > 400) state.log = state.log.slice(-300);
-    paintLog();
+  function append(line, bot) {
+    var b = (bot && botLogs[bot]) ? bot : (state.bot || 'taskly');
+    if (!botLogs[b]) botLogs[b] = [];
+    var entry = '[' + new Date().toLocaleTimeString() + '] ' + line;
+    botLogs[b].push(entry);
+    if (botLogs[b].length > 400) botLogs[b] = botLogs[b].slice(-300);
+
+    // If this log entry belongs to the currently active bot tab, repaint
+    if (b === state.bot) {
+      state.log = botLogs[b];
+      paintLog();
+    }
   }
   function paintLog() {
     var el = $('tg-log');
     if (!el) return;
-    el.textContent = state.log.join('\n');
+    el.textContent = (botLogs[state.bot] || []).join('\n');
     var auto = $('tg-autoscroll');
     if (!auto || auto.checked) el.scrollTop = el.scrollHeight;
   }
   function post(url, body) {
-    append('> POST ' + url);
+    append('> POST ' + url, state.bot);
     fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
                  body: JSON.stringify(body || {}) })
       .then(function (r) { return r.json(); })
       .then(function (j) {
-        append('< ' + JSON.stringify(j));
+        append('< ' + JSON.stringify(j), state.bot);
         if (j && (j.error || j.status === 'ERROR')) toast(j.error || 'Request failed', 'error', 12000);
         refresh();
       })
-      .catch(function (e) { append('! ' + e); toast('Request failed: ' + e, 'error', 12000); });
+      .catch(function (e) { append('! ' + e, state.bot); toast('Request failed: ' + e, 'error', 12000); });
   }
 
   /* ---------------- MTProto modal ---------------- */
@@ -879,7 +1120,7 @@
         .then(function (r) { return r.json(); })
         .then(function (j) {
           if ($('mtCredsStatus')) $('mtCredsStatus').textContent = j && j.ok ? '\u2713 Saved.' : ('\u2717 ' + ((j && j.error) || 'failed'));
-          if (j && j.ok) { append('* API credentials saved'); mtLoadCreds(); }
+          if (j && j.ok) { append('* API credentials saved', state.bot); mtLoadCreds(); }
         });
     });
     if ($('mtSendCode')) $('mtSendCode').addEventListener('click', function () {
@@ -913,10 +1154,49 @@
           if (j && j.need_password && !($('mtPassword').value || '').trim()) {
             mtMsg('This account has 2FA \u2014 enter the password and press Verify again.'); return;
           }
-          if (j && j.ok) { mtMsg('\u2713 Account added to the pool.'); append('* MTProto account added'); setTimeout(function () { mtClose(); refresh(); }, 900); }
+          if (j && j.ok) { mtMsg('\u2713 Account added to the pool.'); append('* MTProto account added', state.bot); setTimeout(function () { mtClose(); refresh(); }, 900); }
           else { mtMsg('\u2717 ' + ((j && j.error) || 'verify failed')); }
         }).catch(function (e) { mtMsg('\u2717 ' + e); });
     });
+  }
+
+  function handleTgEvent(d) {
+    if (!d) return;
+    if (d && (d.pipeline === 'meta' || d.engine === 'metainsta' || d.engine === 'meta' || d.engine === 'ig')) return;
+    if (d && d.pipeline && d.pipeline !== 'telegram') return;
+    if (d && d.type === 'throttle') {
+      hideThrottleBanner();
+      return;
+    }
+
+    var targetBot = (d && d.tg_bot) ? String(d.tg_bot).toLowerCase() : null;
+    if (!targetBot && (d.message || d.detail)) {
+      var mLower = String(d.message || d.detail || '').toLowerCase();
+      if (mLower.indexOf('[fastpay') !== -1 || mLower.indexOf('fastpay') !== -1) targetBot = 'fastpay';
+      else if (mLower.indexOf('[paygo') !== -1 || mLower.indexOf('paygo') !== -1) targetBot = 'paygo';
+      else if (mLower.indexOf('[taskly') !== -1 || mLower.indexOf('taskly') !== -1) targetBot = 'taskly';
+    }
+    if (!targetBot && state.running && state.engine && state.engine.tg_bot) {
+      targetBot = String(state.engine.tg_bot).toLowerCase();
+    }
+    if (!targetBot) targetBot = state.bot || 'taskly';
+
+    var msg = d.message || (d.type === 'slot_event' && d.detail ? ('[Slot ' + (d.slot_id || '?') + '] ' + d.detail) : null);
+    if (msg) {
+      append(String(msg), targetBot);
+      var m = String(msg);
+      if (/not a member|join the bot|start the bot|has not joined|no such bot|BOT not|chat not found/i.test(m))
+        toast('A pooled account has not joined the selected bot — open that Telegram account and press /start on the bot, then retry.', 'warn', 15000);
+      else if (/not logged in|session.*revoked|AUTH_KEY_UNREGISTERED/i.test(m))
+        toast('A Telegram session is dead — disable that profile or log in again.', 'error', 15000);
+    }
+    else if (d.type === 'loop_stopped') {
+      append('[engine] loop stopped' + (d.exit_code != null ? ' (code ' + d.exit_code + ')' : ''), targetBot);
+      refresh();
+    }
+    else if (d.type === 'paygo_auto_status' && d.status) {
+      updatePayGoAutoUI(d.status);
+    }
   }
 
   function boot() {
@@ -929,25 +1209,13 @@
         window.__tgEs.onmessage = function (ev) {
           try {
             var d = JSON.parse(ev.data);
-            if (d && (d.pipeline === 'meta' || d.engine === 'metainsta' || d.engine === 'meta' || d.engine === 'ig')) return;
-            if (d && d.pipeline && d.pipeline !== 'telegram') return;
-            if (d && d.type === 'throttle') {
-              hideThrottleBanner();
+            if (d && d.type === 'batch' && Array.isArray(d.items)) {
+              for (var i = 0; i < d.items.length; i++) {
+                try { handleTgEvent(d.items[i]); } catch (e) {}
+              }
               return;
             }
-            if (d && d.message) {
-              append(String(d.message));
-              // Actionable conditions -> toast, so they aren't missed in a long log.
-              var m = String(d.message);
-              if (/not a member|join the bot|start the bot|has not joined|no such bot|BOT not|chat not found/i.test(m))
-                toast('A pooled account has not joined the selected bot — open that Telegram account and press /start on the bot, then retry.', 'warn', 15000);
-              else if (/not logged in|session.*revoked|AUTH_KEY_UNREGISTERED/i.test(m))
-                toast('A Telegram session is dead — disable that profile or log in again.', 'error', 15000);
-            }
-            else if (d && d.type === 'loop_stopped') {
-              append('[engine] loop stopped' + (d.exit_code != null ? ' (code ' + d.exit_code + ')' : ''));
-              refresh();
-            }
+            handleTgEvent(d);
           } catch (e) {}
         };
       }

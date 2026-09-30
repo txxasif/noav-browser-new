@@ -119,8 +119,18 @@
     if (T.fastpay_pending) {
       fpTot += ' <span style="font-size:10px;color:#eab308;font-weight:500;">(+$' + Number(T.fastpay_pending).toFixed(2) + ' pend)</span>';
     }
+    var T = b.totals || {};
+    var fpTot = '$' + Number(T.fastpay || 0).toFixed(2);
+    if (T.fastpay_pending) {
+      fpTot += ' <span style="font-size:10px;color:#eab308;font-weight:500;">(+$' + Number(T.fastpay_pending).toFixed(2) + ' pend)</span>';
+    }
+    var stamp = '';
+    if (b.elapsed_s != null) {
+      stamp = ' <span class="creator-option-hint" style="margin-left:6px;">'
+        + (b.cached ? 'cached' : 'read in ' + Number(b.elapsed_s).toFixed(1) + 's') + '</span>';
+    }
     wrap.style.display = 'block';
-    wrap.innerHTML = '<div style="margin-bottom:0.6rem;font-weight:600;font-size:0.85rem;color:var(--text-main);"><i class="fa-solid fa-wallet" style="color:#229ed9;margin-right:6px;"></i> Account Balances</div>' +
+    wrap.innerHTML = '<div style="margin-bottom:0.6rem;font-weight:600;font-size:0.85rem;color:var(--text-main);"><i class="fa-solid fa-wallet" style="color:#229ed9;margin-right:6px;"></i> Account Balances' + stamp + '</div>' +
       '<table class="tgm-bal"><thead><tr><th>Account</th><th class="r">Taskly</th><th class="r">PayGo</th><th class="r">FastPay <span style="font-size:10px;font-weight:normal;opacity:0.65;">(Avail + Pend)</span></th><th class="r">Total</th></tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
       '<tfoot><tr style="font-weight:700;"><td>TOTAL</td><td class="r">$' + Number(T.taskly || 0).toFixed(2) +

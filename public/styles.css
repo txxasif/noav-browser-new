@@ -2172,6 +2172,194 @@ body {
   border-radius: var(--radius-full); padding: 5px 12px;
 }
 
+/* PayGo Special Features — Pool Drain & Auto-Mining Cards */
+.paygo-modules-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.paygo-feature-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding: 0.85rem 1.15rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.05);
+  transition: all 0.2s var(--ease-spring);
+}
+.paygo-feature-card:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+.paygo-feature-pool {
+  border-color: rgba(16, 185, 129, 0.25);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.07) 0%, rgba(18, 23, 31, 0.85) 100%);
+}
+.paygo-feature-pool:hover {
+  border-color: rgba(16, 185, 129, 0.4);
+}
+.paygo-feature-pool.is-active {
+  border-color: rgba(16, 185, 129, 0.55);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(18, 23, 31, 0.95) 100%);
+  box-shadow: 0 0 20px -4px rgba(16, 185, 129, 0.25), inset 0 1px 0 0 rgba(16, 185, 129, 0.3);
+}
+.paygo-feature-automine {
+  border-color: rgba(6, 182, 212, 0.25);
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.07) 0%, rgba(18, 23, 31, 0.85) 100%);
+}
+.paygo-feature-automine:hover {
+  border-color: rgba(6, 182, 212, 0.4);
+}
+.paygo-feature-automine.is-active {
+  border-color: rgba(6, 182, 212, 0.55);
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.12) 0%, rgba(18, 23, 31, 0.95) 100%);
+  box-shadow: 0 0 20px -4px rgba(6, 182, 212, 0.25), inset 0 1px 0 0 rgba(6, 182, 212, 0.3);
+}
+.paygo-feature-main {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  min-width: 0;
+  flex: 1;
+}
+.paygo-feature-icon {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+}
+.paygo-feature-pool .paygo-feature-icon {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: var(--accent-green);
+  box-shadow: 0 2px 10px rgba(16, 185, 129, 0.2);
+}
+.paygo-feature-automine .paygo-feature-icon {
+  background: rgba(6, 182, 212, 0.15);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  color: var(--accent-cyan);
+  box-shadow: 0 2px 10px rgba(6, 182, 212, 0.2);
+}
+.paygo-feature-text {
+  min-width: 0;
+  flex: 1;
+}
+.paygo-feature-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.paygo-feature-pool .paygo-feature-title {
+  color: #34d399;
+}
+.paygo-feature-automine .paygo-feature-title {
+  color: #38bdf8;
+}
+.paygo-feature-badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  line-height: 1.4;
+}
+.pool-badge {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.automine-badge {
+  background: rgba(6, 182, 212, 0.18);
+  color: #38bdf8;
+  border: 1px solid rgba(6, 182, 212, 0.3);
+}
+.paygo-feature-desc {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  margin-top: 3px;
+  line-height: 1.35;
+}
+.paygo-feature-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  flex-shrink: 0;
+}
+.paygo-status-pill {
+  font-size: 0.74rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.paygo-automine-config {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+  margin-top: 0.75rem;
+  padding-top: 0.7rem;
+  border-top: 1px dashed rgba(6, 182, 212, 0.22);
+  flex-wrap: wrap;
+  width: 100%;
+}
+.paygo-automine-slots {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+  color: var(--text-main);
+  font-weight: 600;
+}
+.paygo-conc-input {
+  width: 56px !important;
+  height: 28px !important;
+  padding: 2px 6px !important;
+  font-size: 0.82rem !important;
+  font-weight: 700 !important;
+  text-align: center;
+  border-radius: 6px !important;
+  border: 1px solid rgba(6, 182, 212, 0.45) !important;
+  background: rgba(6, 182, 212, 0.1) !important;
+  color: #38bdf8 !important;
+}
+.paygo-automine-explainer {
+  font-size: 0.73rem;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: rgba(6, 182, 212, 0.06);
+  border: 1px solid rgba(6, 182, 212, 0.16);
+  border-radius: 6px;
+  padding: 5px 9px;
+  flex: 1;
+  min-width: 270px;
+  line-height: 1.35;
+}
+.paygo-automine-explainer i {
+  color: var(--accent-cyan);
+  flex-shrink: 0;
+}
+
 /* Telegram Profiles — pooled-login cards (mirrors meta_auto_ai poolCard:
    line 1 = name + id + mode pill + status pill, line 2 = phone number). */
 .tg-profile-row {

@@ -89,6 +89,7 @@ SYNC_ROOT_FILES = [
     "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
     "tg_manager_cli.py",    # dashboard <-> tg.manager bridge (summary/balance/bots)
     "tg_stats.py",          # Telegram submission statistics counter
+    "tg_paygo_probe.py",    # fast non-blocking PayGo stock probe & countdown
 ]
 
 ANTI_AI_JS = """/**

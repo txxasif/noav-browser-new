@@ -359,8 +359,7 @@ class MtprotoTasklyBot:
         self.bot_target = bot_target if bot_target in TG_BOTS else "taskly"
         cfg = TG_BOTS.get(self.bot_target, TG_BOTS["taskly"])
         self.bot_name = bot_name or cfg["name"]
-        self.bot_username = cfg.get("username") or (
-            "tasklyBux_bot" if self.bot_target == "taskly" else "PayGoBot")
+        self.bot_username = cfg.get("username") or TG_BOTS["taskly"]["username"]
         self.headless = bool(headless)  # unused; kept for interface parity
         self.log = log
         self.creds = {}
@@ -646,12 +645,18 @@ class MtprotoTasklyBot:
             if failed is None:
                 for p in navigated:
                     self.log(f"[tg] Selected task: {p}")
+                # Check for limit / sold out messages from bot
+                for t in self._recent_texts(4):
+                    tl = t.lower()
+                    if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
+                        self.log(f"[tg] choose_task: {self.bot_target} hourly limit reached: {t.strip()}")
+                        return False
                 # The bot answers with the task preview, whose keyboard
-                # carries "▶️ Start". Do NOT return until it is there, or
-                # start_task will read the stale keyboard and post a
-                # literal "Start".
-                if not self._wait_for_button("start", timeout=10):
-                    self.log("[tg] ⚠️ task selected but no Start key appeared yet")
+                # carries "▶️ Start". (FastPay has no Start button — selecting task issues creds immediately).
+                if self.bot_target != "fastpay":
+                    if not self._wait_for_button("start", timeout=8):
+                        self.log(f"[tg] ⚠️ task selected but no Start key appeared (sold out or limit reached)")
+                        return False
                 return True
             self.log(f"[tg] '{want}' not available right now "
                      f"(level {failed + 1}/{len(levels)} missing; "
@@ -701,9 +706,13 @@ class MtprotoTasklyBot:
                         except Exception as exc:
                             self.log(f"[tg] inline Start click failed: {exc}")
                 if sent is None:
-                    # Last resort only — a plain "Start" is NOT a button press.
-                    sent = "Start"
-                    self._send("Start")
+                    for t in self._recent_texts(4):
+                        tl = t.lower()
+                        if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
+                            self.log(f"[tg] start_task: {self.bot_target} hourly limit reached: {t.strip()}")
+                            return {"error": "limit_reached", "detail": t.strip(), "login": "", "password": ""}
+                    self.log("[tg] start_task: 'Start' button not present on screen")
+                    return {"first_name": "", "login": "", "password": ""}
             self.log(f"[tg] start_task: pressed '{sent}'")
 
             deadline = time.time() + 15.0

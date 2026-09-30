@@ -544,6 +544,10 @@ def _is_no_task_error(err_text: str) -> bool:
         "no_pool_accounts",
         "no available ig creator accounts",
         "pool empty",
+        "no usable credentials",
+        "did not send task credentials",
+        "all tasks completed",
+        "task list is empty",
     ))
 
 
@@ -565,6 +569,9 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
     """
     with _active_slots_lock:
         _active_slots.add(slot_id)
+
+    if slot_id > 1:
+        time.sleep(min(8.0, (slot_id - 1) * 1.5))
 
     def _once():
         # Each cycle runs in its own thread → close that thread's SQLite
@@ -640,10 +647,8 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
 
             # Slot-by-slot graceful shutdown: if bot has no task or pool is empty, retire
             if _is_no_task_error(err_text):
-                # When pool is empty or bot limit is reached, stop ALL creators immediately
-                is_pool_or_limit = any(k in err_text.lower() for k in ("no_pool_accounts", "pool empty", "limit reached", "limit is reached", "hourly limit"))
-                if is_pool_or_limit:
-                    _stop.set()
+                # When pool is empty or bot has no task available, stop ALL creators immediately
+                _stop.set()
                 with _active_slots_lock:
                     _active_slots.discard(slot_id)
                     remaining = len(_active_slots)
@@ -679,6 +684,11 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
         _clear_ig_throttle()
         return "ok"
 
+    # Stagger initial slot launches so all 6 slots do not hammer the Telegram bot
+    # in the exact same millisecond.
+    if slot_id > 1:
+        time.sleep(min(8.0, (slot_id - 1) * 1.5))
+
     try:
         while not _stop.is_set():
             _wait_ig_cooldown()
@@ -689,7 +699,8 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 t.join(timeout=1.0)
             if holder.get("r") in ("done", "stopped", "no_task"):
                 break
-            for _ in range(int(delay * 2)):
+            eff_delay = 8 if use_ig_pool else int(delay)
+            for _ in range(int(eff_delay * 2)):
                 if _stop.is_set():
                     break
                 time.sleep(0.5)
