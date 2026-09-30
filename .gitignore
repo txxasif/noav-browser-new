@@ -51,6 +51,7 @@ data/*
 
 # Generated diagnostics and local biometric assets
 logs/
+client_logs/
 screens/
 selfies/
 img/

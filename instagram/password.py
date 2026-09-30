@@ -54,8 +54,31 @@ class IgPasswordMixin:
         import time as _time
         _pw_t0 = _time.time()
         self.log('[🔑] Setting password via Accounts Center (Meta profile row)…')
+        p = self._ig_tab()
+
+        # When 2FA runs first (e.g. FastPay flow), Accounts Center is still on the
+        # two_factor subpage. Because _ac_in_section matches /password_and_security/
+        # for both, _ac_section would otherwise treat two_factor as already arrived
+        # and the "Change password" row would never be found.
+        if "two_factor" in (p.url or ""):
+            self.log('[pwd] On a 2FA sub-page — returning to section list for Change password…')
+            try:
+                self._ac_leave_subpage(p)
+            except Exception:
+                pass
+            p.wait_for_timeout(1500)
+            p = self._ig_tab()
+
         self._ac_section("/password_and_security/", "Password and security")
         p = self._ig_tab()
+        if "two_factor" in (p.url or ""):
+            try:
+                self._ac_leave_subpage(p)
+            except Exception:
+                pass
+            p.wait_for_timeout(1200)
+            p = self._ig_tab()
+
         try:
             for page in self.w.context.pages:
                 if not page.is_closed() and "accountscenter.instagram.com" in (page.url or ""):
@@ -132,6 +155,9 @@ class IgPasswordMixin:
         self.log('[🔑] Navigating to Change Password form (handling account selection & OTP challenges)…')
         t_max = _time.time() + 90.0
         while _time.time() < t_max:
+            if self._is_ig_dead_end_chooser(p):
+                raise IGDeadEnd("IG saved-account chooser detected during password change (session dropped) — aborting immediately")
+
             # A. If email challenge is present, solve it calmly
             if _challenge_present():
                 self.log('[✉️] Accounts Center OTP challenge detected ("Check your email") — solving…')
@@ -146,12 +172,25 @@ class IgPasswordMixin:
             # C. If account selection screen is visible, choose Meta account
             meta_btn = None
             try:
-                meta_cands = (
-                    p.locator('div[role="button"]:has-text("Meta")').first,
-                    p.locator(f'div[role="button"]:has-text("{self.name}")').first if self.name else None,
-                )
-                for cand in meta_cands:
-                    if cand is not None and cand.count() > 0 and cand.is_visible():
+                name_cand = p.locator(f'div[role="button"]:has-text("{self.name}")').first if self.name else None
+                if name_cand is not None and name_cand.count() > 0 and name_cand.is_visible():
+                    meta_btn = name_cand
+                elif getattr(self, "email", None):
+                    email_cand = p.locator(f'div[role="button"]:has-text("{self.email}")').first
+                    if email_cand.count() > 0 and email_cand.is_visible():
+                        meta_btn = email_cand
+                if meta_btn is None:
+                    loc = p.locator('div[role="button"]:has-text("Meta"), button:has-text("Meta")')
+                    for i in range(min(loc.count(), 6)):
+                        cand = loc.nth(i)
+                        if not cand.is_visible():
+                            continue
+                        t = (cand.inner_text() or cand.get_attribute("aria-label") or "").lower()
+                        if any(bad in t for bad in ("learn more", "control how your account works", "emails from meta", "security checkup", "meta pay", "back to", "about meta", "about", "help", "article", "meta accounts are")):
+                            continue
+                        href = (cand.get_attribute("href") or "").lower()
+                        if "help" in href or cand.locator('a[href*="help"]').count() > 0:
+                            continue
                         meta_btn = cand
                         break
             except Exception:
@@ -164,11 +203,27 @@ class IgPasswordMixin:
                 except Exception:
                     meta_btn.click(force=True, timeout=2000)
                 p.wait_for_timeout(2500)
+                # Close any stray help tab opened by misclick
+                try:
+                    for extra_p in list(p.context.pages):
+                        if extra_p != p and "help" in (extra_p.url or "").lower():
+                            self.log(f'[ac] Closing stray help tab: {extra_p.url[:60]}…')
+                            extra_p.close()
+                except Exception:
+                    pass
                 continue
 
             if self._ac_choose_account(p, prefer_instagram=False):
                 self.log('[🔑] Account chosen via _ac_choose_account.')
                 p.wait_for_timeout(2500)
+                # Close any stray help tab opened by misclick
+                try:
+                    for extra_p in list(p.context.pages):
+                        if extra_p != p and "help" in (extra_p.url or "").lower():
+                            self.log(f'[ac] Closing stray help tab: {extra_p.url[:60]}…')
+                            extra_p.close()
+                except Exception:
+                    pass
                 continue
 
             # D. If still on the list, re-tap "Change password"

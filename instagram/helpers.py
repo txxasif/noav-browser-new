@@ -277,7 +277,9 @@ class IgHelpersMixin:
             pass
 
     def _dump_dom_discovery(self, p, tag: str = "discovery") -> dict:
-        """Capture screenshot and interactive DOM nodes to screens/ for telemetry and discovery."""
+        """Capture screenshot and interactive DOM nodes to screens/ for telemetry (dev only)."""
+        if str(os.environ.get("META_DEBUG_DOM", "0")).strip().lower() not in ("1", "true", "yes", "on"):
+            return {}
         screens = os.path.join(AI_DIR, "screens")
         os.makedirs(screens, exist_ok=True)
         shot_path = os.path.join(screens, f"{tag}.png")
@@ -320,111 +322,119 @@ class IgHelpersMixin:
         down so the anti-bot score decays. Caller re-enters cleanly via
         Settings afterwards. Returns True when an escape was executed.
         """
-        try:
-            tail = (p.inner_text("body") or "").lower()
-        except Exception:
-            tail = ""
-        url = p.url or ""
-        is_scraping = "we suspect automated behavior" in tail or "scraping_warning" in url
-        is_sww = "something went wrong" in tail or "page could not be loaded" in tail
-        is_unavail = "isn't available right now" in tail or "technical error" in tail
-        is_no_longer = "no longer available" in tail or "content you requested cannot be displayed" in tail
-
-        if not (is_scraping or is_sww or is_unavail or is_no_longer):
+        if getattr(self, "_in_way_out_escape", False):
             return False
-        self.log('[🚪] Way Out: trapped/challenged screen — escaping instead of hammering…')
-        if is_scraping:
-            try:
-                btn = p.locator('button:has-text("Dismiss")').first
-                if btn.count() > 0 and btn.is_visible():
-                    btn.click(force=True, timeout=2000)
-            except Exception:
-                try:
-                    p.keyboard.press("Escape")
-                except Exception:
-                    pass
-        elif is_no_longer:
-            # "This content is no longer available" modal: close via X (top-
-            # right), expanding selector coverage; if the dead page persists
-            # underneath, browser-Back once to restore the previous section
-            # instead of a full Way Out + cooldown.
-            closed = False
-            for sel in ('button[aria-label*="Close" i]', 'div[aria-label*="Close" i]',
-                        'span[aria-label*="Close" i]', 'svg[aria-label*="Close" i]',
-                        '[aria-label*="Close" i]', '[role="dialog"] button:has(svg)',
-                        'button:has-text("×")', 'div:has-text("×")'):
-                try:
-                    close_btn = p.locator(sel).first
-                    if close_btn.count() > 0 and close_btn.is_visible():
-                        try:
-                            close_btn.click(timeout=2000)
-                        except Exception:
-                            close_btn.click(force=True, timeout=2000)
-                        closed = True
-                        break
-                except Exception:
-                    continue
-            if not closed:
-                try:
-                    p.keyboard.press("Escape")
-                except Exception:
-                    pass
-            p.wait_for_timeout(2500)
-            try:
-                dead = "no longer available" in (p.inner_text("body") or "").lower()
-            except Exception:
-                dead = False
-            if dead:
-                self.log('[🔙] Dead page persists after X — browser Back once…')
-                try:
-                    p.go_back(wait_until="domcontentloaded", timeout=20000)
-                    p.wait_for_timeout(3000)
-                except Exception:
-                    pass
-
-        # Dismiss any bottom sheets or "Use the app" banner that might block bottom nav
+        self._in_way_out_escape = True
         try:
-            self._dismiss_ig_sheets(p)
-        except Exception:
-            pass
-
-        escaped = False
-        user = getattr(self, "ig_username", None) or getattr(self, "username", None)
-        prof_selectors = [
-            'a[href*="/"][role="link"]:has(svg[aria-label*="Profile" i])',
-            'svg[aria-label*="Profile" i]',
-            '[aria-label="Profile"]',
-            'a:has([aria-label="Profile"])',
-            'a[role="link"]:has(img[alt*="profile picture" i])',
-            'nav a:last-child',
-            'footer a:last-child',
-        ]
-        if user:
-            prof_selectors.insert(0, f'a[href*="/{user}/"]')
-        for sel in prof_selectors:
             try:
-                tab = p.locator(sel).first
-                if tab.count() > 0 and tab.is_visible():
-                    tab.click(force=True, timeout=3000)
-                    escaped = True
-                    break
+                tail = (p.inner_text("body") or "").lower()
+            except Exception:
+                tail = ""
+            url = p.url or ""
+            is_scraping = "we suspect automated behavior" in tail or "scraping_warning" in url
+            is_sww = "something went wrong" in tail or "page could not be loaded" in tail
+            is_unavail = "isn't available right now" in tail or "technical error" in tail
+            is_no_longer = "no longer available" in tail or "content you requested cannot be displayed" in tail
+
+            if not (is_scraping or is_sww or is_unavail or is_no_longer):
+                return False
+            self.log('[🚪] Way Out: trapped/challenged screen — escaping instead of hammering…')
+            if is_scraping:
+                try:
+                    btn = p.locator('button:has-text("Dismiss")').first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(force=True, timeout=2000)
+                except Exception:
+                    try:
+                        p.keyboard.press("Escape")
+                    except Exception:
+                        pass
+            elif is_no_longer:
+                # "This content is no longer available" modal: close via X (top-
+                # right), expanding selector coverage; if the dead page persists
+                # underneath, browser-Back once to restore the previous section
+                # instead of a full Way Out + cooldown.
+                closed = False
+                for sel in ('button[aria-label*="Close" i]', 'div[aria-label*="Close" i]',
+                            'span[aria-label*="Close" i]', 'svg[aria-label*="Close" i]',
+                            '[aria-label*="Close" i]', '[role="dialog"] button:has(svg)',
+                            'button:has-text("×")', 'div:has-text("×")'):
+                    try:
+                        close_btn = p.locator(sel).first
+                        if close_btn.count() > 0 and close_btn.is_visible():
+                            try:
+                                close_btn.click(timeout=2000)
+                            except Exception:
+                                close_btn.click(force=True, timeout=2000)
+                            closed = True
+                            break
+                    except Exception:
+                        continue
+                if not closed:
+                    try:
+                        p.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                p.wait_for_timeout(2500)
+                try:
+                    dead = "no longer available" in (p.inner_text("body") or "").lower()
+                except Exception:
+                    dead = False
+                if dead:
+                    self.log('[🔙] Dead page persists after X — browser Back once…')
+                    try:
+                        p.go_back(wait_until="domcontentloaded", timeout=20000)
+                        p.wait_for_timeout(3000)
+                    except Exception:
+                        pass
+
+            # Dismiss any bottom sheets without re-triggering SWW recursion
+            try:
+                self._dismiss_ig_sheets(p, check_sww=False)
             except Exception:
                 pass
-        if not escaped:
-            try:
-                p.goto(Urls.IG_HOME, wait_until="commit", timeout=30000)
-                escaped = True
-            except Exception:
+
+            escaped = False
+            user = getattr(self, "ig_username", None) or getattr(self, "username", None)
+            prof_selectors = [
+                'a[href*="/"][role="link"]:has(svg[aria-label*="Profile" i])',
+                'svg[aria-label*="Profile" i]',
+                '[aria-label="Profile"]',
+                'a:has([aria-label="Profile"])',
+                'a[role="link"]:has(img[alt*="profile picture" i])',
+                'nav a:last-child',
+                'footer a:last-child',
+            ]
+            if user:
+                prof_selectors.insert(0, f'a[href*="/{user}/"]')
+            for sel in prof_selectors:
                 try:
-                    p.goto(Urls.IG_HOME, wait_until="domcontentloaded", timeout=30000)
-                    escaped = True
+                    tab = p.locator(sel).first
+                    if tab.count() > 0 and tab.is_visible():
+                        tab.click(force=True, timeout=3000)
+                        escaped = True
+                        break
                 except Exception:
                     pass
-        try:
-            p.wait_for_timeout(cooldown * 1000)
-        except Exception:
-            pass
-        return escaped
+            if not escaped:
+                try:
+                    p.goto(Urls.IG_HOME, wait_until="commit", timeout=30000)
+                    escaped = True
+                except Exception:
+                    try:
+                        p.goto(Urls.IG_HOME, wait_until="domcontentloaded", timeout=30000)
+                        escaped = True
+                    except Exception:
+                        pass
+            try:
+                p.wait_for_timeout(cooldown * 1000)
+            except Exception:
+                pass
+            if self._is_ig_dead_end_chooser(p):
+                raise IGDeadEnd("Landed on saved-account chooser after escape (session dropped) — aborting immediately")
+            return escaped
+        finally:
+            self._in_way_out_escape = False
 
     def _ig_logged_in_ui(self, p) -> bool:
         """True when the page is a logged-in Instagram surface (bottom nav/feed).
@@ -751,7 +761,9 @@ class IgHelpersMixin:
         # but NOT "Use another profile"). Requiring both, then any Instagram
         # page — the old "instagram.com/accounts/" URL filter could miss a
         # chooser served from another IG route.
-        if "use another profile" not in tail or "create new account" not in tail:
+        if "use another profile" not in tail:
+            return False
+        if "create new account" not in tail and "continue" not in tail:
             return False
         return "instagram.com" in url
 
@@ -763,6 +775,15 @@ class IgHelpersMixin:
         persists, take the Way Out (Profile tab or IG root + cooldown)
         instead of further reloads.
         """
+        if getattr(self, "_in_recover_sww", False):
+            return False
+        self._in_recover_sww = True
+        try:
+            return self._do_recover_something_went_wrong(p, max_attempts=max_attempts)
+        finally:
+            self._in_recover_sww = False
+
+    def _do_recover_something_went_wrong(self, p, max_attempts: int = 3) -> bool:
         recovered = False
         for attempt in range(max_attempts):
             try:
@@ -863,7 +884,7 @@ class IgHelpersMixin:
 
         return recovered
 
-    def _dismiss_ig_sheets(self, p) -> bool:
+    def _dismiss_ig_sheets(self, p, check_sww: bool = True) -> bool:
         """Dismiss unwanted mobile bottom-sheet drawers, promo dialogs ('Add to Home screen'),
         'Get the Instagram app' interstitial ('Skip'), or 'Save your login info' bottom sheet.
         Optimized to execute in single-pass JS without burning long locator timeouts.
@@ -1266,7 +1287,7 @@ class IgHelpersMixin:
             pass
 
         # 3. Check for "Something went wrong" / "Reload page"
-        if self._recover_something_went_wrong(p, max_attempts=1):
+        if check_sww and self._recover_something_went_wrong(p, max_attempts=1):
             dismissed = True
 
         return dismissed
@@ -1314,19 +1335,21 @@ class IgHelpersMixin:
             except Exception:
                 return False
         if _still():
-            self.log('[⚠️] Scraping warning still present after Dismiss — one retry…')
+            self.log('[⚠️] Scraping warning still present after Dismiss — retry double-click…')
             try:
                 btn = p.locator('button:has-text("Dismiss"), [role="button"]:has-text("Dismiss")').first
                 if btn.count() > 0 and btn.is_visible():
-                    btn.click(force=True, timeout=3000)
+                    try:
+                        btn.dblclick(force=True, timeout=3000)
+                    except Exception:
+                        btn.click(force=True, timeout=3000)
             except Exception:
                 pass
             p.wait_for_timeout(2000)
+        if self._is_ig_dead_end_chooser(p):
+            raise IGDeadEnd("Landed on saved-account chooser after scraping warning (session dropped) — aborting immediately")
         if _still():
-            # Hand off to the caller (Way Out) instead of burning another 15s
-            # here — avoids the double-Dismiss + double cooldown (observed
-            # 2026-09-21). Return the TRUE outcome so callers can act on it.
-            self.log('[⚠️] Scraping warning persists after Dismiss — handing to Way Out.')
+            self.log('[⚠️] Scraping warning persists after Dismiss retry — handing to Way Out.')
             return False
         # Cleared: cool down so the anti-bot score decays.
         p.wait_for_timeout(15000)
@@ -1380,8 +1403,10 @@ class IgHelpersMixin:
                 self.log('[❌] Instagram: "What\'s your mobile number?" phone wall detected. Quitting session check.')
                 return False
 
-            # "Continue as <user>" saved-account chooser
-            self._try_click(p, "Continue", timeout=2500)
+            # If saved-account chooser is present, session dropped — abort immediately!
+            if self._is_ig_dead_end_chooser(p):
+                self.log('[❌] Instagram saved-account chooser detected — aborting account immediately.')
+                raise IGDeadEnd("IG saved-account chooser (logged out — session dropped) — dead end")
 
             # Email confirmation code screen
             if (

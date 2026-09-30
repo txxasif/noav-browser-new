@@ -56,6 +56,250 @@ def log(slot_id, m):
     print(f"[cookie:{slot_id}] {m}", flush=True)
 
 
+def change_ig_username_fast(cookie_str: str, target_username: str, ua: str = None) -> tuple[bool, str]:
+    """Change Instagram username via direct Web API in ~0.4s.
+
+    POST https://www.instagram.com/api/v1/web/accounts/edit/
+    Requires sessionid and csrftoken in cookie_str.
+    """
+    import json
+    import re
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    csrf_match = re.search(r"csrftoken=([^; ]+)", cookie_str)
+    csrf_token = csrf_match.group(1) if csrf_match else ""
+
+    headers = {
+        "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "X-CSRFToken": csrf_token,
+        "X-IG-App-ID": "936619743392459",
+        "Referer": "https://www.instagram.com/accounts/edit/",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Cookie": cookie_str,
+        "Accept": "*/*",
+    }
+    data = urllib.parse.urlencode({"username": target_username}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://www.instagram.com/api/v1/web/accounts/edit/",
+        data=data,
+        headers=headers,
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            try:
+                res_json = json.loads(body)
+                if res_json.get("status") == "ok":
+                    return True, "ok"
+                msg = res_json.get("message") or body[:200]
+                return False, f"IG API: {msg}"
+            except Exception:
+                return True, body[:100]
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")
+            err_json = json.loads(err_body)
+            msg = err_json.get("message") or err_body[:200]
+            return False, f"HTTP {exc.code}: {msg}"
+        except Exception:
+            return False, f"HTTP {exc.code}: {exc.reason}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
+                          tg_task=COOKIE_TASK, tg_bot="paygo"):
+    """Run ONE PayGo drain cycle using pre-created accounts from data/accounts.json.
+
+    1. Checks for available accounts in IG Creator pool.
+    2. Leases ONE TG profile.
+    3. Starts task on PayGo (📱 Create Inst (Cookies)) -> obtains target login.
+    4. Claims an account from the pool.
+    5. Changes its username to the bot's login in ~0.4s via direct IG Web API.
+    6. Submits the account's cookie string to PayGo.
+    7. Confirms registration (bot.mark_registered()).
+    8. Deletes the consumed account from store.db / accounts.json so it is not double-spent.
+    9. Records submission and releases lease.
+    """
+    import store
+
+    def _stopped():
+        try:
+            return bool(stop_event and stop_event.is_set())
+        except Exception:
+            return False
+
+    if _stopped():
+        return False, "stopped"
+
+    bot_id = str(tg_bot or "paygo")
+    task = tg_task or COOKIE_TASK
+
+    avail = store.count_ig_creator_accounts()
+    if avail <= 0:
+        log(slot_id, "[pool] No available IG Creator accounts in pool to drain.")
+        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error",
+                    "detail": "Pool empty: No IG Creator accounts left to drain."})
+        return False, "no_pool_accounts"
+    log(slot_id, f"[pool] Found {avail} available IG Creator account(s) in pool.")
+
+    bot = None
+    tg_acct = None
+    lease_stop = None
+    pool_acc = None
+    ok = False
+    rec_id = None
+
+    try:
+        if not tg_manager.usable():
+            raise RuntimeError("No logged-in Telegram profile available")
+        tg_acct = tg_manager.acquire(timeout=15, bot=bot_id)
+        if not tg_acct:
+            raise RuntimeError("No Telegram profile slot available")
+        log(slot_id, f"[pool] Leased TG {tg_acct['id']}")
+
+        clog = lambda m, _id=tg_acct["id"]: print(f"[tg:{_id}:{bot_id}] {m}", flush=True)
+        if _stopped():
+            raise RuntimeError("stopped")
+
+        bot = _make_tg_bot(tg_acct, bot_id, is_headless, clog)
+        ok_boot, msg_boot = _boot_bot(bot)
+        if not ok_boot:
+            raise RuntimeError(f"bot boot: {msg_boot}")
+
+        lease_stop = threading.Event()
+        lid = tg_acct["id"]
+
+        def _beat(_stop=lease_stop, _lid=lid):
+            while not _stop.wait(300):
+                try:
+                    tg_manager.heartbeat(_lid)
+                except Exception:
+                    break
+
+        threading.Thread(target=_beat, daemon=True).start()
+
+        if not bot.choose_task(task):
+            raise RuntimeError(f"Could not select {task} in {bot_id}")
+
+        creds = bot.start_task() or {}
+        if creds.get("error") == "limit_reached":
+            raise RuntimeError(f"PayGo hourly limit reached: {creds.get('detail', '')}")
+        login = _clean_username(creds.get("login") or "")
+        if not (login and _is_valid_ig_username(login)):
+            raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")
+        clog(f"creds: login='{login}'")
+
+        # Claim an account from the pool (skip any that turn out to be checkpointed/dead)
+        pool_acc = None
+        for _attempt in range(3):
+            cand = store.pop_ig_creator_account()
+            if not cand or not cand.get("cookies"):
+                break
+            cand_id = cand["id"]
+            cand_user = cand.get("username") or cand.get("instagram_username") or "unknown"
+            log(slot_id, f"[pool] Claimed account {cand_id} (current username: '{cand_user}')")
+            emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
+                        "detail": f"Fast IG username change: {cand_user} -> {login}…"})
+            ok_name, name_msg = change_ig_username_fast(
+                cand["cookies"], login, ua=cand.get("device_ua")
+            )
+            if ok_name:
+                pool_acc = cand
+                log(slot_id, f"[pool] Username updated to '{login}' in ~0.4s ({name_msg})")
+                break
+            # If checkpointed / suspended, permanently mark dead and try next account
+            if "checkpoint" in str(name_msg).lower() or "suspended" in str(name_msg).lower():
+                log(slot_id, f"[pool] Account {cand_id} is checkpointed/dead on IG ({name_msg}) — marking Failed.")
+                store.mark_ig_creator_dead(cand_id, name_msg)
+            else:
+                store.restore_ig_creator_account(cand_id)
+                raise RuntimeError(f"Direct IG username change failed: {name_msg}")
+
+        if not pool_acc:
+            raise RuntimeError("Failed to obtain a valid working IG Creator account from pool")
+
+        acc_id = pool_acc["id"]
+
+        # Submit cookie to PayGo
+        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
+                    "detail": "Submitting IG cookie to PayGoBot…"})
+        ok_cookie, reply = bot.submit_cookie(pool_acc["cookies"], timeout=25)
+        if not ok_cookie:
+            store.restore_ig_creator_account(acc_id)
+            pool_acc = None
+            raise RuntimeError(f"PayGo rejected cookie: {reply[:200]}")
+
+        # Register confirm
+        submitted = bot.mark_registered()
+        if not submitted:
+            log(slot_id, "register receipt not seen — one more tap…")
+            submitted = bot.mark_registered()
+        if not submitted:
+            store.restore_ig_creator_account(acc_id)
+            pool_acc = None
+            raise RuntimeError("PayGo registration not confirmed — not recording Submitted")
+
+        # Success: consume record from store so it cannot be double-spent
+        store.delete_record(acc_id)
+        if pool_acc.get("session_file") and os.path.exists(pool_acc["session_file"]):
+            try:
+                os.remove(pool_acc["session_file"])
+            except Exception:
+                pass
+        log(slot_id, f"[pool] Account {acc_id} consumed and removed from IG creator list.")
+        pool_acc = None
+
+        from tg_stats import record_submission
+        rec_id = f"tg_{int(time.time()*1000)}"
+        record_submission(bot_id or "paygo")
+        emit_event({"type": "account_submitted", "pipeline": "telegram",
+                    "tg_account": tg_acct["id"], "tg_bot": bot_id or "paygo",
+                    "account_id": rec_id})
+        emit_event({"type": "account_deleted", "account_id": acc_id})
+        emit_event({"type": "accounts_updated"})
+        log(slot_id, f"SUBMITTED ({rec_id})")
+        ok = True
+        return True, rec_id
+
+    except Exception as exc:
+        detail = str(exc)
+        log(slot_id, f"FAILED: {exc}")
+        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error",
+                    "detail": f"Cookie pool drain error: {exc}"})
+        if pool_acc is not None:
+            try:
+                store.restore_ig_creator_account(pool_acc["id"])
+            except Exception:
+                pass
+        if bot is not None:
+            try:
+                bot.cancel_task()
+            except Exception:
+                pass
+        return False, detail
+    finally:
+        try:
+            if lease_stop is not None:
+                lease_stop.set()
+        except Exception:
+            pass
+        if tg_acct:
+            try:
+                tg_manager.release(tg_acct["id"], ok=ok,
+                                   account_id=rec_id if ok else None)
+            except Exception:
+                pass
+        if bot is not None:
+            try:
+                bot.close(ok=ok)
+            except Exception:
+                pass
+
+
 def _flow_tag(bot_target, task):
     """The flow tag for a (bot, task) — 'cookie' | 'cookie_2fa' | '2fa' | None."""
     try:
@@ -71,7 +315,7 @@ def _flow_tag(bot_target, task):
 def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
                           captcha_mode="extension", mail_provider="mailtd",
                           stop_event=None, add_email=False,
-                          tg_task=None, tg_bot="paygo"):
+                          tg_task=None, tg_bot="paygo", use_ig_pool=False):
     """Run ONE cookie-family task cycle. Returns ``(ok, detail)``.
 
     Parametrized so it serves BOTH cookie flows:
@@ -79,12 +323,21 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
       * Taskly ``cookie_2fa``  — ig_join → 2fa → cookie_export → submit_cookie
     The step list comes from ``tg_flows.resolve_steps(tg_bot, task)`` (data).
 
+    When ``use_ig_pool=True``, drains pre-created accounts from the IG Creator
+    pool instead of creating fresh Meta accounts in the browser.
+
     ``add_email`` is accepted for call-site stability but IGNORED: the cookie
     flows have no email step (see ``tg_flows.FLOWS``). Import-safe for
     ``worker.py`` (lazy ``AISlotWorker`` import — no import cycle).
     """
     task = tg_task or COOKIE_TASK
     bot_id = str(tg_bot or "paygo")
+
+    if use_ig_pool:
+        return _run_pool_drain_cycle(
+            slot_id=slot_id, is_headless=is_headless,
+            stop_event=stop_event, tg_task=task, tg_bot=bot_id
+        )
     try:
         from tg_flows import resolve_steps as _resolve_steps, needs_2fa as _needs_2fa
         flow_steps = _resolve_steps(bot_id, task)
@@ -135,22 +388,12 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
             raise RuntimeError(f"Bot task window exceeded before {phase}")
 
     try:
-        # -- Shared preamble: Step 1 Meta (no lease) ----------------------
+        # -- Step 1: TG lease + task pre-flight check (fail before Meta) --
         if _stopped():
             return False, "stopped"
         if not tg_manager.usable():
             raise RuntimeError("No logged-in Telegram profile available")
-        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
-                    "detail": "Cookie cycle: Meta creation…"})
-        runner._install_screenshot_hooks()
-        runner._launch()
-        runner.open_mail()
-        runner.meta_signup()
-        runner.ensure_meta_verified()
-        log(slot_id, f"Meta created ({runner.email})")
-
-        # -- Shared preamble: Step 2 TG lease + task + creds --------------
-        tg_acct = tg_manager.acquire(timeout=60, bot=bot_id)
+        tg_acct = tg_manager.acquire(timeout=15, bot=bot_id)
         if not tg_acct:
             raise RuntimeError("No Telegram profile slot available")
         log(slot_id, f"leased {tg_acct['id']} (balance not probed — dashboard Get Balance is the source)")
@@ -178,6 +421,8 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
         if not bot.choose_task(task):
             raise RuntimeError(f"Could not select {task} in {bot_id}")
         creds = bot.start_task() or {}
+        if creds.get("error") == "limit_reached":
+            raise RuntimeError(f"PayGo hourly limit reached: {creds.get('detail', '')}")
         login = _clean_username(creds.get("login") or "")
         if not (login and _is_valid_ig_username(login) and creds.get("password")):
             raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")
@@ -192,6 +437,19 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
             runner.name = cname
         runner.tg_id = tg_acct["id"]
         runner.tg_bot = bot_id
+
+        # -- Step 2: Meta Creation ----------------------------------------
+        if _stopped():
+            raise RuntimeError("stopped")
+        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
+                    "detail": "Cookie cycle: Meta creation…"})
+        runner._install_screenshot_hooks()
+        runner._launch()
+        runner.open_mail()
+        runner.meta_signup()
+        if not runner.ensure_meta_verified():
+            raise RuntimeError("Meta account verification not confirmed on auth.meta.com — aborting before Instagram to prevent phone wall")
+        log(slot_id, f"Meta created ({runner.email})")
 
         # -- Flow steps (data-driven via tg_flows) ------------------------
         # Each step is a callable keyed by the names in tg_flows.FLOWS[flow].
@@ -261,10 +519,12 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
             if not submitted:
                 raise RuntimeError("PayGo registration not confirmed — not recording Submitted")
             runner.tg_submitted = submitted
-            runner.save_ai_result(status="Submitted", target="telegram")
-            rec_id = runner.last_record_id
+            from tg_stats import record_submission
+            rec_id = f"tg_{int(time.time()*1000)}"
+            record_submission(bot_id or "paygo")
+            runner.last_record_id = rec_id
             emit_event({"type": "account_submitted", "pipeline": "telegram",
-                        "tg_account": tg_acct["id"], "tg_bot": "paygo",
+                        "tg_account": tg_acct["id"], "tg_bot": bot_id or "paygo",
                         "account_id": rec_id})
             log(slot_id, f"SUBMITTED ({rec_id})")
             ok = True
@@ -333,11 +593,13 @@ def main():
     ap.add_argument("--task", default=COOKIE_TASK,
                     help='task label, e.g. "🍪 Create Inst (No mail)"')
     ap.add_argument("--bot", default="paygo", help="bot id: paygo | taskly")
+    ap.add_argument("--use-ig-pool", action="store_true",
+                    help="Drain pre-created accounts from the IG Creator pool")
     args = ap.parse_args()
     ok, _detail = run_cookie_cycle_once(
         slot_id=args.slot, is_headless=args.headless,
         captcha_mode=args.captcha, mail_provider=args.mail,
-        tg_task=args.task, tg_bot=args.bot)
+        tg_task=args.task, tg_bot=args.bot, use_ig_pool=args.use_ig_pool)
     return ok
 
 

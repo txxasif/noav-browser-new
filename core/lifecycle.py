@@ -72,7 +72,8 @@ class LifecycleMixin:
         self._launch()
         self.open_mail()
         self.meta_signup()                        # Meta account + email code
-        self.ensure_meta_verified()               # reCAPTCHA audio + selfie
+        if not self.ensure_meta_verified():       # reCAPTCHA audio + selfie
+            raise RuntimeError("Meta account verification not confirmed — aborting before Instagram to prevent phone wall")
         if meta_only:
             self.save_ai_result(status="MetaCreated", target=tgt)
             return self.last_record_id
@@ -96,6 +97,15 @@ class LifecycleMixin:
             self.log('[⚠️] No Instagram sessionid after join — attempting direct login…')
             if not self.ig_direct_login(self.ig_username or self.username or self.email, self.password):
                 raise RuntimeError("Instagram session not established (no sessionid); not parking")
+
+        if twofa:
+            self.log('[🔐] 2FA Key option enabled — copying Instagram 2FA key from Accounts Center…')
+            secret = self.ig_enable_2fa()
+            if not secret:
+                raise RuntimeError("Instagram 2FA key copy failed (no secret key extracted)")
+            self.twofa_secret = secret
+            self.insta_secret = secret
+            self.log(f'<font color="#00FF00"><b>[✔] 2FA key copied: {secret[:4]}****</b></font>')
 
         # Phase 2 complete: store username, password, email, and cookies
         self.save_ai_result(status="Created", target=tgt)
@@ -352,7 +362,8 @@ class LifecycleMixin:
         self._launch()
         self.open_mail()
         self.meta_signup()                        # Meta account + email confirmation code
-        self.ensure_meta_verified()               # reCAPTCHA + selfie (MetaAuto method)
+        if not self.ensure_meta_verified():       # reCAPTCHA + selfie (MetaAuto method)
+            raise RuntimeError("Meta account verification not confirmed on auth.meta.com — aborting before Instagram to prevent phone wall")
 
         # Telegram task FIRST: its Login/Password will register the account
         if self.telegram:
@@ -398,17 +409,21 @@ class LifecycleMixin:
     def save_ai_result(self, status: str = "Created", target: Optional[str] = None):
         """Export session, update SQLite/JSON store, CSV, accounts.txt and cookies."""
         created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        is_meta_only = (status == "MetaCreated")
+
         rec_id = getattr(self, "last_record_id", None) or f"ai_{int(time.time() * 1000)}_{getattr(self.w, 'slot_id', 1)}"
         self.last_record_id = rec_id
-        session_file = os.path.join(SESSIONS_DIR, f"{rec_id}.json")
-        try:
-            os.makedirs(SESSIONS_DIR, exist_ok=True)
-            if hasattr(self, "w") and getattr(self.w, "context", None):
-                dump_ig_storage_state(self.w.context, session_file)
-                self.log(f'[💾] Saved IG session storage state: {os.path.basename(session_file)}')
-        except Exception as exc:
-            self.log(f'[⚠️] Note on storage state: {exc}')
-            session_file = ""
+        session_file = ""
+        if not is_meta_only:
+            session_file = os.path.join(SESSIONS_DIR, f"{rec_id}.json")
+            try:
+                os.makedirs(SESSIONS_DIR, exist_ok=True)
+                if hasattr(self, "w") and getattr(self.w, "context", None):
+                    dump_ig_storage_state(self.w.context, session_file)
+                    self.log(f'[💾] Saved IG session storage state: {os.path.basename(session_file)}')
+            except Exception as exc:
+                self.log(f'[⚠️] Note on storage state: {exc}')
+                session_file = ""
 
         # Persist mail.td tokens so LATER phases (warm submitter contexts with
         # no mailbox tab) can re-open the SAME inbox instead of failing the
@@ -425,19 +440,21 @@ class LifecycleMixin:
                 }""") or {}
         except Exception:
             mail_tokens = {}
-        # Extract cookies before saving
+
+        # Extract cookies before saving (only for Instagram accounts; Meta Creator does not store cookies)
         cookies_list = []
         cookie_str = ""
-        try:
-            if hasattr(self, "w") and getattr(self.w, "context", None):
-                cookies_list = self.w.context.cookies()
-                ig_cookies = [c for c in cookies_list if "instagram.com" in c.get("domain", "")]
-                chosen = ig_cookies if ig_cookies else cookies_list
-                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in chosen if c.get("name") and c.get("value") is not None)
-        except Exception:
-            pass
+        if not is_meta_only:
+            try:
+                if hasattr(self, "w") and getattr(self.w, "context", None):
+                    cookies_list = self.w.context.cookies()
+                    ig_cookies = [c for c in cookies_list if "instagram.com" in c.get("domain", "")]
+                    chosen = ig_cookies if ig_cookies else cookies_list
+                    cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in chosen if c.get("name") and c.get("value") is not None)
+            except Exception:
+                pass
 
-        tgt = target or getattr(self, "target", None) or "Meta"
+        tgt = target or getattr(self, "target", None) or ("meta" if is_meta_only else "Meta")
         rec = {
             "id": rec_id,
             "target": tgt,
@@ -447,7 +464,7 @@ class LifecycleMixin:
             "password": getattr(self, "password", "") or "",
             "meta_password": getattr(self, "password", "") or "",
             "username": getattr(self, "ig_username", None) or getattr(self, "username", None) or "",
-            "instagram_username": getattr(self, "ig_username", None) or getattr(self, "username", None) or "",
+            "instagram_username": "" if is_meta_only else (getattr(self, "ig_username", None) or getattr(self, "username", None) or ""),
             "twofa_secret": getattr(self, "insta_secret", None) or "",
             "session_file": session_file,
             "tg_account": getattr(self, "tg_id", "") or "",
@@ -463,7 +480,7 @@ class LifecycleMixin:
             "device_ua": getattr(self, "device_ua", None) or "",
             "created_at": created,
             "status": status,
-            "platform": "Meta+Instagram",
+            "platform": "Meta" if is_meta_only else "Meta+Instagram",
             "cookies": cookie_str,
             "cookie": cookie_str,
         }
@@ -490,7 +507,7 @@ class LifecycleMixin:
         try:
             public_rec = {k: rec.get(k) for k in (
                 "id", "target", "status", "name", "email", "username",
-                "instagram_username", "tg_account", "tg_login", "tg_submitted",
+                "instagram_username", "twofa_secret", "tg_account", "tg_login", "tg_submitted",
                 "tg_bot", "dob", "mail_provider", "created_at", "platform", "cookies")}
             emit_event({
                 "type": "account_created",

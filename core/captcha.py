@@ -32,13 +32,37 @@ _META_IP_BLOCK_MARKERS = (
     "may be sending automated queries",
     "we can't process your request right now",
     "we cannot process your request right now",
+    "can't process your request at the moment",
+    "cannot process your request at the moment",
     "sending automated queries",
+    "unusual traffic",
 )
 
 
-def _meta_ip_blocked(body: str, url: str) -> bool:
-    """True for Meta's terminal 'automated queries' checkpoint refusal."""
-    b = (body or "").lower()
+def _meta_ip_blocked(page_or_body, url: str = "") -> bool:
+    """True for Meta's or Google's terminal 'automated queries' / 'try again later' refusal."""
+    if hasattr(page_or_body, "frames"):
+        page = page_or_body
+        u = (getattr(page, "url", None) or "").lower()
+        try:
+            frames = [page] + list(page.frames)
+        except Exception:
+            frames = [page]
+        seen = set()
+        for f in frames:
+            if id(f) in seen:
+                continue
+            seen.add(id(f))
+            try:
+                b = (f.evaluate("() => document.body ? document.body.innerText : ''") or "").lower()
+            except Exception:
+                continue
+            if any(m in b for m in _META_IP_BLOCK_MARKERS):
+                if ("confirm that you're human" in b or "checkpoint" in u or "try again later" in b or "queries" in b):
+                    return True
+        return False
+
+    b = (page_or_body or "").lower()
     u = (url or "").lower()
     if not any(m in b for m in _META_IP_BLOCK_MARKERS):
         return False
@@ -93,7 +117,7 @@ class CaptchaMixin:
             # Terminal IP/network block — bail BEFORE attempting to solve, or we
             # park the slot on a dead screen and burn the account. Raises so the
             # cycle closes the browser and moves on (IGDeadEnd semantics).
-            if _meta_ip_blocked(cur_body, cur_url):
+            if _meta_ip_blocked(p) or _meta_ip_blocked(cur_body, cur_url):
                 raise MetaCheckpointBlocked(
                     'Meta human-verification checkpoint refused the request '
                     '("Try again later" / "sending automated queries") — an '
@@ -111,9 +135,8 @@ class CaptchaMixin:
                 self.log('<font color="#00FF00"><b>[✔] Meta session authenticated on meta.ai naturally.</b></font>')
                 return True
 
-            # Intentional visit: drive to the checkpoint front door so any
-            # pending verification shows itself and gets solved now.
-            if attempt > 1 or (not is_meta_ai_success and "checkpoints" not in cur_url and not has_checkpoint):
+            # If on a checkpoint or attempt > 1 with no meta.ai success, check auth.meta.com
+            if attempt > 1 or (not is_meta_ai_success and "checkpoints" not in cur_url and not has_checkpoint and "auth.meta.com" not in cur_url):
                 try:
                     p.goto(run._META_AUTH_URL, wait_until="domcontentloaded", timeout=60000)
                     p.wait_for_timeout(4000)
@@ -206,13 +229,49 @@ class CaptchaMixin:
                 # for ~23s AFTER the selfie had already been accepted.
                 if not self._has_human_check(p):
                     self.log('<font color="#00FF00"><b>[✔] Meta human verification cleared.</b></font>')
+                    self._maybe_accept_meta_terms(p)
+                    self._wait_meta_provisioned(p, timeout=45)
                     return True
             if not self._has_human_check(p) and "checkpoints" not in (p.url or ""):
                 self.log('<font color="#00FF00"><b>[✔] Meta human verification cleared.</b></font>')
+                self._maybe_accept_meta_terms(p)
+                self._wait_meta_provisioned(p, timeout=45)
                 return True
             p.wait_for_timeout(3000)
         self.log('[⚠️] Meta human verification still pending.')
         return not self._has_human_check(p)
+
+    def _recaptcha_anchor_checked(self, anchor):
+        """Return True for both ARIA and Google checkbox state variants."""
+        if anchor is None:
+            return False
+        try:
+            cb = anchor.locator("#recaptcha-anchor").first
+            if cb.count() == 0:
+                return False
+            try:
+                aria = (cb.get_attribute("aria-checked") or "").strip().lower()
+                if aria == "true":
+                    return True
+                if aria == "false":
+                    return False
+            except Exception:
+                pass
+            return bool(cb.evaluate("""el => {
+                const aria = (el.getAttribute('aria-checked') || '').trim().toLowerCase();
+                if (aria === 'true') return true;
+                if (aria === 'false') return false;
+                const root = el.closest('.recaptcha-checkbox') || el.parentElement || el;
+                const cls = (root.className || '').toLowerCase();
+                if (cls.includes('recaptcha-checkbox-unchecked') || cls.includes('rc-anchor-checkbox-noglow')) return false;
+                if (cls.includes('recaptcha-checkbox-checked')) return true;
+                const state = [cls, root.getAttribute('data-state') || '',
+                               root.getAttribute('aria-label') || ''].join(' ').toLowerCase();
+                if (state.includes('unchecked')) return false;
+                return /(^|\\s|-)checked(\\s|$)/.test(state) || /(^|\\s|-)verified(\\s|$)/.test(state);
+            }"""))
+        except Exception:
+            return False
 
     def _captcha_order(self):
         """Solver order: dashboard pick first, the other second (auto-fallback)."""
@@ -269,21 +328,19 @@ class CaptchaMixin:
                 if solver == "extension":
                     if not self._extension_available():
                         continue
-                    # NOTE (2026-09-23): measured across telegram_20260923_010221
-                    # the JA extension solved 0/229 real challenges (only the
-                    # fast anchor auto-verify worked, 161x); the long 90s wait
-                    # was wasted. Default lowered, env-tunable.
                     try:
-                        _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "30") or 30)
+                        _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "20") or 20)
                     except Exception:
-                        _vt = 30.0
+                        _vt = 20.0
+                    self._in_extension_fallback = False
                     if self._wait_for_extension_solve(page, timeout=_vt):
                         return True
                     self.log("[⚠️] Visual AI did not finish; falling back to Audio STT…")
                 else:
-                    if self._solve_recaptcha_audio(page, tries=5):
+                    self._in_extension_fallback = (solver == "audio" and "extension" in self._captcha_order())
+                    if self._solve_recaptcha_audio(page, tries=2):
                         return True
-                    self.log("[⚠️] Audio STT did not finish; falling back to Visual AI…")
+                    self.log("[⚠️] Audio STT did not finish.")
             except Exception as exc:  # noqa: BLE001
                 self.log(f"[⚠️] {solver} solver error: {exc}")
         # Also try image captcha if present
@@ -609,11 +666,27 @@ class CaptchaMixin:
             except Exception:
                 pass
             if self._has_human_check(page):
+                if _meta_ip_blocked(page):
+                    raise MetaCheckpointBlocked(
+                        'Meta human-verification checkpoint refused the request '
+                        '("Try again later" / "sending automated queries") — an '
+                        'IP/network block, not a solvable captcha. Closing the '
+                        'browser and moving to the next account.')
                 solved = self._solve_captcha_ordered(page)
                 if solved or not self._has_human_check(page):
-                    self._try_click(page, "Continue", timeout=8000)
+                    clicked = False
+                    if hasattr(self, "_click_checkpoint_action"):
+                        clicked = self._click_checkpoint_action(page, "Continue", timeout=3000)
+                    if not clicked:
+                        self._try_click(page, "Continue", timeout=4000)
                     self._poll_checkpoint_settled(page, timeout=10)
                     continue
+                if _meta_ip_blocked(page):
+                    raise MetaCheckpointBlocked(
+                        'Meta human-verification checkpoint refused the request '
+                        '("Try again later" / "sending automated queries") — an '
+                        'IP/network block, not a solvable captcha. Closing the '
+                        'browser and moving to the next account.')
                 self._poll_checkpoint_settled(page, timeout=5)
                 continue
             break
@@ -674,11 +747,14 @@ class CaptchaMixin:
         import re as _re
         import time as _t
         deadline = _t.time() + max(15, int(timeout or 90))
+        lang_first_seen = None
         while _t.time() < deadline:
             try:
                 url = str(page.url or '')
                 # Primary (cheap, decisive): the settings page on the auth host.
-                if 'auth.meta.com' in url and '/language' in url:
+                if 'auth.meta.com' in url and ('/language' in url or '/settings' in url):
+                    if lang_first_seen is None:
+                        lang_first_seen = _t.time()
                     try:
                         html = page.content() or ''
                     except Exception:
@@ -690,9 +766,11 @@ class CaptchaMixin:
                                  + (f' name={nm.group(1)!r}' if nm else '')
                                  + ' (auth.meta.com/language, session live)')
                         return True
-                    self.log('[⏱️] Meta provisioned — reached auth.meta.com/language '
-                             '(no accountId in HTML yet).')
-                    return True
+                    # Give React up to 5s to populate accountId before accepting bare page
+                    if (_t.time() - lang_first_seen) > 5:
+                        self.log('[⏱️] Meta provisioned — reached auth.meta.com/language '
+                                 '(no accountId in HTML yet, session settled).')
+                        return True
                 # Secondary: some builds do continue into the product surface.
                 if 'facebook.com' in url and 'auth.meta.com' not in url:
                     self.log(f'[⏱️] Meta provisioned (left auth host): {url[:90]}')

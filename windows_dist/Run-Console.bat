@@ -15,7 +15,30 @@ echo   Meta Creator — Live Console Mode (Port 3070)
 echo ====================================================================
 echo.
 
-REM 1. Verify files are properly extracted (prevent running inside zip)
+REM 1. Verify files are properly extracted (prevent running inside zip or temp)
+echo "%~dp0" | findstr /i "\\AppData\\Local\\Temp\\ \\Temp\\" >nul
+if not errorlevel 1 (
+    echo.
+    echo ==============================================================================
+    echo  [ERROR] Running from a Temporary Folder / ZIP Preview!
+    echo ==============================================================================
+    echo.
+    echo  You opened Run-Console.bat directly from inside the ZIP file without extracting!
+    echo  Windows placed it in a temporary folder that will be WIPED on restart.
+    echo  Any connected Telegram sessions or accounts will be lost on reboot.
+    echo.
+    echo  HOW TO FIX:
+    echo    1. Close this window.
+    echo    2. Right-click 'MetaCreator-Windows-Portable.zip'.
+    echo    3. Select 'Extract All...' and choose a permanent destination
+    echo       e.g., C:\MetaCreator or your Desktop.
+    echo    4. Open the extracted folder and run Run-Console.bat there.
+    echo ==============================================================================
+    echo.
+    pause
+    exit /b 1
+)
+
 if not exist "%~dp0public\index.html" (
     echo [ERROR] Application files are missing or not extracted!
     echo.
@@ -43,6 +66,7 @@ set "PLAYWRIGHT_BROWSERS_PATH=%~dp0_internal\ms-playwright"
 set "PYTHON_BIN=%~dp0_internal\python.exe"
 set "PYTHONPATH=%~dp0"
 set "PATH=%~dp0bin;%~dp0_internal;%~dp0_internal\Scripts;%PATH%"
+set "META_ENABLE_RUNLOG=1"
 
 echo [*] Python Runtime:      %PYTHON_BIN%
 echo [*] Playwright Browsers: %PLAYWRIGHT_BROWSERS_PATH%

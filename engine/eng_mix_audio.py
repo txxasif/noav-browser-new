@@ -147,13 +147,22 @@ class EngineAudioMixin:
                 anchor = f
             if "bframe" in u:
                 bframe = f
-        # URL names vary between Chromium builds and can be absent behind a
-        # cross-origin fbsbx wrapper. Detect the anchor by its stable DOM id.
+        # Detect anchor and bframe by DOM IDs if URLs are proxied/masked
         if anchor is None:
             for f in frames:
                 try:
                     if f.locator("#recaptcha-anchor").count() > 0:
                         anchor = f
+                        break
+                except Exception:
+                    continue
+        if bframe is None:
+            for f in frames:
+                try:
+                    if (f.locator("#recaptcha-audio-button").count() > 0
+                            or f.locator("#rc-imageselect").count() > 0
+                            or f.locator(".rc-imageselect-challenge").count() > 0):
+                        bframe = f
                         break
                 except Exception:
                     continue
@@ -163,8 +172,16 @@ class EngineAudioMixin:
         return any("recaptcha" in (f.url or "").lower() for f in page.frames)
 
     def _google_blocked(self, page):
-        """True when Google is refusing reCAPTCHA ('automated queries' wall)."""
-        for f in page.frames:
+        """True when Google is refusing reCAPTCHA ('automated queries' / 'try again later' wall)."""
+        try:
+            frames = [page] + list(page.frames)
+        except Exception:
+            frames = [page]
+        seen = set()
+        for f in frames:
+            if id(f) in seen:
+                continue
+            seen.add(id(f))
             try:
                 t = (f.evaluate("() => document.body ? document.body.innerText : ''") or "")
             except Exception:
@@ -173,8 +190,15 @@ class EngineAudioMixin:
             if ("automated queries" in low
                     or "can't process your request" in low
                     or "cannot process your request" in low
-                    or "unusual traffic" in low):
+                    or "unusual traffic" in low
+                    or "try again later" in low):
                 return True
+            try:
+                if (f.locator(".rc-audiochallenge-error-message").count() > 0 and f.locator(".rc-audiochallenge-error-message").first.is_visible()) \
+                        or (f.locator(".rc-d-mosaic-alert").count() > 0 and f.locator(".rc-d-mosaic-alert").first.is_visible()):
+                    return True
+            except Exception:
+                pass
         return False
 
     def _human_click_recaptcha(self, page, locator, timeout=8000):
@@ -203,6 +227,12 @@ class EngineAudioMixin:
         transcribe it locally with Whisper / Vosk."""
         anchor = None
         for _ in range(5):
+            if self._google_blocked(page):
+                self.log('<font color="#FFD700"><b>[⚠️] Google blocked audio challenge on this IP ("Try again later / automated queries").</b></font>')
+                if hasattr(self, "_extension_active") and self._extension_active() and hasattr(self, "_wait_for_extension_solve"):
+                    self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
+                    return self._wait_for_extension_solve(page, timeout=30)
+                return False
             anchor, bframe = self._recaptcha_frames(page)
             if anchor is not None:
                 try:
@@ -210,7 +240,13 @@ class EngineAudioMixin:
                     if cb.count() > 0:
                         self._human_click_recaptcha(page, cb, timeout=6000)
                         page.wait_for_timeout(2000)
-                        if self._recaptcha_anchor_checked(anchor):
+                        if self._google_blocked(page):
+                            self.log('<font color="#FFD700"><b>[⚠️] Google blocked audio challenge on this IP ("Try again later / automated queries").</b></font>')
+                            if hasattr(self, "_extension_active") and self._extension_active() and hasattr(self, "_wait_for_extension_solve"):
+                                self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
+                                return self._wait_for_extension_solve(page, timeout=30)
+                            return False
+                        if self._recaptcha_anchor_checked(anchor) and not self._google_blocked(page):
                             self.log('<font color="#00FF00"><b>[✔] reCAPTCHA passed (no image challenge).</b></font>')
                             return True
                         break
@@ -219,11 +255,19 @@ class EngineAudioMixin:
             page.wait_for_timeout(1500)
         page.wait_for_timeout(2000)
 
+        # Fast exit if Google audio blocked
+        if self._google_blocked(page):
+            self.log('<font color="#FFD700"><b>[⚠️] Google blocked audio challenge on this IP ("Try again later / automated queries").</b></font>')
+            if hasattr(self, "_extension_active") and self._extension_active() and hasattr(self, "_wait_for_extension_solve"):
+                self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
+                return self._wait_for_extension_solve(page, timeout=30)
+            return False
+
         # No challenge? The checkbox may have auto-passed.
         anchor, bframe = self._recaptcha_frames(page)
         if anchor is not None:
             try:
-                if self._recaptcha_anchor_checked(anchor):
+                if self._recaptcha_anchor_checked(anchor) and not self._google_blocked(page):
                     self.log('<font color="#00FF00"><b>[✔] reCAPTCHA passed (no image challenge).</b></font>')
                     return True
             except Exception:
@@ -242,75 +286,81 @@ class EngineAudioMixin:
                     pass
 
         if bframe is None:
-            if anchor is not None and self._recaptcha_anchor_checked(anchor):
+            if anchor is not None and self._recaptcha_anchor_checked(anchor) and not self._google_blocked(page):
                 return True
             self.log('[⚠️] reCAPTCHA challenge popup did not appear.')
             return False
 
+        # Clamp tries to at most 2 to prevent dragging the slot into a 60s freeze
+        tries = min(int(tries or 2), 2)
         for i in range(tries):
             if self._google_blocked(page):
-                self.log('[⚠️] Google rate-limited audio ("automated queries"). Attempting reload…')
-                _a, bframe = self._recaptcha_frames(page)
-                if bframe is not None:
-                    self._reload_audio(page, bframe)
-                    page.wait_for_timeout(2500)
-                if self._google_blocked(page):
-                    if getattr(self, "captcha_mode", "audio") == "extension" and hasattr(self, "_wait_for_extension_solve"):
-                        self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
-                        return self._wait_for_extension_solve(page, timeout=180)
-                    self.log('<font color="#FFD700"><b>[⚠️] Google rate-limited this IP ("automated queries") — stopping auto-solve.</b></font>')
-                    return False
+                self.log('[⚠️] Google rate-limited audio ("automated queries" / "try again later").')
+                if (not getattr(self, "_in_extension_fallback", False)
+                        and hasattr(self, "_extension_active") and self._extension_active()
+                        and hasattr(self, "_wait_for_extension_solve")):
+                    self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
+                    return self._wait_for_extension_solve(page, timeout=20)
+                return False
 
             _a, bframe = self._recaptcha_frames(page)
             if bframe is None:
-                if anchor is not None and self._recaptcha_anchor_checked(anchor):
+                if anchor is not None and self._recaptcha_anchor_checked(anchor) and not self._google_blocked(page):
                     self.log('<font color="#00FF00"><b>[✔] reCAPTCHA solved!</b></font>')
                     return True
                 return False
 
             try:
-                # Realistic human delay before deciding to click audio button (1.4 - 2.4s)
-                page.wait_for_timeout(int(random.uniform(1.4, 2.4) * 1000))
+                # Realistic human delay before deciding to click audio button (0.8 - 1.5s)
+                page.wait_for_timeout(int(random.uniform(0.8, 1.5) * 1000))
                 audio_btn = bframe.locator("#recaptcha-audio-button")
                 if audio_btn.is_visible(timeout=3000):
-                    self._human_click_recaptcha(page, audio_btn, timeout=6000)
-                page.wait_for_timeout(1800)
+                    self._human_click_recaptcha(page, audio_btn, timeout=5000)
+                page.wait_for_timeout(1500)
 
                 if self._google_blocked(page):
-                    self.log('[⚠️] Google blocked audio ("automated queries"). Attempting challenge reload…')
-                    self._reload_audio(page, bframe)
-                    page.wait_for_timeout(2500)
-                    if self._google_blocked(page):
-                        if getattr(self, "captcha_mode", "audio") == "extension" and hasattr(self, "_wait_for_extension_solve"):
-                            self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
-                            return self._wait_for_extension_solve(page, timeout=180)
-                        continue
+                    self.log('[⚠️] Google blocked audio ("automated queries" / "try again later") on button click.')
+                    if (not getattr(self, "_in_extension_fallback", False)
+                            and hasattr(self, "_extension_active") and self._extension_active()
+                            and hasattr(self, "_wait_for_extension_solve")):
+                        self.log('[🧩] Audio blocked by Google; auto-falling back to Visual AI solver…')
+                        return self._wait_for_extension_solve(page, timeout=20)
+                    return False
 
                 # Ensure the clip is actually loaded (the play control).
                 try:
-                    bframe.locator(".rc-audiochallenge-play-button").first.click(timeout=2500)
+                    bframe.locator(".rc-audiochallenge-play-button").first.click(timeout=2000)
                 except Exception:
                     pass
-                page.wait_for_timeout(800)
 
+                # Poll up to 2.5s for audio URL to populate
                 src = None
-                for sel, attr in (
-                    ("#audio-source", "src"),
-                    (".rc-audiochallenge-tdownload-link", "href"),
-                    ("a[href*='audio']", "href"),
-                    ("a[href*='payload']", "href"),
-                    ("audio", "src"),
-                    ("audio source", "src"),
-                ):
-                    try:
-                        el = bframe.locator(sel).first
-                        if el.count() > 0:
-                            val = el.get_attribute(attr, timeout=2000)
-                            if val:
-                                src = val
-                                break
-                    except Exception:
-                        pass
+                for _poll in range(5):
+                    for sel, attr in (
+                        ("#audio-source", "src"),
+                        (".rc-audiochallenge-tdownload-link", "href"),
+                        ("a[href*='audio']", "href"),
+                        ("a[href*='payload']", "href"),
+                        ("audio", "src"),
+                        ("audio source", "src"),
+                    ):
+                        try:
+                            el = bframe.locator(sel).first
+                            if el.count() > 0:
+                                val = el.get_attribute(attr, timeout=500)
+                                if val and len(val) > 5:
+                                    src = val
+                                    break
+                        except Exception:
+                            pass
+                    if src or self._google_blocked(page):
+                        break
+                    page.wait_for_timeout(500)
+
+                if self._google_blocked(page):
+                    self.log('[⚠️] Google blocked audio ("try again later" banner visible).')
+                    return False
+
                 if not src:
                     self.log(f'[⚠️] audio clip not ready (attempt {i + 1}) — reloading…')
                     self._reload_audio(page, bframe)

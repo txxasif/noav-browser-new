@@ -161,7 +161,8 @@ def run_tg_coupled_cycle(
         runner._launch()
         runner.open_mail()
         runner.meta_signup()
-        runner.ensure_meta_verified()
+        if not runner.ensure_meta_verified():
+            raise RuntimeError("Meta account verification not confirmed on auth.meta.com — aborting before Instagram to prevent phone wall")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "meta_verified",
                     "detail": f"Meta account created ({runner.email})."})
 
@@ -541,8 +542,10 @@ def run_tg_coupled_cycle(
                 "not recording Submitted")
         ok = True
 
-        runner.save_ai_result(status="Submitted", target="telegram")
-        rec_id = runner.last_record_id
+        from tg_stats import record_submission
+        rec_id = f"tg_{int(time.time()*1000)}"
+        record_submission(bot_choice or "taskly")
+        runner.last_record_id = rec_id
         emit_event({"type": "account_submitted", "pipeline": "telegram",
                     "tg_account": tg_acct["id"], "tg_bot": bot_choice or "taskly",
                     "account_id": rec_id})

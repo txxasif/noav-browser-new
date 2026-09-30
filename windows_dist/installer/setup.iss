@@ -41,6 +41,8 @@ Source: "..\selfies\*"; DestDir: "{app}\selfies"; Flags: ignoreversion recursesu
 Source: "..\img\*"; DestDir: "{app}\img"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "..\server.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\pipelines\*"; DestDir: "{app}\pipelines"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "..\tg\*"; DestDir: "{app}\tg"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 ; .py* wildcard: matches worker.py (dev build) or worker.pyc (protected build).
 Source: "..\worker.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\runner.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
@@ -48,6 +50,24 @@ Source: "..\store.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesn
 Source: "..\db.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\ai_config.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ig_flow.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_bot.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_accounts.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_fingerprint.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_login.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_login_mtproto.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\mtproto_bot.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_balance.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_toggle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\warm_pool.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_tasks.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_flows.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_steps.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\run_cookie_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\run_native_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_fastpay.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_join_bot.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_manager_cli.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_stats.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\selfie.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\package.json"; DestDir: "{app}"; Flags: ignoreversion

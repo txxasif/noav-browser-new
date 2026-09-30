@@ -1,7 +1,152 @@
 'use strict';
+// --- Minimal OpenXML XLSX builder (zero-dependency, Node built-in zlib) ---
+const _crcTable = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i;
+  for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+  _crcTable[i] = c >>> 0;
+}
+function _crc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) c = _crcTable[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function _zipEntries(entries, zlibMod) {
+  const localParts = [];
+  const cdParts = [];
+  let offset = 0;
+  const zl = zlibMod || require('zlib');
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, 'utf-8');
+    const uncompressed = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data, 'utf-8');
+    const compressed = zl.deflateRawSync(uncompressed);
+    const crc = _crc32(uncompressed);
+
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0, 6);
+    localHeader.writeUInt16LE(8, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(compressed.length, 18);
+    localHeader.writeUInt32LE(uncompressed.length, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    localParts.push(localHeader, nameBuf, compressed);
+
+    const cdHeader = Buffer.alloc(46);
+    cdHeader.writeUInt32LE(0x02014b50, 0);
+    cdHeader.writeUInt16LE(20, 4);
+    cdHeader.writeUInt16LE(20, 6);
+    cdHeader.writeUInt16LE(0, 8);
+    cdHeader.writeUInt16LE(8, 10);
+    cdHeader.writeUInt16LE(0, 12);
+    cdHeader.writeUInt16LE(0, 14);
+    cdHeader.writeUInt32LE(crc, 16);
+    cdHeader.writeUInt32LE(compressed.length, 20);
+    cdHeader.writeUInt32LE(uncompressed.length, 24);
+    cdHeader.writeUInt16LE(nameBuf.length, 28);
+    cdHeader.writeUInt16LE(0, 30);
+    cdHeader.writeUInt16LE(0, 32);
+    cdHeader.writeUInt16LE(0, 34);
+    cdHeader.writeUInt16LE(0, 36);
+    cdHeader.writeUInt32LE(0, 38);
+    cdHeader.writeUInt32LE(offset, 42);
+    cdParts.push(cdHeader, nameBuf);
+
+    offset += localHeader.length + nameBuf.length + compressed.length;
+  }
+  const cdOffset = offset;
+  const cdBuf = Buffer.concat(cdParts);
+  const cdSize = cdBuf.length;
+
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdSize, 12);
+  eocd.writeUInt32LE(cdOffset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localParts, cdBuf, eocd]);
+}
+function _escapeXml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\x27/g, '&apos;');
+}
+function _colName(idx) {
+  let name = '';
+  let n = idx;
+  while (n >= 0) {
+    name = String.fromCharCode((n % 26) + 65) + name;
+    n = Math.floor(n / 26) - 1;
+  }
+  return name;
+}
+function buildXlsx(rows, zlibMod) {
+  let sheetDataXml = '';
+  for (let r = 0; r < rows.length; r++) {
+    const rowNum = r + 1;
+    sheetDataXml += `<row r="${rowNum}">`;
+    const row = rows[r];
+    for (let c = 0; c < row.length; c++) {
+      const cellRef = `${_colName(c)}${rowNum}`;
+      const val = _escapeXml(row[c]);
+      sheetDataXml += `<c r="${cellRef}" t="inlineStr"><is><t>${val}</t></is></c>`;
+    }
+    sheetDataXml += `</row>`;
+  }
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>`;
+
+  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`;
+
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>`;
+
+  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>`;
+
+  const sheet1Xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>${sheetDataXml}</sheetData>
+</worksheet>`;
+
+  return _zipEntries([
+    { name: '[Content_Types].xml', data: contentTypesXml },
+    { name: '_rels/.rels', data: rootRelsXml },
+    { name: 'xl/_rels/workbook.xml.rels', data: workbookRelsXml },
+    { name: 'xl/workbook.xml', data: workbookXml },
+    { name: 'xl/worksheets/sheet1.xml', data: sheet1Xml },
+  ], zlibMod);
+}
+
 /** Nova Browser Meta APIs (/api/meta-insta/*) + TG Classic start runs here. */
 module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
-  const { fs, path, spawn, execSync, ROOT_DIR, ACCOUNTS_JSON, ACCOUNTS_CSV, ACCOUNTS_TXT, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, loadAccounts, getAccounts, storeDbExists, runPython, syncFilesFromStore, cookieFileFor, readSettings, writeSettings, storedGlobalPassword, killProcessGroup, sseClients, recentLogs, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer } = ctx;
+  const { fs, path, zlib, spawn, execSync, ROOT_DIR, ACCOUNTS_JSON, ACCOUNTS_CSV, ACCOUNTS_TXT, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, loadAccounts, getAccounts, storeDbExists, runPython, syncFilesFromStore, cookieFileFor, readSettings, writeSettings, storedGlobalPassword, killProcessGroup, sseClients, recentLogs, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, backupUserData } = ctx;
 
   // =========================================================================
   // Nova Browser Meta APIs (/api/meta-insta/*)
@@ -10,20 +155,36 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
   // 1. GET /api/meta-insta/status (also /api/status)
   if ((pathname === '/api/meta-insta/status' || pathname === '/api/status') && req.method === 'GET') {
     (async () => {
-      const accounts = await loadAccounts();
+      const allAccounts = await loadAccounts();
+      const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
+      const metaRunning = reapDeadEngine('meta');
+      const igRunning = reapDeadEngine('ig');
+      const metaSlot = slot('meta');
+      const igSlot = slot('ig');
       sendJson(req, res, {
         status: 'SUCCESS',
         tool: 'meta-insta',
-        running: reapDeadEngine(),
+        running: metaRunning || igRunning,
+        meta_running: metaRunning,
+        ig_running: igRunning,
         engineOk: true,
-        // slot().config is nulled on /stop, so these MUST be guarded —
-        // an unguarded read crashed the server on the first status poll after
-        // any stop ("Cannot read properties of null (reading 'concurrency')").
-        concurrency: (slot().config || {}).concurrency || 1,
+        meta: {
+          running: metaRunning,
+          concurrency: (metaSlot.config || {}).concurrency || 1,
+          mode: 'meta',
+          state: metaSlot.proc ? 'RUNNING' : 'IDLE',
+        },
+        ig: {
+          running: igRunning,
+          concurrency: (igSlot.config || {}).concurrency || 1,
+          mode: 'meta-ig',
+          state: igSlot.proc ? 'RUNNING' : 'IDLE',
+        },
+        concurrency: ((metaRunning ? metaSlot.config : igSlot.config) || {}).concurrency || 1,
         total_accounts: accounts.length,
         created: accounts.length,
-        mode: (slot().config || {}).mode || 'meta',
-        state: slot().proc ? 'RUNNING' : 'IDLE'
+        mode: metaRunning ? 'meta' : (igRunning ? 'meta-ig' : 'meta'),
+        state: (metaRunning || igRunning) ? 'RUNNING' : 'IDLE'
       });
     })();
     return true;
@@ -32,7 +193,8 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
   // 2. GET /api/meta-insta/accounts (also /api/accounts)
   if ((pathname === '/api/meta-insta/accounts' || pathname === '/api/accounts') && req.method === 'GET') {
     (async () => {
-      const accounts = await loadAccounts();
+      const allAccounts = await loadAccounts();
+      const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
       sendJson(req, res, {
         status: 'SUCCESS',
         accounts: accounts
@@ -83,7 +245,8 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
   if (pathname === '/api/meta-insta/export-combo' && req.method === 'GET') {
     (async () => {
       const kind = (urlObj.searchParams.get('kind') || '').trim().toLowerCase() === 'ig' ? 'ig' : 'meta';
-      const accounts = await loadAccounts();
+      const allAccounts = await loadAccounts();
+      const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
       const isIg = (a) => String((a && a.status) || '') !== 'MetaCreated';
       const lines = [];
       for (const a of accounts) {
@@ -113,6 +276,32 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         'Content-Disposition': `attachment; filename="${fname}"`
       });
       res.end(lines.join('\n'));
+    })();
+    return true;
+  }
+
+  // 2c2. GET /api/meta-insta/export-xlsx — 2FA accounts XLSX export (Telegram Bot format: Username, Password, 2FA Key)
+  if (pathname === '/api/meta-insta/export-xlsx' && req.method === 'GET') {
+    (async () => {
+      await syncFilesFromStore();
+      const allAccounts = await loadAccounts();
+      const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
+      const isIg = (a) => String((a && a.status) || '') !== 'MetaCreated';
+      const rows = [];
+      for (const a of accounts) {
+        if (!isIg(a)) continue;
+        const key = String(a.twofa_secret || a.twofa_key || a.totp_secret || '').trim();
+        if (!key) continue;
+        const username = a.instagram_username || a.username || '';
+        const password = a.password || '';
+        rows.push([username, password, key]);
+      }
+      const xlsxBuf = buildXlsx(rows, zlib);
+      res.writeHead(200, {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': 'attachment; filename="instagram_accounts_2fa.xlsx"'
+      });
+      res.end(xlsxBuf);
     })();
     return true;
   }
@@ -172,22 +361,30 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
     return true;
   }
   if ((pathname === '/api/meta-insta/start' || pathname === '/api/loop/start') && req.method === 'POST') {
-    if (reapDeadEngine() || slot().inFlight) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ERROR', error: 'Meta creator is already actively running.' }));
-      return true;
-    }
-
-    slot().inFlight = true;
-    const releaseStart = () => { slot().inFlight = false; };
     let body = '';
     req.on('data', chunk => { body += chunk; });
-    req.on('aborted', releaseStart);
     req.on('end', async () => {
       let opts = { concurrency: 1, target: 0, delay: 4, headless: true, mail: 'mailtd', captcha: 'extension', start_stagger_ms: null };
       try {
         if (body) opts = Object.assign(opts, JSON.parse(body));
       } catch (e) {}
+
+      // Dashboard workspaces: 'meta' = Meta-only, 'meta-ig' = full Meta -> IG join.
+      const mode = (opts.mode === 'meta-ig') ? 'meta-ig' : 'meta';
+      const targetSlot = (mode === 'meta-ig') ? 'ig' : 'meta';
+      const currentSlot = slot(targetSlot);
+
+      if (reapDeadEngine(targetSlot) || currentSlot.inFlight) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'ERROR',
+          error: `${targetSlot === 'ig' ? 'Instagram' : 'Meta'} creator is already actively running.`
+        }));
+        return;
+      }
+
+      currentSlot.inFlight = true;
+      const releaseStart = () => { currentSlot.inFlight = false; };
 
       // License Gate: Ensure machine has active license before starting automation
       let licCheck;
@@ -242,18 +439,16 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       }
       const mail = 'mailtd';
       const captcha = opts.captcha_mode || opts.captcha || 'extension';
-      // Dashboard workspaces: 'meta' = Meta-only, 'meta-ig' = full Meta -> IG join.
-      // slot().config + status events keep the dashboard-facing mode ('meta'),
-      // but the worker only treats 'meta-only' as Meta-only, so translate here.
-      const mode = (opts.mode === 'meta-ig') ? 'meta-ig' : 'meta';
+      // Worker expects 'meta-only' for Meta-only, 'meta-ig' for Meta -> IG
       const workerMode = (mode === 'meta-ig') ? 'meta-ig' : 'meta-only';
+      // 2FA Key extraction: strictly enabled only for IG Creator when explicitly checked
+      const twofa = (mode === 'meta-ig') && Boolean(opts.twofa);
       // Global password: request override, else the saved dashboard setting.
-      // Passed via env (never argv) so it can't leak into logs or `ps`.
       const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
       // Optional fixed username (workspace field). Also env-only.
       const newUsername = String(opts.new_username || '').trim().slice(0, 64);
 
-      slot().config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs };
+      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa };
 
       const args = [
         path.join(ROOT_DIR, 'worker.py'),
@@ -265,9 +460,10 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         '--mode', workerMode
       ];
       if (headless) args.push('--headless');
+      if (twofa) args.push('--twofa');
       if (startStaggerMs !== null) args.push('--start-stagger-ms', String(startStaggerMs));
 
-      console.log(`[MetaCreator] Starting worker loop: ${PYTHON_BIN} ${args.join(' ')}`);
+      console.log(`[MetaCreator] Starting ${targetSlot} worker loop: ${PYTHON_BIN} ${args.join(' ')}`);
 
       const isWin = process.platform === 'win32';
       const defaultBrowsersPath = fs.existsSync(path.join(ROOT_DIR, '_internal', 'ms-playwright'))
@@ -275,16 +471,13 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         : path.join(ROOT_DIR, 'engine', 'ms-playwright');
 
       try {
-        resetWorkerBuffer();
-        slot().proc = spawn(PYTHON_BIN, args, {
+        resetWorkerBuffer(targetSlot);
+        currentSlot.proc = spawn(PYTHON_BIN, args, {
           cwd: ROOT_DIR,
           detached: !isWin,
           windowsHide: true,
           env: Object.assign({}, process.env, {
             PYTHONUNBUFFERED: '1',
-            // Force UTF-8 for the worker's stdout/stderr. On Windows the pipe
-            // to Node otherwise uses the locale code page and non-ASCII log
-            // characters (—, emoji) arrive mangled as "�".
             PYTHONUTF8: '1',
             PYTHONIOENCODING: 'utf-8',
             PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || defaultBrowsersPath,
@@ -294,88 +487,111 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         });
       } catch (spawnErr) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ERROR', error: 'Failed to spawn worker: ' + spawnErr.message }));
+        res.end(JSON.stringify({ status: 'ERROR', error: `Failed to spawn ${targetSlot} worker: ` + spawnErr.message }));
         releaseStart();
         return;
       }
 
       broadcastEvent({
         type: 'status',
+        pipeline: 'meta',
+        engine: targetSlot,
         running: true,
         concurrency,
         target,
         headless,
+        mode,
+        twofa
+      });
+      broadcastEvent({
+        type: 'loop_started',
+        pipeline: 'meta',
+        engine: targetSlot,
+        concurrency,
         mode
       });
 
       const rlHandle = ctx.runlog ? ctx.runlog.start(mode === 'meta' ? 'metainsta' : 'instagram', { argv: args }) : null;
-      slot().runlog = rlHandle;
+      currentSlot.runlog = rlHandle;
 
-      slot().proc.stdout.on('data', data => {
+      currentSlot.proc.stdout.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
-        // Child-process stdout is a byte stream; a JSON event can be split
-        // across chunks. Keep the partial line instead of dropping/corrupting
-        // it during a high-volume parallel run.
-        for (const line of feedWorkerStdout(data)) consumeWorkerLine(line);
+        for (const line of feedWorkerStdout(data, targetSlot)) consumeWorkerLine(line, targetSlot);
       });
 
-      slot().proc.stderr.on('data', data => {
+      currentSlot.proc.stderr.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
         const text = data.toString('utf-8').trim();
         if (!text) return;
-        // Playwright's node driver spews this whenever a browser/driver socket
-        // closes (e.g. on Stop, or a crashed browser). It's noise, not
-        // actionable — don't flood the dashboard with it.
         if (/socket\.send\(\) raised exception\.?/i.test(text)) return;
-        console.error(`[Worker STDERR] ${text}`);
-        broadcastEvent({ type: 'log', message: `[STDERR] ${text}` });
+        console.error(`[${targetSlot.toUpperCase()} STDERR] ${text}`);
+        broadcastEvent({ type: 'log', pipeline: 'meta', engine: targetSlot, message: `[STDERR] ${text}` });
       });
 
-      slot().proc.on('error', spawnErr => {
-        console.error(`[MetaCreator] Worker process error: ${spawnErr.message}`);
-        broadcastEvent({ type: 'log', message: `[Worker] ${spawnErr.message}` });
+      currentSlot.proc.on('error', spawnErr => {
+        console.error(`[MetaCreator] ${targetSlot} worker process error: ${spawnErr.message}`);
+        broadcastEvent({ type: 'log', pipeline: 'meta', engine: targetSlot, message: `[Worker] ${spawnErr.message}` });
         releaseStart();
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
-        if (slot().proc) slot().proc = null;
+        if (currentSlot.proc) currentSlot.proc = null;
       });
 
-      slot().proc.on('close', code => {
-        flushWorkerBuffer();
+      currentSlot.proc.on('close', code => {
+        flushWorkerBuffer(targetSlot);
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
-        console.log(`[MetaCreator] Loop process exited with code ${code}`);
-        broadcastEvent({ type: 'loop_stopped', exit_code: code });
-        broadcastEvent({ type: 'status', running: false });
-        slot().proc = null;
-        slot().inFlight = false;
+        console.log(`[MetaCreator] ${targetSlot} loop process exited with code ${code}`);
+        broadcastEvent({ type: 'loop_stopped', pipeline: 'meta', engine: targetSlot, exit_code: code, mode });
+        broadcastEvent({ type: 'status', pipeline: 'meta', engine: targetSlot, running: false, mode });
+        currentSlot.proc = null;
+        currentSlot.inFlight = false;
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'SUCCESS', message: `Meta creator started with ${concurrency} concurrent windows.` }));
+      res.end(JSON.stringify({ status: 'SUCCESS', message: `${targetSlot === 'ig' ? 'Instagram' : 'Meta'} creator started with ${concurrency} concurrent windows.` }));
       releaseStart();
     });
     return true;
   }
   // 5. POST /api/meta-insta/stop (also /api/loop/stop)
   if ((pathname === '/api/meta-insta/stop' || pathname === '/api/loop/stop') && req.method === 'POST') {
-    if (slot().inFlight && !slot().proc) {
-      res.writeHead(409, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ERROR', error: 'Start is still being initialized; try Stop again in a moment.' }));
-      return true;
-    }
-    if (slot().proc) {
-      killProcessGroup(slot().proc, 'SIGINT');
-      const proc = slot().proc;
-      setTimeout(() => {
-        if (slot().proc === proc) {
-          killProcessGroup(proc, 'SIGKILL');
-          slot().proc = null;
+    let stopBody = '';
+    req.on('data', chunk => { stopBody += chunk; });
+    req.on('end', () => {
+      let opts = {};
+      try { if (stopBody) opts = JSON.parse(stopBody); } catch (e) {}
+      const kind = (opts.kind || urlObj.searchParams.get('kind') || (opts.mode === 'meta-ig' ? 'ig' : (opts.mode === 'meta' ? 'meta' : ''))).trim();
+
+      const stopSlot = (targetName) => {
+        const s = slot(targetName);
+        if (!s) return;
+        if (s.inFlight && !s.proc) {
+          s.inFlight = false;
         }
-      }, 3000);
-    }
-    broadcastEvent({ type: 'loop_stopped', message: 'Engine stopped by user request.' });
-    broadcastEvent({ type: 'status', running: false });
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'SUCCESS', message: 'Engine stopped.' }));
+        if (s.proc) {
+          killProcessGroup(s.proc, 'SIGINT');
+          const proc = s.proc;
+          setTimeout(() => {
+            if (s.proc === proc) {
+              killProcessGroup(proc, 'SIGKILL');
+              s.proc = null;
+            }
+          }, 3000);
+        }
+        broadcastEvent({ type: 'loop_stopped', pipeline: 'meta', engine: targetName, message: `${targetName === 'ig' ? 'Instagram' : 'Meta'} engine stopped by user request.` });
+        broadcastEvent({ type: 'status', pipeline: 'meta', engine: targetName, running: false, mode: targetName === 'ig' ? 'meta-ig' : 'meta' });
+      };
+
+      if (kind === 'meta' || kind === 'ig') {
+        stopSlot(kind);
+      } else {
+        stopSlot('meta');
+        stopSlot('ig');
+        stopSlot('metainsta');
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'SUCCESS', message: `${kind ? (kind === 'ig' ? 'Instagram' : 'Meta') : 'Engine'} stopped.` }));
+    });
     return true;
   }
 
@@ -524,6 +740,28 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
     (async () => {
       await syncFilesFromStore();
 
+      if (format === 'xlsx') {
+        const allAccounts = await loadAccounts();
+        const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
+        const isIg = (a) => String((a && a.status) || '') !== 'MetaCreated';
+        const rows = [];
+        for (const a of accounts) {
+          if (!isIg(a)) continue;
+          const key = String(a.twofa_secret || a.twofa_key || a.totp_secret || '').trim();
+          if (!key) continue;
+          const username = a.instagram_username || a.username || '';
+          const password = a.password || '';
+          rows.push([username, password, key]);
+        }
+        const xlsxBuf = buildXlsx(rows, zlib);
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': 'attachment; filename="instagram_accounts_2fa.xlsx"'
+        });
+        res.end(xlsxBuf);
+        return;
+      }
+
       if (format === 'txt') {
         if (fs.existsSync(ACCOUNTS_TXT)) {
           res.writeHead(200, {
@@ -532,7 +770,8 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
           });
           fs.createReadStream(ACCOUNTS_TXT).pipe(res);
         } else {
-          const accounts = getAccounts();
+          const allAccounts = getAccounts();
+          const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
           const txt = accounts.map(a => `${a.instagram_username || a.username || a.email}:${a.password || ''}`).join('\n');
           res.writeHead(200, {
             'Content-Type': 'text/plain; charset=utf-8',
@@ -544,7 +783,8 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       }
 
       if (kind === 'ig') {
-        const accounts = getAccounts();
+        const allAccounts = getAccounts();
+        const accounts = allAccounts.filter(a => (a.target || '') !== 'telegram');
         const isIg = (a) => String((a && a.status) || '') !== 'MetaCreated'
           && (a && (a.instagram_username || String(a.platform || '').match(/Instagram/i)));
         const rows = ['username,password,cookies,combo'];

@@ -159,26 +159,8 @@ class EngineMetaMixin:
         return None
 
     def meta_ai_signup_funnel(self, page):
-        """Adaptive wrapper around the meta.ai low-fraud funnel.
-
-        Skips the funnel for a cooldown after repeated failures (throttled IP),
-        then delegates to :meth:`_meta_ai_signup_funnel_inner`.
-        """
-        global _funnel_fail_streak, _funnel_cooldown_until
-        if time.time() < _funnel_cooldown_until:
-            self.log('[⏭️] meta.ai funnel cooling down after repeated throttles — using the direct auth entry.')
-            return False
-        ok = self._meta_ai_signup_funnel_inner(page)
-        if ok:
-            _funnel_fail_streak = 0
-            _funnel_cooldown_until = 0.0
-        else:
-            _funnel_fail_streak += 1
-            if _funnel_fail_streak >= _FUNNEL_FAIL_LIMIT:
-                _funnel_cooldown_until = time.time() + _FUNNEL_COOLDOWN_SECS
-                self.log(f'[⏭️] meta.ai funnel failed {_funnel_fail_streak}x — pausing it for '
-                         f'{_FUNNEL_COOLDOWN_SECS}s (direct auth entry meanwhile).')
-        return ok
+        """Always enter via meta.ai -> Sign up modal (low-fraud consumer funnel)."""
+        return self._meta_ai_signup_funnel_inner(page)
 
     def _meta_ai_signup_funnel_inner(self, page):
         """PC low-fraud entry: meta.ai -> Sign up modal -> Use mobile number or email address.

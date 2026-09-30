@@ -115,11 +115,17 @@ def session_ok(rec: dict) -> bool:
     """
     if record_mode(rec) == "mtproto":
         try:
-            from mtproto_bot import has_mtproto_session
-            return has_mtproto_session(rec.get("session_file") or "")
+            from mtproto_bot import has_mtproto_session, session_file
+            sess = rec.get("session_file")
+            if not sess or not os.path.isfile(sess):
+                sess = session_file(str(rec.get("id") or ""))
+            return has_mtproto_session(sess)
         except Exception:
             return False
-    return has_session(rec.get("profile_dir", ""))
+    pdir = rec.get("profile_dir")
+    if not pdir or not os.path.isdir(pdir):
+        pdir = profile_dir(str(rec.get("id") or ""))
+    return has_session(pdir)
 
 
 def _profile_locked(dir_path: str) -> bool:

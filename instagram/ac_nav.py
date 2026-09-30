@@ -1279,12 +1279,22 @@ class IgAcNavMixin:
                     if not btn.is_visible():
                         continue
                     t = (btn.inner_text() or btn.get_attribute("aria-label") or "").lower()
-                    if any(bad in t for bad in ("emails from meta", "security checkup", "meta pay", "back to")):
+                    if any(bad in t for bad in ("learn more", "control how your account works", "emails from meta", "security checkup", "meta pay", "back to", "about meta", "about", "help", "article", "meta accounts are")):
+                        continue
+                    href = (btn.get_attribute("href") or "").lower()
+                    if "help" in href or btn.locator('a[href*="help"]').count() > 0:
                         continue
                     if not self._tap_or_click(p, btn):
                         self._human_click(p, btn, 5000)
                     self.log(f'[ac] chose Meta account row ({t[:40]}...)')
                     p.wait_for_timeout(3000)
+                    # Close any stray help tab opened by misclick
+                    try:
+                        for extra_p in list(p.context.pages):
+                            if extra_p != p and "help" in (extra_p.url or "").lower():
+                                extra_p.close()
+                    except Exception:
+                        pass
                     return True
             except Exception:
                 pass

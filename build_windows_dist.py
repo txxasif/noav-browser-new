@@ -88,6 +88,7 @@ SYNC_ROOT_FILES = [
     "tg_fastpay.py",        # FastPay2025 IG-2FA payout runner (key -> code -> Confirm)
     "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
     "tg_manager_cli.py",    # dashboard <-> tg.manager bridge (summary/balance/bots)
+    "tg_stats.py",          # Telegram submission statistics counter
 ]
 
 ANTI_AI_JS = """/**

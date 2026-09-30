@@ -21,47 +21,74 @@
   function botLogo(id) { return id === 'paygo' ? 'paygo' : (id === 'fastpay' ? 'fastpay' : 'taskly'); }
 
   function botCard(b) {
-    var busyTxt = b.busy_other ? (' \u00b7 ' + b.busy_other + ' busy elsewhere') : '';
-    return '<div class="tgm-bot">' +
-      '<h4><img src="img/bot_logo/' + botLogo(b.id) + '.png" width="22" height="22" ' +
-        'style="border-radius:50%;object-fit:cover;" onerror="this.style.display=\'none\'" alt=""> ' +
-        esc(b.name) + '</h4>' +
-      '<div class="tgm-sub">@' + esc(b.username) + (b.flows ? ' \u00b7 ' + esc(b.flows.join('/')) : '') + '</div>' +
-      '<div class="tgm-metrics">' +
-        '<div class="tgm-metric"><b>' + (b.free || 0) + '</b>free</div>' +
-        '<div class="tgm-metric"><b>' + (b.connected || 0) + '</b>connected</div>' +
-        '<div class="tgm-metric"><b>' + (b.tasks ? b.tasks.length : 0) + '</b>tasks</div>' +
+    var busyTxt = b.busy_other ? (b.busy_other + ' busy elsewhere') : '';
+    var botColor = b.id === 'paygo' ? '#f59e0b' : (b.id === 'fastpay' ? '#10b981' : '#229ED9');
+    var flowLabel = (b.flows || []).join('/') || '2fa';
+    var taskChips = (b.tasks || []).map(function (t) {
+      return '<span class="tgm-task-chip">' + esc(t) + '</span>';
+    }).join(' ');
+    return '<div class="tgm-bot" style="--bot-accent:' + botColor + ';">' +
+      '<div class="tgm-bot-top">' +
+        '<div class="tgm-bot-identity">' +
+          '<img src="img/bot_logo/' + botLogo(b.id) + '.png" class="tgm-bot-avatar" onerror="this.style.display=\'none\'" alt="">' +
+          '<div>' +
+            '<h4 class="tgm-bot-name">' + esc(b.name) + '</h4>' +
+            '<div class="tgm-bot-handle">@' + esc(b.username) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<span class="tgm-flow-badge" style="border-color:' + botColor + '40;color:' + botColor + ';background:' + botColor + '18;">' +
+          esc(flowLabel.toUpperCase()) +
+        '</span>' +
       '</div>' +
-      '<div class="tgm-sub" style="margin-top:6px;">' + esc((b.tasks || []).join(' \u00b7 ')) + busyTxt + '</div>' +
+      '<div class="tgm-metrics">' +
+        '<div class="tgm-metric"><span class="tgm-m-num">' + (b.free || 0) + '</span><span class="tgm-m-lbl">Free</span></div>' +
+        '<div class="tgm-metric"><span class="tgm-m-num">' + (b.connected || 0) + '</span><span class="tgm-m-lbl">Connected</span></div>' +
+        '<div class="tgm-metric"><span class="tgm-m-num">' + (b.tasks ? b.tasks.length : 0) + '</span><span class="tgm-m-lbl">Tasks</span></div>' +
+      '</div>' +
+      (taskChips ? '<div class="tgm-tasks-wrap">' + taskChips + (busyTxt ? '<span class="tgm-busy-tag">\u00b7 ' + esc(busyTxt) + '</span>' : '') + '</div>' : '') +
     '</div>';
   }
 
   function acctRow(a) {
-    var dot = !a.logged_in ? 'dead' : (!a.enabled ? 'off' : (a.status === 'busy' ? 'busy' : ''));
-    var statusPill = a.status === 'busy'
-      ? '<span class="profile-status-badge" style="background:rgba(245,158,11,.18);color:var(--accent-amber);border:1px solid rgba(245,158,11,.35);">Busy' +
-        (a.busy_bot ? ' \u00b7 ' + esc(a.busy_bot) : '') + '</span>'
-      : (a.logged_in
-          ? '<span class="profile-status-badge badge-active">Ready</span>'
-          : '<span class="profile-status-badge badge-inactive">Not logged in</span>');
+    var avatarCls = !a.logged_in ? 'dead' : (a.status === 'busy' ? 'busy' : (!a.enabled ? 'off' : ''));
+    var statusPill = '';
+    if (a.status === 'busy') {
+      statusPill = '<span class="profile-status-badge badge-warn">Busy' +
+        (a.busy_bot ? ' \u00b7 ' + esc(a.busy_bot) : '') + '</span>';
+    } else if (!a.logged_in) {
+      statusPill = '<span class="profile-status-badge badge-rose">Offline</span>';
+    } else if (!a.enabled) {
+      statusPill = '<span class="profile-status-badge badge-inactive">Disabled</span>';
+    }
+    // "ready button remove it": no status pill shown when account is ready
+
     var meta = [];
-    if (a.phone) meta.push(esc(a.phone));
+    if (a.phone) meta.push('<span class="tgm-phone"><i class="fa-solid fa-phone" style="font-size:0.62rem;opacity:0.7;margin-right:3px;"></i>' + esc(a.phone) + '</span>');
     meta.push(esc((a.mode || 'web').toUpperCase()));
     meta.push((a.tasks_done || 0) + ' tasks');
     return '<div class="tgm-acct' + (a.status === 'busy' ? ' tgm-busy' : '') + '">' +
-      '<div class="tgm-acct-main">' +
-        '<span class="tgm-dot ' + dot + '"></span>' +
-        '<div><div class="tgm-acct-title"><strong>' + esc(a.label || a.id) + '</strong>' +
-          '<span class="badge-pill">' + esc(a.id) + '</span>' + statusPill + '</div>' +
-          '<div class="tgm-acct-meta">' + meta.join(' \u00b7 ') + '</div></div>' +
+      '<div class="tgm-acct-top">' +
+        '<div class="tgm-avatar ' + avatarCls + '" title="' + esc(a.mode || 'mtproto') + '"><i class="fa-brands fa-telegram"></i></div>' +
+        '<div class="tgm-acct-info">' +
+          '<div class="tgm-acct-title">' +
+            '<strong>' + esc(a.label || a.id) + '</strong>' +
+            '<span class="badge-pill">' + esc(a.id) + '</span>' +
+            statusPill +
+          '</div>' +
+          '<div class="tgm-acct-meta">' + meta.join(' <span style="opacity:0.35;">\u00b7</span> ') + '</div>' +
+        '</div>' +
       '</div>' +
-      '<div class="tgm-acct-actions">' +
-        '<span class="creator-option-hint">' + (a.enabled ? 'Enabled' : 'Disabled') + '</span>' +
-        '<label class="switch" title="' + (a.enabled ? 'Disable (stops receiving tasks)' : 'Enable for tasks') + '">' +
-          '<input type="checkbox" data-tgm-enable="' + esc(a.id) + '"' + (a.enabled ? ' checked' : '') +
-          (a.status === 'busy' ? ' disabled' : '') + '><span class="slider"></span></label>' +
-        '<button type="button" class="btn btn-sm btn-danger" data-tgm-del="' + esc(a.id) + '"' +
-          ' title="Remove this profile and its session"><i class="fa-solid fa-trash-can"></i></button>' +
+      '<div class="tgm-acct-footer">' +
+        '<div class="tgm-acct-status-wrap">' +
+          '<span class="tgm-status-lbl">' + (a.enabled ? 'Enabled' : 'Disabled') + '</span>' +
+        '</div>' +
+        '<div class="tgm-acct-actions">' +
+          '<label class="switch" title="' + (a.enabled ? 'Disable (stops receiving tasks)' : 'Enable for tasks') + '">' +
+            '<input type="checkbox" data-tgm-enable="' + esc(a.id) + '"' + (a.enabled ? ' checked' : '') +
+            (a.status === 'busy' ? ' disabled' : '') + '><span class="slider"></span></label>' +
+          '<button type="button" class="btn-icon-danger" data-tgm-del="' + esc(a.id) + '"' +
+            ' title="Remove this profile and its session"><i class="fa-solid fa-trash-can"></i></button>' +
+        '</div>' +
       '</div>' +
     '</div>';
   }
@@ -73,18 +100,31 @@
     var rows = b.accounts.map(function (a) {
       var t = (a.bots || []).filter(function (x) { return x.target === 'taskly'; })[0];
       var p = (a.bots || []).filter(function (x) { return x.target === 'paygo'; })[0];
+      var f = (a.bots || []).filter(function (x) { return x.target === 'fastpay'; })[0];
       var money = function (x) { return x && x.ok ? '$' + Number(x.amount || 0).toFixed(2) : '\u2014'; };
+      var fMoney = function (x) {
+        if (!x || !x.ok) return '\u2014';
+        var s = '$' + Number(x.amount || 0).toFixed(2);
+        if (x.pending) {
+          s += ' <span class="badge-pill" style="margin-left:5px;font-size:10px;padding:1px 5px;background:rgba(234,179,8,0.12);color:#eab308;border:1px solid rgba(234,179,8,0.25);" title="Pending Balance: $' + Number(x.pending).toFixed(2) + '">+' + Number(x.pending).toFixed(2) + ' pend</span>';
+        }
+        return s;
+      };
       return '<tr><td>' + esc(a.id || '?') + (a.error ? ' <span class="creator-option-hint">' + esc(a.error) + '</span>' : '') +
-        '</td><td class="r">' + money(t) + '</td><td class="r">' + money(p) + '</td>' +
+        '</td><td class="r">' + money(t) + '</td><td class="r">' + money(p) + '</td><td class="r">' + fMoney(f) + '</td>' +
         '<td class="r">$' + Number(a.total || 0).toFixed(2) + '</td></tr>';
     }).join('');
     var T = b.totals || {};
+    var fpTot = '$' + Number(T.fastpay || 0).toFixed(2);
+    if (T.fastpay_pending) {
+      fpTot += ' <span style="font-size:10px;color:#eab308;font-weight:500;">(+$' + Number(T.fastpay_pending).toFixed(2) + ' pend)</span>';
+    }
     wrap.style.display = 'block';
-    wrap.innerHTML = '<strong>Balances</strong>' +
-      '<table class="tgm-bal"><thead><tr><th>Account</th><th class="r">Taskly</th><th class="r">PayGo</th><th class="r">Total</th></tr></thead>' +
+    wrap.innerHTML = '<div style="margin-bottom:0.6rem;font-weight:600;font-size:0.85rem;color:var(--text-main);"><i class="fa-solid fa-wallet" style="color:#229ed9;margin-right:6px;"></i> Account Balances</div>' +
+      '<table class="tgm-bal"><thead><tr><th>Account</th><th class="r">Taskly</th><th class="r">PayGo</th><th class="r">FastPay <span style="font-size:10px;font-weight:normal;opacity:0.65;">(Avail + Pend)</span></th><th class="r">Total</th></tr></thead>' +
       '<tbody>' + rows + '</tbody>' +
       '<tfoot><tr style="font-weight:700;"><td>TOTAL</td><td class="r">$' + Number(T.taskly || 0).toFixed(2) +
-      '</td><td class="r">$' + Number(T.paygo || 0).toFixed(2) + '</td><td class="r">$' + Number(T.grand || 0).toFixed(2) +
+      '</td><td class="r">$' + Number(T.paygo || 0).toFixed(2) + '</td><td class="r">' + fpTot + '</td><td class="r">$' + Number(T.grand || 0).toFixed(2) +
       '</td></tr></tfoot></table>';
   }
 
@@ -186,17 +226,17 @@
     root.innerHTML =
       '<div class="tgm-bots" id="tgm-bots"></div>' +
       '<div class="card-panel">' +
-        '<div class="card-top" style="margin-bottom:0.6rem;">' +
-          '<div><strong>Telegram Profiles</strong>' +
-          '<div class="creator-option-hint" id="tgm-counts">\u2026</div></div>' +
-          '<div class="button-row">' +
+        '<div class="card-top" style="margin-bottom:0.75rem;">' +
+          '<div><strong style="display:flex;align-items:center;gap:8px;font-size:0.95rem;"><i class="fa-brands fa-telegram" style="color:#229ed9;"></i> Telegram Profiles</strong>' +
+          '<div class="creator-option-hint" id="tgm-counts" style="margin-top:2px;">\u2026</div></div>' +
+          '<div class="button-row" style="display:flex;gap:8px;align-items:center;">' +
             '<button id="tgm-add" type="button" class="btn btn-sm btn-primary"><i class="fa-solid fa-plus"></i> Connect account</button>' +
             '<button id="tgm-bal" type="button" class="btn btn-sm btn-secondary"><i class="fa-solid fa-wallet"></i> Check Balances</button>' +
             '<button id="tgm-refresh" type="button" class="btn btn-sm btn-secondary"><i class="fa-solid fa-rotate"></i> Refresh</button>' +
           '</div>' +
         '</div>' +
-        '<div id="tgm-accounts"></div>' +
-        '<div id="tgm-bal-wrap" style="display:none;margin-top:1rem;"></div>' +
+        '<div id="tgm-accounts" class="tgm-grid"></div>' +
+        '<div id="tgm-bal-wrap" style="display:none;margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border-color);"></div>' +
       '</div>';
     wire();
   }

@@ -310,8 +310,8 @@ def _capture_failure_evidence(runner, log=None) -> str:
     to disk. The run stays just as diagnosable; you read a PNG + HTML instead of
     a live window. Skipped with INSPECT_HEADLESS_EVIDENCE=0.
     """
-    if str(os.environ.get("INSPECT_HEADLESS_EVIDENCE", "1")).strip().lower() in (
-            "0", "false", "no", "off"):
+    if str(os.environ.get("INSPECT_HEADLESS_EVIDENCE", "0")).strip().lower() not in (
+            "1", "true", "yes", "on"):
         return ""
     try:
         page = runner._ig_tab()
@@ -417,21 +417,23 @@ def _reap_wedged_tg_browser(profile_dir: str, log=None) -> None:
     import subprocess as _sp
     say = log or (lambda m: print(m, flush=True))
     try:
-        ps = _sp.run(["pgrep", "-af", f"user-data-dir={profile_dir}"],
-                     capture_output=True, text=True, timeout=15).stdout
-        for line in (ps or "").splitlines():
-            if "pgrep" in line:
-                continue
-            import re as _re
-            m = _re.match(r"\s*(\d+)", line)
-            if not m:
-                continue
-            try:
-                say(f"[tg] Reaping wedged TG browser pid {m.group(1)} ({profile_dir[-12:]})…")
-                import os as _os
-                _os.kill(int(m.group(1)), _signal.SIGTERM)
-            except Exception:
-                pass
+        import sys as _sys
+        if _sys.platform != "win32":
+            ps = _sp.run(["pgrep", "-af", f"user-data-dir={profile_dir}"],
+                         capture_output=True, text=True, timeout=15).stdout
+            for line in (ps or "").splitlines():
+                if "pgrep" in line:
+                    continue
+                import re as _re
+                m = _re.match(r"\s*(\d+)", line)
+                if not m:
+                    continue
+                try:
+                    say(f"[tg] Reaping wedged TG browser pid {m.group(1)} ({profile_dir[-12:]})…")
+                    import os as _os
+                    _os.kill(int(m.group(1)), _signal.SIGTERM)
+                except Exception:
+                    pass
     except Exception as exc:
         say(f"[tg] reap pgrep note: {exc}")
     try:

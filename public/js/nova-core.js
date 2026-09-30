@@ -111,6 +111,9 @@ function initThemeNav() {
     if (targetPanel) targetPanel.classList.add('active');
     // TG submenu: the page IS the bot (no picker).
     if (bot && typeof window.__setTgBot === 'function') window.__setTgBot(bot);
+    try {
+      window.dispatchEvent(new CustomEvent('nova:view-changed', { detail: { viewId, bot } }));
+    } catch (e) {}
   }
 
   function applyHash() {

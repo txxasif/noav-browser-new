@@ -2089,7 +2089,7 @@ body {
 }
 .creator-service {
   background: var(--bg-input); border: 1px solid var(--border-color);
-  border-radius: var(--radius-md); padding: 0.6rem 0.9rem; min-width: 240px;
+  border-radius: var(--radius-md); padding: 0.6rem 0.9rem; flex: 1; min-width: 260px;
 }
 .creator-service-title {
   font-size: 0.7rem; font-weight: 700; color: var(--text-dim);
@@ -2100,8 +2100,10 @@ body {
   display: flex; gap: 0.4rem; align-items: center;
   font-size: 0.82rem; font-weight: 500; cursor: pointer;
 }
+.creator-option input { accent-color: var(--accent-purple); cursor: pointer; }
 .creator-option-hint { font-size: 0.68rem; color: var(--text-dim); }
 .creator-service-note { font-size: 0.68rem; color: var(--text-dim); margin-top: 4px; }
+.creator-task-service { margin-bottom: 0.9rem; }
 
 .creator-engine-card {
   flex: 1; min-width: 250px; display: flex; align-items: center; gap: 0.75rem;
@@ -2225,51 +2227,154 @@ body {
 
 /* ===== TG Manager (connect / lease / balance) ===== */
 .tgm-bots {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px; margin-bottom: 1rem;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px; margin-bottom: 1.25rem;
 }
 .tgm-bot {
   position: relative; overflow: hidden;
   background: var(--bg-card); border: 1px solid var(--border-color);
-  border-radius: var(--radius-md); padding: 12px 14px;
+  border-radius: var(--radius-md); padding: 14px 16px;
+  transition: border-color 0.2s, transform 0.15s;
+}
+.tgm-bot:hover {
+  border-color: rgba(255, 255, 255, 0.16);
 }
 .tgm-bot::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
-  background: var(--accent-purple); opacity: .85;
+  background: var(--bot-accent, #229ed9); opacity: 0.9;
 }
-.tgm-bot h4 {
-  font-size: 0.9rem; margin: 0 0 2px; color: var(--text-main);
-  display: flex; align-items: center; gap: 8px;
+.tgm-bot-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
 }
-.tgm-bot .tgm-sub { font-size: 0.68rem; color: var(--text-dim); }
-.tgm-metrics { display: flex; gap: 16px; margin-top: 8px; }
-.tgm-metric { font-size: 0.68rem; color: var(--text-dim); }
-.tgm-metric b {
-  display: block; font-size: 1.05rem; color: var(--text-main);
-  font-variant-numeric: tabular-nums;
+.tgm-bot-identity {
+  display: flex; align-items: center; gap: 10px; min-width: 0;
+}
+.tgm-bot-avatar {
+  width: 36px; height: 36px; border-radius: 50%; object-fit: cover;
+  border: 1px solid rgba(255, 255, 255, 0.12); flex-shrink: 0;
+  background: var(--bg-input);
+}
+.tgm-bot-name {
+  font-size: 0.94rem; font-weight: 700; color: var(--text-main); margin: 0; line-height: 1.2;
+}
+.tgm-bot-handle {
+  font-size: 0.72rem; color: var(--text-dim); margin-top: 2px; font-family: var(--font-mono);
+}
+.tgm-flow-badge {
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid transparent; flex-shrink: 0;
+}
+.tgm-metrics { display: flex; gap: 8px; margin-top: 12px; }
+.tgm-metric {
+  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); padding: 6px 10px; flex: 1; text-align: center;
+}
+.tgm-m-num {
+  display: block; font-size: 1.15rem; font-weight: 700; color: var(--text-main);
+  font-variant-numeric: tabular-nums; line-height: 1.2;
+}
+.tgm-m-lbl { font-size: 0.64rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; }
+.tgm-tasks-wrap {
+  display: flex; gap: 5px; flex-wrap: wrap; margin-top: 10px; align-items: center;
+}
+.tgm-task-chip {
+  font-size: 0.68rem; font-weight: 500; color: #cbd5e1;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px; padding: 2px 7px;
+}
+.tgm-busy-tag {
+  font-size: 0.68rem; color: var(--accent-amber);
+}
+
+/* Telegram Profiles Grid */
+.tgm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
 }
 .tgm-acct {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 12px; margin-top: 8px;
-  background: var(--bg-input); border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
+  display: flex; flex-direction: column; justify-content: space-between; gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-card); border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  transition: border-color 0.2s, background 0.2s, transform 0.15s;
 }
-.tgm-acct.tgm-busy { border-color: rgba(245, 158, 11, 0.5); }
-.tgm-acct-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.tgm-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #10b981; }
-.tgm-dot.busy { background: #f59e0b; }
-.tgm-dot.off { background: #64748b; }
-.tgm-dot.dead { background: #ef4444; }
-.tgm-acct-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.tgm-acct-title strong { font-size: 0.85rem; color: var(--text-main); }
-.tgm-acct-meta { font-size: 0.68rem; color: var(--text-dim); margin-top: 2px; }
-.tgm-acct-actions { display: flex; align-items: center; gap: 6px; flex: none; }
-.tgm-bal { width: 100%; border-collapse: collapse; font-size: 0.8rem; font-variant-numeric: tabular-nums; }
+.tgm-acct:hover {
+  background: #141b25; border-color: rgba(255, 255, 255, 0.16);
+}
+.tgm-acct.tgm-busy { border-color: rgba(245, 158, 11, 0.45); }
+.tgm-acct-top { display: flex; align-items: flex-start; gap: 12px; min-width: 0; }
+.tgm-avatar {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(34, 158, 217, 0.1); color: #229ed9; font-size: 1.2rem;
+  border: 1px solid rgba(34, 158, 217, 0.22);
+}
+.tgm-avatar.busy {
+  background: rgba(245, 158, 11, 0.1); color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.25);
+}
+.tgm-avatar.off {
+  background: rgba(148, 163, 184, 0.08); color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.18);
+}
+.tgm-avatar.dead {
+  background: rgba(239, 68, 68, 0.1); color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.2);
+}
+.tgm-acct-info { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.tgm-acct-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.tgm-acct-title strong {
+  font-size: 0.88rem; font-weight: 700; color: var(--text-main);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tgm-acct-meta {
+  font-size: 0.72rem; color: var(--text-dim); margin-top: 4px;
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+}
+.tgm-phone { font-family: var(--font-mono); color: #cbd5e1; }
+.tgm-acct-footer {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.05); margin-top: 2px;
+}
+.tgm-acct-actions { display: flex; align-items: center; gap: 8px; }
+.tgm-status-lbl { font-size: 0.72rem; font-weight: 500; color: var(--text-dim); }
+
+/* Switch inside Telegram Manager: clean Telegram Blue */
+.tgm-acct .switch input:checked + .slider {
+  background-color: #229ed9;
+}
+
+/* Subtle, polished Ready status badge instead of neon green */
+.tgm-status-ready {
+  background: rgba(34, 158, 217, 0.1);
+  color: #7dd3fc;
+  border-color: rgba(34, 158, 217, 0.25);
+}
+.tgm-status-ready::before {
+  background: #38bdf8;
+}
+
+/* Delete button in profile row */
+.btn-icon-danger {
+  width: 28px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-xs);
+  background: rgba(239, 68, 68, 0.1); color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  cursor: pointer; transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.btn-icon-danger:hover {
+  background: var(--accent-red); color: #fff; border-color: var(--accent-red);
+}
+
+.tgm-bal { width: 100%; border-collapse: collapse; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 .tgm-bal th {
-  text-align: left; color: var(--text-dim); font-size: 0.68rem;
-  text-transform: uppercase; letter-spacing: 0.05em; padding: 6px;
+  text-align: left; color: var(--text-dim); font-size: 0.7rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; padding: 8px 10px;
 }
-.tgm-bal td { padding: 6px; border-top: 1px solid var(--border-color); }
+.tgm-bal td { padding: 8px 10px; border-top: 1px solid var(--border-color); }
 .tgm-bal th.r, .tgm-bal td.r { text-align: right; }
 .tg-icon-btn {
   display: inline-flex; align-items: center; justify-content: center;

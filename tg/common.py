@@ -53,7 +53,10 @@ def api_credentials():
 
 def has_session(rec: dict) -> bool:
     from mtproto_bot import has_mtproto_session, session_file
-    return has_mtproto_session(rec.get("session_file") or session_file(str(rec.get("id"))))
+    sess = rec.get("session_file")
+    if not sess or not os.path.isfile(sess):
+        sess = session_file(str(rec.get("id") or ""))
+    return has_mtproto_session(sess)
 
 
 # ---------------------------------------------------------------- bot driving

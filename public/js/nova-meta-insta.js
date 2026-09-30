@@ -1,8 +1,13 @@
 /**
  * Nova Browser UI — Meta Creator Workspace.
  *
- * Dedicated Meta Account Creation Engine.
+ * Dedicated Meta & Instagram Account Creation Engine.
+ * Supports independent concurrent execution for Meta-only and Meta->IG pipelines.
  */
+
+// =============================================================================
+// 1. CONFIGURATION & CONSTANTS
+// =============================================================================
 
 const MI_WORKSPACE_DEFS = {
   meta: {
@@ -41,6 +46,12 @@ const MI_MAIL_PROVIDERS = [
   { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td', hint: '(only provider)' },
 ];
 
+const MI_ALL_COLS = ['id', 'uname', 'name', 'email', 'password', 'cookies', 'created', 'actions'];
+
+// =============================================================================
+// 2. TEMPLATE BUILDERS (HTML GENERATORS)
+// =============================================================================
+
 function miMailOptionsHtml(kind) {
   return MI_MAIL_PROVIDERS.map((m, i) => `
     <label class="creator-option">
@@ -70,6 +81,7 @@ function miCreatorPanelHtml(def) {
       <div class="page-title-actions">
         <button type="button" class="btn btn-secondary btn-sm" data-role="export-csv"><i class="fa-solid fa-file-csv"></i> Export CSV</button>
         <button type="button" class="btn btn-secondary btn-sm" data-role="export-txt"><i class="fa-solid fa-file-lines"></i> Export TXT</button>
+        ${k === 'ig' ? `<button type="button" class="btn btn-secondary btn-sm" data-role="export-xlsx" title="Export accounts with 2FA Key to XLSX (Bot format: Username, Password, 2FA Key)"><i class="fa-solid fa-file-excel" style="color: #107c41;"></i> Export XLSX (2FA)</button>` : ''}
         <button type="button" class="btn btn-secondary btn-sm" data-role="clear"><i class="fa-solid fa-trash-can"></i> Clear</button>
         <button type="button" class="btn btn-secondary btn-sm" data-role="deep-clean" title="Delete orphaned session files, cookies and dead creator profiles (keeps saved accounts)"><i class="fa-solid fa-broom"></i> Deep Clean</button>
       </div>
@@ -111,6 +123,14 @@ function miCreatorPanelHtml(def) {
           <span class="slider"></span>
         </label>
       </div>
+      ${k === 'ig' ? `
+      <div class="creator-field creator-field--switch">
+        <label>2FA Key</label>
+        <label class="switch" title="Extract and save 2FA secret key for Instagram accounts (disabled by default)">
+          <input type="checkbox" data-role="twofa">
+          <span class="slider"></span>
+        </label>
+      </div>` : ''}
       <div class="creator-field creator-field--wide">
         <label>${def.usernameLabel}</label>
         <input type="text" class="form-control" data-role="username" placeholder="${def.usernamePlaceholder}">
@@ -137,19 +157,6 @@ function miCreatorPanelHtml(def) {
           </label>
         </div>
         <div class="creator-service-note">Visual AI is the default; audio is used automatically if the visual solver stalls.</div>
-      </div>
-
-      <div class="creator-engine-card">
-        <div class="creator-engine-icon" style="background: linear-gradient(135deg, ${def.accent}, #0064e0);">
-          <i class="${def.icon}"></i>
-        </div>
-        <div class="creator-engine-text">
-          <div class="creator-engine-title">
-            Meta Anti-Detect Core
-            <span class="creator-engine-badge"><span class="creator-engine-dot"></span> Ready</span>
-          </div>
-          <div class="creator-engine-sub">JA Visual AI (YOLOv5 ONNX) • Mobile Fingerprint • Offline Engine</div>
-        </div>
       </div>
     </div>
 
@@ -233,6 +240,7 @@ function miCreatorPanelHtml(def) {
             <th style="cursor: pointer; user-select: none;" data-role="th" data-sort="name_asc" data-col="name" title="Click to sort by Name">Name <span data-role="sort-icon-name" style="font-size: 0.72rem; opacity: 0.4; margin-left: 2px;">⇅</span></th>
             <th style="cursor: pointer; user-select: none;" data-role="th" data-sort="email_asc" data-col="email" title="Click to sort by Email">Email <span data-role="sort-icon-email" style="font-size: 0.72rem; opacity: 0.4; margin-left: 2px;">⇅</span></th>
             <th data-col="password">Password</th>
+            <th data-col="cookies">Cookies</th>
             <th style="cursor: pointer; user-select: none;" data-role="th" data-sort="newest" data-col="created" title="Click to sort by Creation Time">Created <span data-role="sort-icon-created" style="font-size: 0.72rem; opacity: 0.4; margin-left: 2px;">⇅</span></th>
             <th data-col="actions" style="text-align: right;">Actions</th>
           </tr>
@@ -260,127 +268,78 @@ function miCreatorPanelHtml(def) {
   ${window.NovaDiag ? NovaDiag.renderHtml(def.kind) : ''}`;
 }
 
-function initMetaInsta() {
-  const mounts = document.querySelectorAll('.creator-mount');
-  if (!mounts.length) return;
+// =============================================================================
+// 3. SHARED MODAL MANAGERS
+// =============================================================================
 
-  // ---------------------------------------------------------------------------
-  // Shared state + data layer (one poll / one SSE for both workspaces)
-  // ---------------------------------------------------------------------------
-  const state = {
-    accounts: [],
-    running: false,
-    activeMode: null,
-    engineOk: true,
-    listeners: new Set(),
-  };
+const MiModals = {
+  confirmDelete: null,
+  pendingDeleteResolver: null,
 
-  function isIgAccount(a) {
-    // Instagram workspace = anything that went through the IG join (parked as
-    // Created/Submitted/Verified). Meta workspace = MetaCreated only.
-    return String((a && a.status) || '') !== 'MetaCreated';
-  }
+  initDeleteConfirm() {
+    const modal = document.getElementById('modal-metainsta-confirm-delete');
+    const title = document.getElementById('metainsta-delete-modal-title');
+    const msg = document.getElementById('metainsta-delete-modal-msg');
+    const sub = document.getElementById('metainsta-delete-modal-sub');
+    const targetBox = document.getElementById('metainsta-delete-modal-target-box');
+    const targetText = document.getElementById('metainsta-delete-modal-target-text');
+    const btnSubmit = document.getElementById('btn-metainsta-confirm-delete-submit');
 
-  function notify() {
-    state.listeners.forEach((fn) => { try { fn(); } catch (e) {} });
-  }
-
-  let refreshInFlight = null;
-  function refreshShared() {
-    if (refreshInFlight) return refreshInFlight;
-    refreshInFlight = (async () => {
-      try {
-        // Fetch status + accounts in parallel (halves poll latency).
-        const [s, acc] = await Promise.all([
-          fetch('/api/meta-insta/status').then((r) => r.json()),
-          fetch('/api/meta-insta/accounts').then((r) => r.json()),
-        ]);
-        state.running = Boolean(s.running);
-        state.engineOk = s.engineOk !== false;
-        if (s.mode === 'meta' || s.mode === 'meta-ig') state.activeMode = s.mode;
-        if (!state.running) state.activeMode = null;
-        else if (!state.activeMode) state.activeMode = 'meta';
-        state.accounts = ((acc && acc.accounts) || [])
-          // Strict pipeline isolation (meta_auto_ai parity): accounts created by
-          // TG Classic carry target="telegram" and belong to the TG tab only.
-          // Without this a TG Classic run also showed up in the Instagram
-          // Creator workspace and inflated its sidebar badge.
-          .filter((a) => String((a && a.target) || '') !== 'telegram');
-      } catch (e) {
-        state.running = false;
-      } finally {
-        refreshInFlight = null;
+    const resolve = (val) => {
+      if (this.pendingDeleteResolver) {
+        const fn = this.pendingDeleteResolver;
+        this.pendingDeleteResolver = null;
+        fn(val);
       }
-      notify();
-    })();
-    return refreshInFlight;
-  }
+    };
 
-  // ---------------------------------------------------------------------------
-  // Shared delete-confirm modal (promise based)
-  // ---------------------------------------------------------------------------
-  const confirmDeleteModal = document.getElementById('modal-metainsta-confirm-delete');
-  const deleteModalTitle = document.getElementById('metainsta-delete-modal-title');
-  const deleteModalMsg = document.getElementById('metainsta-delete-modal-msg');
-  const deleteModalSub = document.getElementById('metainsta-delete-modal-sub');
-  const deleteModalTargetBox = document.getElementById('metainsta-delete-modal-target-box');
-  const deleteModalTargetText = document.getElementById('metainsta-delete-modal-target-text');
-  const deleteModalBtnSubmit = document.getElementById('btn-metainsta-confirm-delete-submit');
-  let pendingDeleteResolver = null;
+    if (btnSubmit) {
+      btnSubmit.addEventListener('click', () => {
+        resolve(true);
+        if (modal) closeModal(modal);
+      });
+    }
 
-  function showDeleteConfirmModal({ title, message, subtext, targetHtml, confirmText = 'Confirm Delete' } = {}) {
-    return new Promise((resolve) => {
-      if (!confirmDeleteModal) {
-        resolve(window.confirm(message || 'Are you sure you want to delete?'));
-        return;
+    if (modal) {
+      modal.querySelectorAll('[data-close], .close-modal').forEach((b) => {
+        b.addEventListener('click', () => resolve(false));
+      });
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) resolve(false);
+      });
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && modal && modal.classList.contains('active')) {
+        resolve(false);
       }
-      if (pendingDeleteResolver) pendingDeleteResolver(false);
-      pendingDeleteResolver = resolve;
-
-      if (deleteModalTitle) deleteModalTitle.textContent = title || 'Delete Account';
-      if (deleteModalMsg) deleteModalMsg.textContent = message || 'Are you sure you want to delete this account?';
-      if (deleteModalSub) deleteModalSub.textContent = subtext || 'This action cannot be undone.';
-      if (deleteModalTargetText) deleteModalTargetText.innerHTML = targetHtml || '';
-      if (deleteModalTargetBox) deleteModalTargetBox.style.display = targetHtml ? 'block' : 'none';
-      if (deleteModalBtnSubmit) deleteModalBtnSubmit.innerHTML = `<i class="fa-solid fa-trash-can"></i> ${confirmText}`;
-      openModal(confirmDeleteModal);
     });
-  }
 
-  function resolveDeleteConfirm(value) {
-    if (pendingDeleteResolver) {
-      const res = pendingDeleteResolver;
-      pendingDeleteResolver = null;
-      res(value);
-    }
-  }
+    this.confirmDelete = ({ title: t, message: m, subtext: s, targetHtml: th, confirmText = 'Confirm Delete' } = {}) => {
+      return new Promise((res) => {
+        if (!modal) {
+          res(window.confirm(m || 'Are you sure you want to delete?'));
+          return;
+        }
+        if (this.pendingDeleteResolver) this.pendingDeleteResolver(false);
+        this.pendingDeleteResolver = res;
 
-  if (deleteModalBtnSubmit) {
-    deleteModalBtnSubmit.addEventListener('click', () => {
-      resolveDeleteConfirm(true);
-      if (confirmDeleteModal) closeModal(confirmDeleteModal);
-    });
-  }
-  if (confirmDeleteModal) {
-    confirmDeleteModal.querySelectorAll('[data-close], .close-modal').forEach((b) => {
-      b.addEventListener('click', () => resolveDeleteConfirm(false));
-    });
-    confirmDeleteModal.addEventListener('click', (e) => {
-      if (e.target === confirmDeleteModal) resolveDeleteConfirm(false);
-    });
-  }
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && confirmDeleteModal && confirmDeleteModal.classList.contains('active')) {
-      resolveDeleteConfirm(false);
-    }
-  });
+        if (title) title.textContent = t || 'Delete Account';
+        if (msg) msg.textContent = m || 'Are you sure you want to delete this account?';
+        if (sub) sub.textContent = s || 'This action cannot be undone.';
+        if (targetText) targetText.innerHTML = th || '';
+        if (targetBox) targetBox.style.display = th ? 'block' : 'none';
+        if (btnSubmit) btnSubmit.innerHTML = `<i class="fa-solid fa-trash-can"></i> ${confirmText}`;
+        openModal(modal);
+      });
+    };
+  },
 
-  // ---------------------------------------------------------------------------
-  // Shared edit-account modal
-  // ---------------------------------------------------------------------------
-  const editModal = document.getElementById('modal-metainsta-edit');
-  const editForm = document.getElementById('form-metainsta-edit');
-  if (editForm) {
+  initEditAccount(onSaved) {
+    const editModal = document.getElementById('modal-metainsta-edit');
+    const editForm = document.getElementById('form-metainsta-edit');
+    if (!editForm) return editModal;
+
     editForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const id = document.getElementById('metainsta-edit-id').value;
@@ -399,7 +358,7 @@ function initMetaInsta() {
         if (r.status === 'SUCCESS') {
           showToast('Account updated.', 'success');
           closeModal(editModal);
-          await refreshShared();
+          if (typeof onSaved === 'function') await onSaved();
         } else {
           showToast(r.error || 'Update failed.', 'error');
         }
@@ -407,184 +366,176 @@ function initMetaInsta() {
         showToast(err.message, 'error');
       }
     });
-  }
+    return editModal;
+  },
 
-  // ---------------------------------------------------------------------------
-  // Shared global password modal
-  // ---------------------------------------------------------------------------
-  const gpStatus = document.getElementById('global-pass-status');
-  const gpModal = document.getElementById('modal-global-password');
-  const gpForm = document.getElementById('form-global-password');
-  const gpInput = document.getElementById('input-global-password');
-  const gpBtn = document.getElementById('nav-item-global-pass');
+  initGlobalPassword() {
+    const gpStatus = document.getElementById('global-pass-status');
+    const gpModal = document.getElementById('modal-global-password');
+    const gpForm = document.getElementById('form-global-password');
+    const gpInput = document.getElementById('input-global-password');
+    const gpBtn = document.getElementById('nav-item-global-pass');
 
-  function renderGlobalPassStatus(pass) {
-    if (!gpStatus) return;
-    const isSet = Boolean(pass);
-    gpStatus.textContent = isSet ? 'Set' : 'Not set';
-    gpStatus.style.background = isSet ? 'rgba(16, 185, 129, 0.15)' : 'rgba(148, 163, 184, 0.15)';
-    gpStatus.style.color = isSet ? '#34d399' : '#94a3b8';
-  }
-
-  async function loadGlobalPass() {
-    try {
-      const r = await (await fetch('/api/meta-insta/settings')).json();
-      const pass = (r && r.globalPassword) || '';
-      if (gpInput) gpInput.value = pass;
-      renderGlobalPassStatus(pass);
-    } catch (e) {}
-  }
-
-  if (gpBtn && gpModal) {
-    gpBtn.addEventListener('click', async () => { await loadGlobalPass(); openModal(gpModal); });
-  }
-  if (gpForm) {
-    gpForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const pass = ((gpInput && gpInput.value) || '').trim();
-      try {
-        const r = await (await fetch('/api/meta-insta/settings', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ globalPassword: pass }),
-        })).json();
-        if (r && r.status === 'SUCCESS') {
-          renderGlobalPassStatus(pass);
-          closeModal(gpModal);
-          showToast(pass ? 'Global password saved.' : 'Global password cleared — auto passwords.', 'success');
-        } else {
-          showToast((r && r.error) || 'Could not save global password.', 'error');
-        }
-      } catch (err) {
-        showToast('Could not save global password: ' + err.message, 'error');
-      }
-    });
-  }
-  loadGlobalPass();
-
-  // ---------------------------------------------------------------------------
-  // Build one workspace per mount
-  // ---------------------------------------------------------------------------
-  const workspaces = [];
-    mounts.forEach((mount) => {
-    const kind = mount.getAttribute('data-kind') === 'ig' ? 'ig' : 'meta';
-    mount.innerHTML = miCreatorPanelHtml(MI_WORKSPACE_DEFS[kind]);
-    workspaces.push(createCreatorWorkspace(mount, MI_WORKSPACE_DEFS[kind], state, {
-      isIgAccount,
-      refreshShared,
-      showDeleteConfirmModal,
-      editModal,
-      subscribe: (fn) => { state.listeners.add(fn); return () => state.listeners.delete(fn); },
-    }));
-  });
-
-  if (window.NovaDiag) {
-    NovaDiag.refreshReasons();
-    NovaDiag.refreshLogs();
-  }
-
-  // ---------------------------------------------------------------------------
-  // Shared SSE stream — routes log lines to the active workspace
-  // ---------------------------------------------------------------------------
-  function activeWorkspace() {
-    let ws = workspaces.find((w) => w.def.mode === state.activeMode);
-    if (!ws) {
-      const visible = workspaces.find((w) => w.root.closest('.view-panel')?.classList.contains('active'));
-      ws = visible || workspaces[0];
+    function renderStatus(pass) {
+      if (!gpStatus) return;
+      const isSet = Boolean(pass);
+      gpStatus.textContent = isSet ? 'Set' : 'Not set';
+      gpStatus.style.background = isSet ? 'rgba(16, 185, 129, 0.15)' : 'rgba(148, 163, 184, 0.15)';
+      gpStatus.style.color = isSet ? '#34d399' : '#94a3b8';
     }
-    return ws;
-  }
 
-  let es = null;
-  function handleSseEvent(d) {
-    const ws = activeWorkspace();
-    if (d.type === 'log') {
-      if (ws) ws.appendLog(d.message || '');
-    } else if (d.type === 'loop_started') {
-      state.running = true;
-      state.activeMode = d.mode === 'meta-ig' ? 'meta-ig' : 'meta';
-      if (ws) ws.appendLog(`[engine] Started ${d.concurrency || ''} session(s).`);
-      notify();
-    } else if (d.type === 'loop_stopped') {
-      state.running = false;
-      state.activeMode = null;
-      if (ws) ws.appendLog('[engine] Stopped.');
-      refreshShared();
-    } else if (d.type === 'status') {
-      state.running = Boolean(d.running);
-      if (d.mode) state.activeMode = d.mode;
-      if (!state.running) state.activeMode = null;
-      else if (!state.activeMode) state.activeMode = 'meta';
-      notify();
-    } else if (d.type === 'slot_event') {
-      if (ws) {
-        ws.appendLog(`[Slot #${d.slot_id}] ${d.status}: ${d.detail || ''}`);
-        ws.setProgress(d);
-      }
-    } else if (d.type === 'account_created') {
-      if (ws) ws.appendLog(`[✔] Created: ${d.account?.username || d.account?.email || d.email || ''}`);
-      refreshShared();
-    } else if (d.type === 'license_invalid') {
-      state.running = false;
-      if (ws) ws.appendLog(`[License Error] ${d.message || 'Active license required.'}`);
-      showToast(d.message || 'Active license required.', 'error');
-      if (typeof requireLicense === 'function') requireLicense(d.message || 'Active license required to run the creator.');
-      refreshShared();
-    } else if (d.type === 'account_updated' || d.type === 'accounts_reset' || d.type === 'account_deleted') {
-      refreshShared();
-    }
-  }
-
-  function connectSse() {
-    try { if (es) es.close(); } catch (e) {}
-    es = new EventSource('/api/meta-insta/events');
-    es.onmessage = (e) => {
+    async function load() {
       try {
-        const d = JSON.parse(e.data);
-        // Server coalesces log/slot_event bursts into one 'batch' frame.
-        if (d && d.type === 'batch' && Array.isArray(d.items)) {
-          for (const item of d.items) {
-            try { handleSseEvent(item); } catch (err) { /* keep the batch going */ }
+        const r = await (await fetch('/api/meta-insta/settings')).json();
+        const pass = (r && r.globalPassword) || '';
+        if (gpInput) gpInput.value = pass;
+        renderStatus(pass);
+      } catch (e) {}
+    }
+
+    if (gpBtn && gpModal) {
+      gpBtn.addEventListener('click', async () => { await load(); openModal(gpModal); });
+    }
+    if (gpForm) {
+      gpForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const pass = ((gpInput && gpInput.value) || '').trim();
+        try {
+          const r = await (await fetch('/api/meta-insta/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ globalPassword: pass }),
+          })).json();
+          if (r && r.status === 'SUCCESS') {
+            renderStatus(pass);
+            closeModal(gpModal);
+            showToast(pass ? 'Global password saved.' : 'Global password cleared (auto-generated passwords will be used).', 'success');
+          } else {
+            showToast((r && r.error) || 'Failed to save password.', 'error');
           }
-          return;
+        } catch (err) {
+          showToast(err.message, 'error');
         }
-        handleSseEvent(d);
-      } catch (err) {
-        const ws = activeWorkspace();
-        if (ws) ws.appendLog(e.data);
-      }
-    };
-    es.onerror = () => { /* browser auto-reconnects */ };
+      });
+    }
+    load();
+  },
+};
+
+// =============================================================================
+// 4. BROWSER PROFILE LAUNCHER (Nova Browser Parity)
+// =============================================================================
+
+async function miLaunchAccount(id, site, account) {
+  site = site === 'mail' ? 'mail' : 'meta';
+  if (!requireLicense('Active license key required to open browser profiles.')) return;
+  const flightKey = `meta-open:${id}:${site}`;
+  if (typeof tryClaimLaunch === 'function' && !tryClaimLaunch(flightKey)) {
+    showToast('This session is already opening — please wait.', 'info');
+    return;
   }
-
-  refreshShared();
-  connectSse();
-  // Poll as a safety net only: skip while the tab is hidden and refresh
-  // immediately when it becomes visible again. SSE keeps live runs fresh.
-  setInterval(() => { if (!document.hidden) refreshShared(); }, 10000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshShared(); });
-
-  // Warn the user (once) if the engine files are missing.
-  if (workspaces[0] && !workspaces[0].logHasContent()) {
-    workspaces[0].appendLog('[system] Creator engine ready. Pick a workspace, set Parallel + Target and click Start.');
+  try {
+    const data = await (await fetch(`/api/meta-insta/prepare-launch?id=${encodeURIComponent(id)}&site=${site}`)).json();
+    if (data.status !== 'SUCCESS') {
+      showToast(data.error || 'Failed to prepare browser session.', 'error');
+      return;
+    }
+    const url = data.url;
+    const cookies = Array.isArray(data.cookies) ? data.cookies : [];
+    let profile = typeof ProfileManager !== 'undefined' && ProfileManager.getProfile ? ProfileManager.getProfile(data.profileId) : null;
+    if (!profile && typeof FingerprintGenerator !== 'undefined') {
+      profile = FingerprintGenerator.generateProfile({
+        name: data.profileName || 'Meta account',
+        type: 'ANDROID_MOBILE',
+        customUrl: url,
+      });
+      profile.id = data.profileId;
+    }
+    if (profile) {
+      profile.name = data.profileName || profile.name;
+      profile.cookies = cookies;
+      profile.customUrl = url;
+      if (typeof ProfileManager !== 'undefined' && ProfileManager.saveProfile) ProfileManager.saveProfile(profile);
+    }
+    if (typeof renderProfiles === 'function') renderProfiles();
+    const extra = data.seeded ? 'persisted profile restored, ' : (data.persisted ? '' : 'no persisted profile, cookies only, ');
+    showToast(`Opening ${(profile && profile.name) || 'session'} (${extra}${cookies.length} cookies, ${site} tab)...`, 'info');
+    const out = await (await fetch('/api/launch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: { ...(profile || {}), forceMobile: true }, url: [url], isSiteLauncher: false }),
+    })).json();
+    if (out.status === 'SUCCESS') {
+      showToast(site === 'mail' ? 'Mail inbox opened in persisted session!' : 'Meta session opened in persisted session!', 'success');
+    } else {
+      showToast(out.error || out.message || 'Browser failed to launch.', 'error');
+    }
+    if (typeof syncActiveSessions === 'function') syncActiveSessions();
+  } catch (e) {
+    showToast(`Open failed: ${e.message}`, 'error');
+  } finally {
+    if (typeof freeLaunch === 'function') freeLaunch(flightKey);
   }
 }
 
-/**
- * Build and wire a single creator workspace inside `root`.
- * Returns { def, root, appendLog, setProgress, logHasContent }.
- */
+// =============================================================================
+// 5. BATCHED LOG STREAM (RAF-Throttled)
+// =============================================================================
+
+function createLogStream(logEl, autoScrollEl) {
+  const MAX_LINES = 600;
+  let queue = [];
+  let rafId = null;
+
+  function flush() {
+    rafId = null;
+    if (!logEl || queue.length === 0) return;
+    const auto = autoScrollEl ? autoScrollEl.checked : true;
+    const frag = document.createDocumentFragment();
+    for (const line of queue) {
+      const row = document.createElement('div');
+      row.textContent = line;
+      frag.appendChild(row);
+    }
+    queue = [];
+    logEl.appendChild(frag);
+    while (logEl.childElementCount > MAX_LINES) logEl.removeChild(logEl.firstChild);
+    if (auto) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  return {
+    append(line) {
+      if (!logEl) return;
+      queue.push(line);
+      if (!rafId) rafId = requestAnimationFrame(flush);
+    },
+    clear() {
+      if (logEl) logEl.textContent = '';
+      queue = [];
+    },
+    hasContent() {
+      return Boolean(logEl && (logEl.textContent || '').trim());
+    },
+  };
+}
+
+// =============================================================================
+// 6. WORKSPACE INSTANCE FACTORY (Single Workspace Controller)
+// =============================================================================
+
 function createCreatorWorkspace(root, def, state, shared) {
   const q = (role) => root.querySelector(`[data-role="${role}"]`);
   const els = {
     conc: q('concurrency'),
     target: q('target'),
     headless: q('headless'),
+    twofa: q('twofa'),
     username: q('username'),
     btnStart: q('start'),
     btnStop: q('stop'),
     btnExportCsv: q('export-csv'),
     btnExportTxt: q('export-txt'),
+    btnExportXlsx: q('export-xlsx'),
     btnClear: q('clear'),
     btnDeepClean: q('deep-clean'),
     statTotal: q('stat-total'),
@@ -613,83 +564,44 @@ function createCreatorWorkspace(root, def, state, shared) {
     combo: q('combo'),
   };
 
-  const ALL_COLS = ['id', 'uname', 'name', 'email', 'password', 'created', 'actions'];
   const STORAGE_KEY_COLS = `nova_metainsta_cols_${def.kind}`;
-
   let page = 1;
   let currentSort = 'newest';
 
-  // --- columns ---------------------------------------------------------------
-  function getStoredVisibleCols() {
+  // --- Logger ---
+  const logger = createLogStream(els.log, els.autoScroll);
+
+  // --- Column Visibility ---
+  function getVisibleCols() {
     try {
       const stored = localStorage.getItem(STORAGE_KEY_COLS);
       if (stored) {
         const arr = JSON.parse(stored);
         if (Array.isArray(arr) && arr.length > 0) {
-          const known = arr.filter((c) => ALL_COLS.includes(c));
-          return [...known, ...ALL_COLS.filter((c) => !known.includes(c))];
+          const known = arr.filter((c) => MI_ALL_COLS.includes(c));
+          return [...known, ...MI_ALL_COLS.filter((c) => !known.includes(c))];
         }
       }
     } catch (e) {}
-    return ALL_COLS.slice();
+    return MI_ALL_COLS.slice();
   }
-  function saveVisibleCols(cols) {
-    try { localStorage.setItem(STORAGE_KEY_COLS, JSON.stringify(cols)); } catch (e) {}
-  }
+
   function applyColumnVisibility() {
-    const visible = getStoredVisibleCols();
+    const visible = getVisibleCols();
     if (!els.table) return;
-    ALL_COLS.forEach((col) => {
+    MI_ALL_COLS.forEach((col) => {
       els.table.classList.toggle(`hide-col-${col}`, !visible.includes(col));
       const cb = root.querySelector(`.metainsta-col-cb[data-col="${col}"]`);
       if (cb) cb.checked = visible.includes(col);
     });
   }
-  function getVisibleColCount() {
-    return getStoredVisibleCols().length || 1;
-  }
   applyColumnVisibility();
 
-  // --- logging ---------------------------------------------------------------
-  // Batched rendering: worker logs arrive in bursts (one SSE line per slot
-  // stdout line). Appending each line synchronously to a growing text node
-  // reflowed the whole terminal and froze the UI at high Parallel. We buffer
-  // lines and flush once per animation frame, and cap the DOM to N rows.
-  const LOG_MAX_LINES = 600;
-  let logQueue = [];
-  let logRaf = null;
-  function appendLog(line) {
-    if (!els.log) return;
-    logQueue.push(line);
-    if (logRaf) return;
-    logRaf = requestAnimationFrame(flushLog);
-  }
-  function flushLog() {
-    logRaf = null;
-    if (!els.log || logQueue.length === 0) return;
-    const auto = els.autoScroll ? els.autoScroll.checked : true;
-    const frag = document.createDocumentFragment();
-    for (const l of logQueue) {
-      const row = document.createElement('div');
-      row.textContent = l;
-      frag.appendChild(row);
-    }
-    logQueue = [];
-    els.log.appendChild(frag);
-    while (els.log.childElementCount > LOG_MAX_LINES) els.log.removeChild(els.log.firstChild);
-    if (auto) els.log.scrollTop = els.log.scrollHeight;
-  }
-  function logHasContent() {
-    return Boolean(els.log && (els.log.textContent || '').trim());
-  }
-  function setProgress(d) {
-    if (els.progressLabel && d.detail) els.progressLabel.textContent = `Slot #${d.slot_id} — ${d.status}: ${d.detail}`;
+  // --- Stats & Badges ---
+  function myAccounts() {
+    return state.accounts.filter((a) => (a.target || '') !== 'telegram' && ((def.kind === 'ig') === shared.isIgAccount(a)));
   }
 
-  // --- stats -----------------------------------------------------------------
-  function myAccounts() {
-    return state.accounts.filter((a) => (def.kind === 'ig') === shared.isIgAccount(a));
-  }
   function updateStats() {
     const mine = myAccounts();
     if (els.statTotal) els.statTotal.textContent = String(mine.length);
@@ -699,61 +611,47 @@ function createCreatorWorkspace(root, def, state, shared) {
     // Sidebar badges
     const badgeMeta = document.getElementById('metainsta-badge-meta');
     const badgeIg = document.getElementById('metainsta-badge-ig');
-    if (badgeMeta) badgeMeta.textContent = String(state.accounts.filter((a) => !shared.isIgAccount(a)).length);
-    if (badgeIg) badgeIg.textContent = String(state.accounts.filter((a) => shared.isIgAccount(a)).length);
+    const isMeta = (a) => a && (a.target || '') !== 'telegram' && String(a.status || '') === 'MetaCreated';
+    if (badgeMeta) badgeMeta.textContent = String(state.accounts.filter(isMeta).length);
+    if (badgeIg) badgeIg.textContent = String(state.accounts.filter(shared.isIgAccount).length);
 
-    const isMine = state.activeMode === def.mode;
-    const runningHere = state.running && isMine;
-    const busyElsewhere = state.running && !isMine;
+    const runningHere = def.kind === 'meta' ? state.meta_running : state.ig_running;
 
     if (els.statRunning) {
-      els.statRunning.textContent = runningHere ? 'RUNNING' : (busyElsewhere ? 'BUSY' : 'IDLE');
-      els.statRunning.style.color = runningHere ? 'var(--accent-green)' : (busyElsewhere ? '#fcd34d' : 'var(--text-muted)');
+      els.statRunning.textContent = runningHere ? 'RUNNING' : 'IDLE';
+      els.statRunning.style.color = runningHere ? 'var(--accent-green)' : 'var(--text-muted)';
     }
     if (els.state) {
-      els.state.textContent = runningHere ? 'RUNNING' : (busyElsewhere ? 'OTHER WORKSPACE ACTIVE' : 'IDLE');
-      els.state.style.color = runningHere ? 'var(--accent-green)' : (busyElsewhere ? '#fcd34d' : 'var(--text-muted)');
+      els.state.textContent = runningHere ? 'RUNNING' : 'IDLE';
+      els.state.style.color = runningHere ? 'var(--accent-green)' : 'var(--text-muted)';
     }
     if (els.btnStart) {
-      els.btnStart.disabled = !state.engineOk || busyElsewhere;
+      els.btnStart.disabled = !state.engineOk;
       els.btnStart.style.display = runningHere ? 'none' : 'inline-flex';
-      els.btnStart.title = !state.engineOk ? 'Mining engine not installed on this machine'
-        : busyElsewhere ? 'The other workspace is currently running.' : '';
+      els.btnStart.title = !state.engineOk ? 'Mining engine not installed on this machine' : '';
     }
     if (els.btnStop) els.btnStop.style.display = runningHere ? 'inline-flex' : 'none';
     if (els.progressBox) els.progressBox.style.display = runningHere ? 'block' : 'none';
     if (els.engineHint) els.engineHint.style.display = state.engineOk ? 'none' : 'inline';
   }
 
-  // --- sorting / filtering ---------------------------------------------------
+  // --- Sorting & Filtering ---
   function updateSortIndicators() {
-    const icons = {
-      'sort-icon-id': '⇅', 'sort-icon-uname': '⇅', 'sort-icon-name': '⇅',
-      'sort-icon-email': '⇅', 'sort-icon-created': '⇅',
+    const icons = { 'sort-icon-id': '⇅', 'sort-icon-uname': '⇅', 'sort-icon-name': '⇅', 'sort-icon-email': '⇅', 'sort-icon-created': '⇅' };
+    const mark = (id, char) => {
+      const el = q(id);
+      if (el) { el.textContent = char; el.style.color = 'var(--accent-purple)'; el.style.opacity = '1'; }
     };
-    const active = {
-      'sort-icon-id': { color: '', opacity: '0.4' },
-      'sort-icon-uname': { color: '', opacity: '0.4' },
-      'sort-icon-name': { color: '', opacity: '0.4' },
-      'sort-icon-email': { color: '', opacity: '0.4' },
-      'sort-icon-created': { color: '', opacity: '0.4' },
-    };
-    const mark = (id, char) => { icons[id] = char; active[id] = { color: 'var(--accent-purple)', opacity: '1' }; };
+    for (const [id, char] of Object.entries(icons)) {
+      const el = q(id);
+      if (el) { el.textContent = char; el.style.color = ''; el.style.opacity = '0.4'; }
+    }
     if (currentSort === 'newest') { mark('sort-icon-id', '▼'); mark('sort-icon-created', '▼'); }
     else if (currentSort === 'oldest') { mark('sort-icon-id', '▲'); mark('sort-icon-created', '▲'); }
     else if (currentSort === 'uname_asc') mark('sort-icon-uname', '▲');
     else if (currentSort === 'uname_desc') mark('sort-icon-uname', '▼');
     else if (currentSort === 'name_asc') mark('sort-icon-name', '▲');
     else if (currentSort === 'email_asc') mark('sort-icon-email', '▲');
-
-    for (const [role, char] of Object.entries(icons)) {
-      const el = q(role);
-      if (el) {
-        el.textContent = char;
-        el.style.color = active[role].color;
-        el.style.opacity = active[role].opacity;
-      }
-    }
   }
 
   function getProcessedAccounts() {
@@ -779,14 +677,6 @@ function createCreatorWorkspace(root, def, state, shared) {
     return list;
   }
 
-  function comboOf(a) {
-    const u = a.instagram_username || a.username || '';
-    const p = a.password || '';
-    const email = a.email || '';
-    const c = a.cookies || a.cookie || '';
-    return `${u}|${p}|${email}|${c}`;
-  }
-
   function perPageCount() {
     return Math.max(1, parseInt((els.perPage && els.perPage.value) || '10', 10) || 10);
   }
@@ -803,8 +693,9 @@ function createCreatorWorkspace(root, def, state, shared) {
     const slice = filtered.slice(start, start + pp);
 
     if (slice.length === 0) {
+      const colCount = getVisibleCols().length || 1;
       els.resultsList.innerHTML = `
-        <tr><td colspan="${getVisibleColCount()}"><div class="insta-empty-state">
+        <tr><td colspan="${colCount}"><div class="insta-empty-state">
           <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 2rem; color: var(--text-muted); opacity: 0.5; margin-bottom: 0.5rem;"></i>
           <p>No accounts yet. Set Parallel + Target and click <strong>${def.startLabel}</strong>.</p>
         </div></td></tr>`;
@@ -827,6 +718,7 @@ function createCreatorWorkspace(root, def, state, shared) {
             <button type="button" class="btn btn-primary btn-sm" data-open-meta="${a.id}" title="Open persisted Meta session (auth.meta.com)${a.metaPersisted === false ? ' — no persisted profile, cookies only' : ''}"><i class="fa-brands fa-meta"></i> Meta</button>
             ${((a.mail_provider || 'mailtd') !== 'mailtd' || a.mailPersisted === false) ? '' : `<button type="button" class="btn btn-secondary btn-sm" data-open-mail="${a.id}" title="Open persisted mail inbox (mail.td)"><i class="fa-solid fa-envelope"></i> Mail</button>`}
             <button type="button" class="btn btn-secondary btn-sm" data-copy="${a.id}" title="Copy uname|pass|email|cookie"><i class="fa-solid fa-copy"></i></button>
+            ${(a.twofa_secret || a.twofa_key || a.totp_secret) ? `<button type="button" class="btn btn-secondary btn-sm" data-copy2fa="${a.id}" title="Copy 2FA Key: ${escapeHtml(a.twofa_secret || a.twofa_key || a.totp_secret)}" style="color: #60a5fa;"><i class="fa-solid fa-key"></i></button>` : ''}
             <button type="button" class="btn btn-secondary btn-sm" data-cookie="${a.id}" title="Export saved browser cookies (JSON)"><i class="fa-solid fa-cookie-bite"></i></button>
             <button type="button" class="btn btn-secondary btn-sm" data-edit="${a.id}" title="Edit stored fields"><i class="fa-solid fa-pen"></i></button>
             <button type="button" class="btn btn-secondary btn-sm" data-del="${a.id}" title="Delete account" style="color: #f87171;"><i class="fa-solid fa-xmark"></i></button>
@@ -876,50 +768,52 @@ function createCreatorWorkspace(root, def, state, shared) {
     return state.accounts.find((x) => String(x.id) === String(id));
   }
 
-  // Single delegated click handler for the results table — one listener for the
-  // whole tbody instead of ~7 per row on every render (less GC, faster paint).
+  // --- Table Action Button Delegation ---
   let rowsDelegated = false;
   function wireRowButtons() {
     if (rowsDelegated || !els.resultsList) return;
     rowsDelegated = true;
-    els.resultsList.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('button[data-del],button[data-copy],button[data-copypass],button[data-copyuname],button[data-copyemail],button[data-copyrawcookie],button[data-cookie],button[data-edit],button[data-open-meta],button[data-open-mail]');
+    els.resultsList.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-del],button[data-copy],button[data-copy2fa],button[data-copypass],button[data-copyuname],button[data-copyemail],button[data-copyrawcookie],button[data-cookie],button[data-edit],button[data-open-meta],button[data-open-mail]');
       if (!btn) return;
       const d = btn.dataset;
-      if (d.del !== undefined) { handleDelete(d.del); return; }
-      if (d.copy !== undefined) { handleCopy(d.copy); return; }
-      if (d.copypass !== undefined) { handleCopyField(d.copypass, 'password'); return; }
-      if (d.copyuname !== undefined) { handleCopyField(d.copyuname, 'username'); return; }
-      if (d.copyemail !== undefined) { handleCopyField(d.copyemail, 'email'); return; }
-      if (d.copyrawcookie !== undefined) {
-        const a = findAccount(d.copyrawcookie);
-        if (a && (a.cookies || a.cookie)) {
-          navigator.clipboard.writeText(a.cookies || a.cookie).then(() => showToast('Cookies copied!', 'success'));
-        } else {
-          showToast('No cookies found for this account.', 'warning');
-        }
-        return;
+      const id = d.del || d.copy || d.copy2fa || d.copypass || d.copyuname || d.copyemail || d.copyrawcookie || d.cookie || d.edit || d.openMeta || d.openMail;
+      const a = findAccount(id);
+      if (!a) return;
+
+      if (d.del !== undefined) return handleDelete(a);
+      if (d.copy !== undefined) {
+        const combo = `${a.instagram_username || a.username || ''}|${a.password || ''}|${a.email || ''}|${a.cookies || a.cookie || ''}`;
+        return navigator.clipboard.writeText(combo).then(() => showToast('Copied uname|pass|email|cookie!', 'success'));
       }
-      if (d.cookie !== undefined) { handleCookieExport(d.cookie, btn); return; }
-      if (d.edit !== undefined) { handleEdit(d.edit); return; }
-      if (d.openMeta !== undefined) { openMetaInstaAccount(d.openMeta, 'meta'); return; }
-      if (d.openMail !== undefined) { openMetaInstaAccount(d.openMail, 'mail'); return; }
+      if (d.copy2fa !== undefined) {
+        const k2 = a.twofa_secret || a.twofa_key || a.totp_secret || '';
+        return k2 ? navigator.clipboard.writeText(k2).then(() => showToast('2FA Key copied!', 'success')) : showToast('No 2FA Key found.', 'warning');
+      }
+      if (d.copypass !== undefined) return navigator.clipboard.writeText(a.password || '').then(() => showToast('Password copied!', 'success'));
+      if (d.copyuname !== undefined) return navigator.clipboard.writeText(a.instagram_username || a.username || '').then(() => showToast('Username copied!', 'success'));
+      if (d.copyemail !== undefined) return navigator.clipboard.writeText(a.email || '').then(() => showToast('Email copied!', 'success'));
+      if (d.copyrawcookie !== undefined) {
+        return (a.cookies || a.cookie) ? navigator.clipboard.writeText(a.cookies || a.cookie).then(() => showToast('Cookies copied!', 'success')) : showToast('No cookies found.', 'warning');
+      }
+      if (d.cookie !== undefined) return handleCookieExport(a, btn);
+      if (d.edit !== undefined) return handleEdit(a);
+      if (d.openMeta !== undefined) return miLaunchAccount(a.id, 'meta', a);
+      if (d.openMail !== undefined) return miLaunchAccount(a.id, 'mail', a);
     });
   }
 
-  async function handleDelete(id) {
-    const a = findAccount(id);
-    const uname = (a && (a.instagram_username || a.username)) || 'Unknown';
-    const email = (a && a.email) || 'N/A';
-    const name = (a && a.name) || '';
+  async function handleDelete(a) {
+    const uname = a.instagram_username || a.username || 'Unknown';
+    const email = a.email || 'N/A';
     const targetHtml = `
       <div style="display: flex; flex-direction: column; gap: 4px;">
         <div><strong style="color: var(--text-main);">Username:</strong> <span style="color: #60a5fa;">@${escapeHtml(uname)}</span></div>
         <div><strong style="color: var(--text-main);">Email:</strong> <span>${escapeHtml(email)}</span></div>
-        ${name ? `<div><strong style="color: var(--text-main);">Name:</strong> <span>${escapeHtml(name)}</span></div>` : ''}
-        <div style="font-size: 0.72rem; color: var(--text-dim); margin-top: 3px;"><strong>Record ID:</strong> ${escapeHtml(id)}</div>
+        ${a.name ? `<div><strong style="color: var(--text-main);">Name:</strong> <span>${escapeHtml(a.name)}</span></div>` : ''}
+        <div style="font-size: 0.72rem; color: var(--text-dim); margin-top: 3px;"><strong>Record ID:</strong> ${escapeHtml(a.id)}</div>
       </div>`;
-    const confirmed = await shared.showDeleteConfirmModal({
+    const confirmed = await MiModals.confirmDelete({
       title: 'Delete Account',
       message: `Delete account @${uname}?`,
       subtext: 'This permanently removes the account credentials, 2FA secret, and cookie session files.',
@@ -931,11 +825,11 @@ function createCreatorWorkspace(root, def, state, shared) {
       const res = await fetch('/api/meta-insta/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ id: a.id }),
       });
       if (res.ok) {
         showToast(`Account @${uname} deleted`, 'success');
-        appendLog(`[storage] Deleted account @${uname} (${id}).`);
+        logger.append(`[storage] Deleted account @${uname} (${a.id}).`);
       } else {
         showToast('Failed to delete account', 'error');
       }
@@ -945,32 +839,15 @@ function createCreatorWorkspace(root, def, state, shared) {
     await shared.refreshShared();
   }
 
-  function handleCopy(id) {
-    const a = findAccount(id);
-    if (!a) return;
-    navigator.clipboard.writeText(comboOf(a)).then(() => showToast('Copied uname|pass|email|cookie!', 'success'));
-  }
-
-  function handleCopyField(id, field) {
-    const a = findAccount(id);
-    if (!a) return;
-    let value = '';
-    if (field === 'password') value = a.password || '';
-    else if (field === 'username') value = a.instagram_username || a.username || '';
-    else value = a.email || '';
-    navigator.clipboard.writeText(value).then(() => showToast(`${field.charAt(0).toUpperCase() + field.slice(1)} copied!`, 'success'));
-  }
-
-  async function handleCookieExport(id, btn) {
-    const a = findAccount(id);
+  async function handleCookieExport(a, btn) {
     btn.disabled = true;
     try {
-      const r = await (await fetch(`/api/meta-insta/cookies?id=${encodeURIComponent(id)}`)).json();
+      const r = await (await fetch(`/api/meta-insta/cookies?id=${encodeURIComponent(a.id)}`)).json();
       if (!r || r.status !== 'SUCCESS' || !Array.isArray(r.cookies) || r.cookies.length === 0) {
         showToast('No saved cookies for this account.', 'warning');
         return;
       }
-      const uname = (a && (a.instagram_username || a.username)) || id;
+      const uname = a.instagram_username || a.username || a.id;
       const blob = new Blob([JSON.stringify(r.cookies, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -988,9 +865,8 @@ function createCreatorWorkspace(root, def, state, shared) {
     }
   }
 
-  function handleEdit(id) {
-    const a = findAccount(id);
-    if (!a || !shared.editModal) return;
+  function handleEdit(a) {
+    if (!shared.editModal) return;
     document.getElementById('metainsta-edit-id').value = a.id;
     document.getElementById('metainsta-edit-username').value = a.instagram_username || a.username || '';
     const passEl = document.getElementById('metainsta-edit-password');
@@ -1001,73 +877,12 @@ function createCreatorWorkspace(root, def, state, shared) {
     openModal(shared.editModal);
   }
 
-  /** Open one persisted site (Meta or mail) — separate clicks, separate sessions. */
-  async function openMetaInstaAccount(id, site) {
-    site = site === 'mail' ? 'mail' : 'meta';
-    if (!requireLicense('Active license key required to open browser profiles.')) return;
-    const flightKey = `meta-open:${id}:${site}`;
-    if (typeof tryClaimLaunch === 'function' && !tryClaimLaunch(flightKey)) {
-      showToast('This session is already opening — please wait.', 'info');
-      return;
-    }
-    try {
-      showToast(`Loading persisted ${site === 'mail' ? 'mail inbox' : 'Meta session'}...`, 'info');
-      let data;
-      try {
-        data = await (await fetch('/api/meta-insta/open', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id, site }),
-        })).json();
-      } catch (e) {
-        showToast(`Failed to load account: ${e.message}`, 'error');
-        return;
-      }
-      if (!data || data.status !== 'SUCCESS') {
-        showToast((data && data.error) || 'Account not found.', 'error');
-        return;
-      }
-      const cookies = Array.isArray(data.cookies) ? data.cookies : [];
-      const url = data.url || (site === 'mail' ? 'https://mail.td/' : 'https://auth.meta.com/');
-      let profile = typeof findProfileById === 'function' ? findProfileById(data.profileId) : null;
-      if (!profile) {
-        profile = FingerprintGenerator.generateProfile({
-          name: data.profileName || 'Meta account',
-          type: 'ANDROID_MOBILE',
-          customUrl: url,
-        });
-        profile.id = data.profileId;
-      }
-      profile.name = data.profileName || profile.name;
-      profile.cookies = cookies;
-      profile.customUrl = url;
-      ProfileManager.saveProfile(profile);
-      if (typeof renderProfiles === 'function') renderProfiles();
-      const extra = data.seeded ? 'persisted profile restored, ' : (data.persisted ? '' : 'no persisted profile, cookies only, ');
-      showToast(`Opening ${profile.name} (${extra}${cookies.length} cookies, ${site} tab)...`, 'info');
-      const out = await (await fetch('/api/launch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile: { ...profile, forceMobile: true }, url: [url], isSiteLauncher: false }),
-      })).json();
-      if (out.status === 'SUCCESS') {
-        showToast(site === 'mail' ? 'Mail inbox opened in persisted session!' : 'Meta session opened in persisted session!', 'success');
-      } else {
-        showToast(out.error || out.message || 'Browser failed to launch.', 'error');
-      }
-      if (typeof syncActiveSessions === 'function') syncActiveSessions();
-    } catch (e) {
-      showToast(`Open failed: ${e.message}`, 'error');
-    } finally {
-      if (typeof freeLaunch === 'function') freeLaunch(flightKey);
-    }
-  }
-
-  // --- controls --------------------------------------------------------------
+  // --- Engine Controls (Start / Stop) ---
   els.btnStart.addEventListener('click', async () => {
     if (!requireLicense('Active license key required to create accounts.')) return;
-    if (state.running) {
-      showToast(state.activeMode === def.mode ? 'This workspace is already running.' : 'The other workspace is running — stop it first.', 'info');
+    const isRunning = def.kind === 'meta' ? state.meta_running : state.ig_running;
+    if (isRunning) {
+      showToast('This workspace is already running.', 'info');
       return;
     }
     if (els.btnStart.disabled) return;
@@ -1080,6 +895,7 @@ function createCreatorWorkspace(root, def, state, shared) {
         target: parseInt(els.target.value, 10) || 0,
         delay: 4,
         headless: Boolean(els.headless && els.headless.checked),
+        twofa: Boolean(els.twofa && els.twofa.checked),
         new_username: (els.username.value || '').trim() || undefined,
         mail_provider: (mailRadio && mailRadio.value) || 'mailtd',
         captcha_mode: (captchaRadio && captchaRadio.value) || 'extension',
@@ -1097,16 +913,17 @@ function createCreatorWorkspace(root, def, state, shared) {
         return;
       }
       if (r.status === 'SUCCESS') {
-        state.running = true;
-        state.activeMode = def.mode;
+        if (def.kind === 'meta') state.meta_running = true;
+        else state.ig_running = true;
+        state.running = state.meta_running || state.ig_running;
         showToast(r.message || 'Creator started.', 'success');
-        appendLog(`[controller] ${r.message || 'started'}`);
+        logger.append(`[controller] ${r.message || 'started'}`);
       } else {
         if (r.status === 'UNLICENSED' && typeof requireLicense === 'function') {
           requireLicense(r.error || 'Active license key required to create accounts.');
         }
         showToast(r.error || 'Failed to start.', 'error');
-        appendLog(`[controller] ${r.error || 'start failed'}`);
+        logger.append(`[controller] ${r.error || 'start failed'}`);
       }
     } finally {
       els.btnStart.disabled = false;
@@ -1117,29 +934,37 @@ function createCreatorWorkspace(root, def, state, shared) {
   let stopBusy = false;
   els.btnStop.addEventListener('click', async () => {
     if (stopBusy) return;
-    if (!state.running) {
+    const runningHere = def.kind === 'meta' ? state.meta_running : state.ig_running;
+    if (!runningHere) {
       showToast('Engine is not running.', 'info');
       return;
     }
     stopBusy = true;
     try {
-      await fetch('/api/meta-insta/stop', { method: 'POST' });
-      state.running = false;
-      state.activeMode = null;
-      appendLog('[controller] Stop requested.');
+      await fetch('/api/meta-insta/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: def.kind, mode: def.mode }),
+      });
+      if (def.kind === 'meta') state.meta_running = false;
+      else state.ig_running = false;
+      state.running = state.meta_running || state.ig_running;
+      logger.append('[controller] Stop requested.');
     } finally {
       stopBusy = false;
     }
     await shared.refreshShared();
   });
 
+  // --- Export and Utility Actions ---
   if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => { window.location = `/api/meta-insta/export?format=csv&kind=${def.kind}`; });
   if (els.btnExportTxt) els.btnExportTxt.addEventListener('click', () => { window.location = `/api/meta-insta/export?format=txt&kind=${def.kind}`; });
+  if (els.btnExportXlsx) els.btnExportXlsx.addEventListener('click', () => { window.location = `/api/meta-insta/export-xlsx?kind=${def.kind}`; });
 
   if (els.btnClear) {
     els.btnClear.addEventListener('click', async () => {
       const count = state.accounts.length;
-      const confirmed = await shared.showDeleteConfirmModal({
+      const confirmed = await MiModals.confirmDelete({
         title: 'Clear All Accounts',
         message: `Are you sure you want to clear ALL ${count} accounts?`,
         subtext: 'This affects both the Meta and Instagram workspaces. A snapshot is saved in backups/ first.',
@@ -1153,13 +978,13 @@ function createCreatorWorkspace(root, def, state, shared) {
         body: JSON.stringify({ confirm: 'CLEAR' }),
       });
       showToast('All accounts cleared', 'info');
-      appendLog('[tracking] All accounts cleared.');
+      logger.append('[tracking] All accounts cleared.');
       page = 1;
       await shared.refreshShared();
     });
   }
 
-  if (els.btnClearLog && els.log) els.btnClearLog.addEventListener('click', () => { els.log.textContent = ''; });
+  if (els.btnClearLog) els.btnClearLog.addEventListener('click', () => logger.clear());
   if (els.btnCopyLog && els.log) {
     els.btnCopyLog.addEventListener('click', () => {
       const text = Array.from(els.log.children).map((c) => c.textContent).join('\n');
@@ -1169,11 +994,11 @@ function createCreatorWorkspace(root, def, state, shared) {
 
   if (els.btnDeepClean) {
     els.btnDeepClean.addEventListener('click', async () => {
-      if (state.running) {
+      if (state.meta_running || state.ig_running) {
         showToast('Stop the engine before deep cleaning.', 'warning');
         return;
       }
-      const confirmed = await shared.showDeleteConfirmModal({
+      const confirmed = await MiModals.confirmDelete({
         title: 'Deep Clean',
         message: 'Remove orphaned sessions, cookies and dead creator profiles?',
         subtext: 'Keeps all saved accounts and their files. Nova browser profiles are never touched.',
@@ -1187,7 +1012,7 @@ function createCreatorWorkspace(root, def, state, shared) {
           const rem = r.removed || {};
           const summary = `sessions=${rem.sessions || 0}, cookies=${rem.cookies || 0}, profiles=${rem.profiles || 0}`;
           showToast(`Deep clean done (${summary}).`, 'success');
-          appendLog(`[cleanup] Removed: ${summary}.`);
+          logger.append(`[cleanup] Removed: ${summary}.`);
         } else {
           showToast(r.error || 'Deep clean failed.', 'error');
         }
@@ -1217,12 +1042,12 @@ function createCreatorWorkspace(root, def, state, shared) {
   if (els.combo) {
     els.combo.addEventListener('click', () => {
       const link = document.createElement('a');
-      link.href = '/api/meta-insta/export-combo?kind=meta';
-      link.download = 'meta_combo.txt';
+      link.href = `/api/meta-insta/export-combo?kind=${def.kind}`;
+      link.download = `${def.kind}_combo.txt`;
       document.body.appendChild(link);
       link.click();
       link.remove();
-      showToast('Exporting Meta combos…', 'success');
+      showToast(`Exporting ${def.kind === 'ig' ? 'Instagram' : 'Meta'} combos…`, 'success');
     });
   }
 
@@ -1246,57 +1071,264 @@ function createCreatorWorkspace(root, def, state, shared) {
           showToast('At least one column must remain visible', 'warning');
           return;
         }
-        saveVisibleCols(checked.map((c) => c.getAttribute('data-col')));
+        localStorage.setItem(STORAGE_KEY_COLS, JSON.stringify(checked.map((c) => c.getAttribute('data-col'))));
         applyColumnVisibility();
         const emptyTd = els.resultsList.querySelector('.insta-empty-state')?.closest('td');
-        if (emptyTd) emptyTd.setAttribute('colspan', String(getVisibleColCount()));
+        if (emptyTd) emptyTd.setAttribute('colspan', String(getVisibleCols().length || 1));
       });
     });
     if (els.btnColsReset) {
       els.btnColsReset.addEventListener('click', (e) => {
         e.stopPropagation();
-        saveVisibleCols(ALL_COLS);
+        localStorage.setItem(STORAGE_KEY_COLS, JSON.stringify(MI_ALL_COLS));
         applyColumnVisibility();
         const emptyTd = els.resultsList.querySelector('.insta-empty-state')?.closest('td');
-        if (emptyTd) emptyTd.setAttribute('colspan', String(getVisibleColCount()));
+        if (emptyTd) emptyTd.setAttribute('colspan', String(getVisibleCols().length || 1));
       });
     }
   }
 
-  // React to shared state changes. Coalesced to one paint per animation frame
-  // (multiple SSE events + polls in the same tick collapse into a single
-  // render), and only the visible workspace repaints its table.
+  // Reactive updates
   let dirty = false;
   let paintRaf = null;
   function isVisible() {
     const panel = root.closest('.view-panel');
     return !panel || panel.classList.contains('active');
   }
-  function repaint() {
-    renderResults();
-    dirty = false;
-  }
   function schedulePaint() {
     if (paintRaf) return;
     paintRaf = requestAnimationFrame(() => {
       paintRaf = null;
       updateStats();
-      if (isVisible()) repaint();
+      if (isVisible()) { renderResults(); dirty = false; }
       else dirty = true;
     });
   }
 
   shared.subscribe(schedulePaint);
 
-  document.querySelectorAll('.nav-item[data-view]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      if (dirty && isVisible()) repaint();
+  function handleActivation() {
+    if (isVisible()) {
+      updateStats();
+      renderResults();
+      shared.refreshShared();
+    } else {
+      dirty = true;
+    }
+  }
+
+  window.addEventListener('nova:view-changed', handleActivation);
+  window.addEventListener('hashchange', () => requestAnimationFrame(handleActivation));
+
+  const panelEl = root.closest('.view-panel');
+  if (panelEl && typeof MutationObserver !== 'undefined') {
+    const observer = new MutationObserver((mutations) => {
+      for (const m of mutations) {
+        if (m.attributeName === 'class' && panelEl.classList.contains('active')) handleActivation();
+      }
     });
+    observer.observe(panelEl, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  document.querySelectorAll('.nav-item[data-view]').forEach((btn) => {
+    btn.addEventListener('click', () => setTimeout(handleActivation, 30));
   });
 
-  // Initial paint
+  // Initial render
   updateStats();
   renderResults();
 
-  return { def, root, appendLog, setProgress, logHasContent };
+  return {
+    def,
+    root,
+    appendLog: (line) => logger.append(line),
+    setProgress: (d) => {
+      if (els.progressLabel && d.detail) els.progressLabel.textContent = `Slot #${d.slot_id} — ${d.status}: ${d.detail}`;
+    },
+    logHasContent: () => logger.hasContent(),
+  };
+}
+
+// =============================================================================
+// 7. MAIN COORDINATOR & SSE (Entry: initMetaInsta)
+// =============================================================================
+
+function initMetaInsta() {
+  const mounts = document.querySelectorAll('.creator-mount');
+  if (!mounts.length) return;
+
+  const state = {
+    accounts: [],
+    meta_running: false,
+    ig_running: false,
+    running: false,
+    activeMode: null,
+    engineOk: true,
+    listeners: new Set(),
+  };
+
+  function isIgAccount(a) {
+    if (!a || (a.target || '') === 'telegram') return false;
+    return String(a.status || '') !== 'MetaCreated';
+  }
+
+  function notify() {
+    state.listeners.forEach((fn) => { try { fn(); } catch (e) {} });
+  }
+
+  let refreshInFlight = null;
+  function refreshShared() {
+    if (refreshInFlight) return refreshInFlight;
+    refreshInFlight = (async () => {
+      try {
+        const [s, acc] = await Promise.all([
+          fetch('/api/meta-insta/status').then((r) => r.json()),
+          fetch('/api/meta-insta/accounts').then((r) => r.json()),
+        ]);
+        state.meta_running = Boolean(s.meta_running !== undefined ? s.meta_running : (s.running && s.mode === 'meta'));
+        state.ig_running = Boolean(s.ig_running !== undefined ? s.ig_running : (s.running && s.mode === 'meta-ig'));
+        state.running = state.meta_running || state.ig_running;
+        state.engineOk = s.engineOk !== false;
+        if (s.mode === 'meta' || s.mode === 'meta-ig') state.activeMode = s.mode;
+        state.accounts = ((acc && acc.accounts) || [])
+          .filter((a) => String((a && a.target) || '') !== 'telegram');
+      } catch (e) {
+        state.running = false;
+        state.meta_running = false;
+        state.ig_running = false;
+      } finally {
+        refreshInFlight = null;
+      }
+      notify();
+    })();
+    return refreshInFlight;
+  }
+
+  // Initialize shared modals
+  MiModals.initDeleteConfirm();
+  const editModal = MiModals.initEditAccount(refreshShared);
+  MiModals.initGlobalPassword();
+
+  // Mount workspaces
+  const workspaces = [];
+  mounts.forEach((mount) => {
+    const kind = mount.getAttribute('data-kind') || 'meta';
+    if (!MI_WORKSPACE_DEFS[kind]) return;
+    mount.innerHTML = miCreatorPanelHtml(MI_WORKSPACE_DEFS[kind]);
+    workspaces.push(createCreatorWorkspace(mount, MI_WORKSPACE_DEFS[kind], state, {
+      isIgAccount,
+      refreshShared,
+      editModal,
+      subscribe: (fn) => { state.listeners.add(fn); return () => state.listeners.delete(fn); },
+    }));
+  });
+
+  if (window.NovaDiag) {
+    NovaDiag.refreshReasons();
+    NovaDiag.refreshLogs();
+  }
+
+  function activeWorkspace() {
+    let ws = workspaces.find((w) => w.def.mode === state.activeMode);
+    if (!ws) {
+      const visible = workspaces.find((w) => w.root.closest('.view-panel')?.classList.contains('active'));
+      ws = visible || workspaces[0];
+    }
+    return ws;
+  }
+
+  // SSE Event Stream
+  let es = null;
+  function handleSseEvent(d) {
+    if (d && (d.pipeline === 'telegram' || d.engine === 'tg')) return;
+
+    const targetWs = (d.engine === 'ig' || d.mode === 'meta-ig')
+      ? workspaces.find((w) => w.def.kind === 'ig')
+      : (d.engine === 'meta' || d.mode === 'meta' || d.mode === 'meta-only')
+        ? workspaces.find((w) => w.def.kind === 'meta')
+        : activeWorkspace();
+
+    if (d.type === 'log') {
+      if (targetWs) targetWs.appendLog(d.message || '');
+    } else if (d.type === 'loop_started') {
+      const mode = d.mode === 'meta-ig' ? 'meta-ig' : 'meta';
+      if (mode === 'meta-ig') state.ig_running = true;
+      else state.meta_running = true;
+      state.running = state.meta_running || state.ig_running;
+      if (targetWs) targetWs.appendLog(`[engine] Started ${d.concurrency || ''} session(s).`);
+      notify();
+    } else if (d.type === 'loop_stopped') {
+      if (d.engine === 'ig' || d.mode === 'meta-ig') state.ig_running = false;
+      else if (d.engine === 'meta' || d.mode === 'meta' || d.mode === 'meta-only') state.meta_running = false;
+      else {
+        state.meta_running = false;
+        state.ig_running = false;
+      }
+      state.running = state.meta_running || state.ig_running;
+      if (targetWs) targetWs.appendLog('[engine] Stopped.');
+      refreshShared();
+    } else if (d.type === 'status') {
+      if (d.engine === 'ig' || d.mode === 'meta-ig') {
+        state.ig_running = Boolean(d.running);
+      } else if (d.engine === 'meta' || d.mode === 'meta' || d.mode === 'meta-only') {
+        state.meta_running = Boolean(d.running);
+      } else if (d.meta_running !== undefined || d.ig_running !== undefined) {
+        if (d.meta_running !== undefined) state.meta_running = Boolean(d.meta_running);
+        if (d.ig_running !== undefined) state.ig_running = Boolean(d.ig_running);
+      } else {
+        state.running = Boolean(d.running);
+      }
+      state.running = state.meta_running || state.ig_running;
+      notify();
+    } else if (d.type === 'slot_event') {
+      if (targetWs) {
+        targetWs.appendLog(`[Slot #${d.slot_id}] ${d.status}: ${d.detail || ''}`);
+        targetWs.setProgress(d);
+      }
+      if (d.status === 'closed' || d.status === 'error') refreshShared();
+    } else if (d.type === 'account_created') {
+      if (targetWs) targetWs.appendLog(`[✔] Created: ${d.account?.username || d.account?.email || d.email || ''}`);
+      refreshShared();
+    } else if (d.type === 'license_invalid') {
+      state.running = false;
+      state.meta_running = false;
+      state.ig_running = false;
+      if (targetWs) targetWs.appendLog(`[License Error] ${d.message || 'Active license required.'}`);
+      showToast(d.message || 'Active license required.', 'error');
+      if (typeof requireLicense === 'function') requireLicense(d.message || 'Active license required to run the creator.');
+      refreshShared();
+    } else if (d.type === 'account_updated' || d.type === 'accounts_reset' || d.type === 'account_deleted') {
+      refreshShared();
+    }
+  }
+
+  function connectSse() {
+    try { if (es) es.close(); } catch (e) {}
+    es = new EventSource('/api/meta-insta/events');
+    es.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data);
+        if (d && d.type === 'batch' && Array.isArray(d.items)) {
+          for (const item of d.items) {
+            try { handleSseEvent(item); } catch (err) {}
+          }
+          return;
+        }
+        handleSseEvent(d);
+      } catch (err) {
+        const ws = activeWorkspace();
+        if (ws) ws.appendLog(e.data);
+      }
+    };
+    es.onerror = () => {};
+  }
+
+  refreshShared();
+  connectSse();
+  setInterval(() => { if (!document.hidden) refreshShared(); }, 10000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshShared(); });
+
+  if (workspaces[0] && !workspaces[0].logHasContent()) {
+    workspaces[0].appendLog('[system] Creator engine ready. Pick a workspace, set Parallel + Target and click Start.');
+  }
 }

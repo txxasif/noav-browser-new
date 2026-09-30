@@ -175,6 +175,15 @@ function getPythonBin() {
 
 const PYTHON_BIN = getPythonBin();
 
+// Extension-agnostic script resolution: finds .py or .pyc on disk.
+function resolveScript(script) {
+  const p = path.isAbsolute(script) ? script : path.join(ROOT_DIR, script);
+  if (fs.existsSync(p)) return p;
+  if (p.endsWith('.py') && fs.existsSync(p + 'c')) return p + 'c';
+  if (p.endsWith('.pyc') && fs.existsSync(p.slice(0, -1))) return p.slice(0, -1);
+  return p;
+}
+
 // Send JSON with gzip when the client accepts it. /api/meta-insta/accounts
 // is ~1.5 MB with 812 accounts (fetched every 10s poll) — gzip cuts it to
 // ~150-200 KB with zero frontend changes.
@@ -182,8 +191,9 @@ const PYTHON_BIN = getPythonBin();
 function runPythonJson(pythonBin, rootDir, script, args, timeoutMs) {
   return new Promise((resolve) => {
     let child;
+    const targetScript = resolveScript(path.isAbsolute(script) ? script : path.join(rootDir, script));
     try {
-      child = spawn(pythonBin, [path.join(rootDir, script)].concat(args || []), {
+      child = spawn(pythonBin, [targetScript].concat(args || []), {
         cwd: rootDir, windowsHide: true,
         env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONUTF8: '1' }),
       });
@@ -207,15 +217,16 @@ function runPythonJson(pythonBin, rootDir, script, args, timeoutMs) {
 // is refused until the whole app is restarted — the "everything shows BUSY and
 // nothing runs" wedge. A Node ChildProcess exposes exitCode once it has exited,
 // so reap on every status/guard read.
-function reapDeadEngine() {
+function reapDeadEngine(name) {
+  const target = slot(name);
   try {
-    if (slot().proc && slot().proc.exitCode !== null) {
-      console.log('[MetaCreator] Reaping stale engine handle (exitCode=' + slot().proc.exitCode + ')');
-      slot().proc = null;
-      slot().config = null;
+    if (target.proc && target.proc.exitCode !== null) {
+      console.log('[MetaCreator] Reaping stale engine handle (' + (name || activeEngine) + ', exitCode=' + target.proc.exitCode + ')');
+      target.proc = null;
+      target.config = null;
     }
   } catch (e) {}
-  return !!slot().proc;
+  return !!target.proc;
 }
 
 function sendJson(req, res, obj, statusCode) {
@@ -259,20 +270,28 @@ try {
   updateManager.cleanupStaleUpdateFiles(process.pkg ? process.execPath : null);
 } catch (e) {}
 
-// Per-pipeline engine slots. The Meta and Meta->IG tabs share ONE engine
-// (same process, different --mode), so there are two slots, not three.
-// Previously a single global meant starting TG Classic made the Meta/IG tabs
-// read "BUSY" even when the TG worker had already died. Each slot now carries
-// its own proc/in-flight flag/config, so a tab only ever reports ITS OWN state.
+// Per-pipeline engine slots. Meta Creator (meta-only) and Instagram Creator
+// (meta-ig) have independent slots so both can run concurrently and independently.
+// metainsta is maintained as a backward-compatible alias.
 const engineSlots = {
-  metainsta: { proc: null, inFlight: false, config: null },
-  tg:        { proc: null, inFlight: false, config: null },
+  meta:      { proc: null, inFlight: false, config: null, runlog: null },
+  ig:        { proc: null, inFlight: false, config: null, runlog: null },
+  metainsta: { proc: null, inFlight: false, config: null, runlog: null },
+  tg:        { proc: null, inFlight: false, config: null, runlog: null },
 };
-// Which slot the CURRENT request context operates on. Set at the top of every
-// engine route group (see setEngine('tg') / setEngine('metainsta')).
+// Which slot the CURRENT request context operates on.
 let activeEngine = 'metainsta';
-function setEngine(name) { activeEngine = (name === 'tg') ? 'tg' : 'metainsta'; }
-function slot() { return engineSlots[activeEngine]; }
+function setEngine(name) {
+  if (name === 'tg' || name === 'meta' || name === 'ig' || name === 'metainsta') {
+    activeEngine = name;
+  } else {
+    activeEngine = 'metainsta';
+  }
+}
+function slot(name) {
+  if (name && engineSlots[name]) return engineSlots[name];
+  return engineSlots[activeEngine];
+}
 // FastPay payout runner process (tg_fastpay.py). Separate from the TG Classic
 // engine slot: it must not run while that engine holds the sessions.
 // Each slot's config starts as null and is populated by its own start route;
@@ -335,18 +354,23 @@ function broadcastEvent(data) {
   writeSse(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-function consumeWorkerLine(line) {
+function consumeWorkerLine(line, engineName = null) {
   const trimmed = String(line || '').trim();
   if (!trimmed) return;
   diag.observe(trimmed);
+  const eng = engineName || activeEngine || 'metainsta';
+  const pipeline = (eng === 'tg') ? 'telegram' : 'meta';
+  const tag = (eng === 'tg') ? '[TG]' : (eng === 'ig' ? '[IG]' : '[Meta]');
   if (trimmed.startsWith('__EVENT__')) {
     try {
       const evt = JSON.parse(trimmed.slice(9));
+      if (!evt.pipeline) evt.pipeline = pipeline;
+      if (!evt.engine) evt.engine = eng;
       broadcastEvent(evt);
     } catch (e) {}
   } else {
-    console.log(`[Worker] ${trimmed}`);
-    broadcastEvent({ type: 'log', message: trimmed });
+    console.log(`${tag} ${trimmed}`);
+    broadcastEvent({ type: 'log', message: trimmed, pipeline, engine: eng });
   }
 }
 
@@ -459,19 +483,30 @@ function killProcessGroup(proc, signal = 'SIGTERM') {
   }
 }
 
-// Worker stdout line-buffer, shared by the metainsta + TG start routes.
-// A child-process stdout is a byte stream; a JSON event can be split across
-// chunks, so the partial line is kept instead of dropped/corrupted.
-let _workerStdoutBuffer = '';
-function resetWorkerBuffer() { _workerStdoutBuffer = ''; }
-function feedWorkerStdout(data) {
-  _workerStdoutBuffer += String(data == null ? '' : data.toString('utf-8'));
-  const lines = _workerStdoutBuffer.split('\n');
-  _workerStdoutBuffer = lines.pop() || '';
+// Worker stdout line-buffers, isolated per engine slot so concurrent runs don't interleave.
+const _workerBuffers = {
+  meta: '',
+  ig: '',
+  metainsta: '',
+  tg: '',
+};
+function resetWorkerBuffer(eng = null) {
+  if (eng && _workerBuffers[eng] !== undefined) _workerBuffers[eng] = '';
+  else { for (const k in _workerBuffers) _workerBuffers[k] = ''; }
+}
+function feedWorkerStdout(data, eng = null) {
+  const k = (eng && _workerBuffers[eng] !== undefined) ? eng : (activeEngine || 'metainsta');
+  _workerBuffers[k] = (_workerBuffers[k] || '') + String(data == null ? '' : data.toString('utf-8'));
+  const lines = _workerBuffers[k].split('\n');
+  _workerBuffers[k] = lines.pop() || '';
   return lines;
 }
-function flushWorkerBuffer() {
-  if (_workerStdoutBuffer) { consumeWorkerLine(_workerStdoutBuffer); _workerStdoutBuffer = ''; }
+function flushWorkerBuffer(eng = null) {
+  const k = (eng && _workerBuffers[eng] !== undefined) ? eng : (activeEngine || 'metainsta');
+  if (_workerBuffers[k]) {
+    consumeWorkerLine(_workerBuffers[k], k);
+    _workerBuffers[k] = '';
+  }
 }
 
 // FastPay payout runner procs (tg_fastpay.py). Separate from the TG Classic
@@ -491,7 +526,7 @@ module.exports = {
   PYTHON_BIN, ALL_BOTS,
   readEnabledBots, defaultBot, readTgPool, tgPoolUsable, storedGlobalPassword,
   backupUserData, readSettings, writeSettings, cookieFileFor,
-  runPythonJson, reapDeadEngine, sendJson,
+  runPythonJson, resolveScript, reapDeadEngine, sendJson,
   licenseMgr, updateManager, licenseConfig,
   engineSlots, setEngine, slot,
   sseClients, recentLogs, broadcastEvent, consumeWorkerLine,

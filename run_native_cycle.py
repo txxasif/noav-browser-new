@@ -272,8 +272,10 @@ def run_native_cycle_once(slot_id=92, worker_factory=None, is_headless=False,
             if not submitted:
                 raise RuntimeError("Taskly registration not confirmed — not recording Submitted")
             runner.tg_submitted = submitted
-            runner.save_ai_result(status="Submitted", target="telegram")
-            rec_id = runner.last_record_id
+            from tg_stats import record_submission
+            rec_id = f"tg_{int(time.time()*1000)}"
+            record_submission(bot_id or "taskly")
+            runner.last_record_id = rec_id
             emit_event({"type": "account_submitted", "pipeline": "telegram",
                         "tg_account": tg_acct["id"], "tg_bot": bot_id,
                         "account_id": rec_id})

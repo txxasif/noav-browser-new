@@ -27,6 +27,10 @@ const server = http.createServer((req, res) => {
   // active — so /api/meta-insta/status reported TG's worker as "running".
   ctx.setEngine(pathname.indexOf('/api/tg/') === 0 ? 'tg' : 'metainsta');
 
+  if (req.method !== 'GET' || (pathname.startsWith('/api/') && !pathname.endsWith('/status') && !pathname.endsWith('/events') && !pathname.endsWith('/accounts'))) {
+    console.log(`[HTTP] ${req.method} ${pathname}`);
+  }
+
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -55,9 +59,11 @@ const server = http.createServer((req, res) => {
 // Graceful shutdown
 function handleShutdown() {
   console.log('\n[MetaCreator] Shutting down server...');
-  if (ctx.slot().proc) {
-    ctx.killProcessGroup(ctx.slot().proc, 'SIGKILL');
-    ctx.slot().proc = null;
+  for (const s of Object.values(ctx.engineSlots || {})) {
+    if (s && s.proc) {
+      try { ctx.killProcessGroup(s.proc, 'SIGKILL'); } catch (e) {}
+      s.proc = null;
+    }
   }
   server.close(() => {
     process.exit(0);
@@ -84,6 +90,7 @@ server.on('error', (err) => {
 // tg_1.session + tg_3.session across a server restart).
 function killOrphanEngines() {
   try {
+    if (process.platform === 'win32') return; // POSIX ps not available on Windows
     const out = ctx.execSync('ps -eo pid=,ppid=,args=', { encoding: 'utf8' });
     const rows = [];
     for (const line of out.split('\n')) {

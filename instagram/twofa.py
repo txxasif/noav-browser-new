@@ -238,6 +238,8 @@ class IgTwofaMixin:
             self.log(f'[⚠️] 2FA entry not found (url={p.url}) | {self._page_tail(p)}')
             return None
         p.wait_for_timeout(1200)
+        if self._is_ig_dead_end_chooser(p):
+            raise IGDeadEnd("IG saved-account chooser detected during 2FA entry (session dropped) — aborting immediately")
         self._ac_recover_transient(p)
         self.log(f'[2fa] entry open (url={(p.url or "")[:90]}) | {self._page_tail(p, 160)}')
 
@@ -471,10 +473,9 @@ class IgTwofaMixin:
         return on
 
     def ig_enable_2fa(self) -> Optional[str]:
-        """Standalone 2FA setup using a locally generated pyotp code."""
-        import pyotp
+        """In IG creator, just scrape/copy the 2FA secret key from Accounts Center and return it."""
         secret = self.ig_2fa_begin()
         if not secret:
             return None
-        self.ig_2fa_confirm(pyotp.TOTP(secret).now())
+        self.log('<font color="#00FF00"><b>[🔑] 2FA key copied (confirmation skipped).</b></font>')
         return secret

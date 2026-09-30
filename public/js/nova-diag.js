@@ -218,11 +218,15 @@
       this.refreshReasons();
       this.refreshLogs();
       setInterval(function () {
-        NovaDiag.refreshReasons();
-      }, 10000);
-      setInterval(function () {
-        NovaDiag.refreshLogs();
+        if (document.querySelector('.diag-details[open]')) {
+          NovaDiag.refreshReasons();
+        }
       }, 15000);
+      setInterval(function () {
+        if (document.querySelector('.diag-details[open]')) {
+          NovaDiag.refreshLogs();
+        }
+      }, 30000);
     }
   };
 

@@ -27,7 +27,7 @@
 
 8. **No `__pycache__` in the artifact.** Stale `.pyc` caused a false `NameError` during testing. The build excludes it; verify `0` entries in the zip.
 
-9. **Per-engine slots, not one global.** `engineSlots = { metainsta, tg }` in `server/context.js` (entry `server.js`). `setEngine()` **must be called at the handler entry from the pathname**, not inside route blocks — a status read that ran before its own start-block set it reported whichever slot the *previous* request left active. `reapDeadEngine()` self-heals a stale handle (`exitCode !== null`).
+9. **Per-engine slots, not one global.** `engineSlots = { meta, ig, metainsta, tg }` in `server/context.js` (entry `server.js`). Meta Creator (`meta`) and Instagram Creator (`ig`) have dedicated independent slots allowing concurrent dual-pipeline execution without mutual exclusion. `setEngine()` **must be called at the handler entry from the pathname**, not inside route blocks — a status read that ran before its own start-block set it reported whichever slot the *previous* request left active. `reapDeadEngine(name)` self-heals a stale handle (`exitCode !== null`). Isolated per-slot line buffers prevent stdout interleaving.
 
 10. **Meta/IG/TG are NOT resource-independent.** They share Chromium, the RAM budget, and `data/accounts.json`. The slots fix *labelling*, not contention. `meta_auto_ai` shares its `telegram` engine slot deliberately.
 
@@ -75,6 +75,28 @@
     - **Selector hygiene**: In Accounts Center (`Login and security`), never match bare words like `"Meta"` or generic `:has-text("Email")` without strictly excluding sibling menu controls (`"Emails from Meta"`, `"Meta Security Checkup"`, `"Back to Instagram Settings"`). Loose matching clicks audit logs or exits the flow.
     - **Registry isolation**: Individual task step orders live in `tg_tasks.py` / `tg_flows.py` as data — never hardcode bot-specific step skips or reorders inside shared runner functions without checking `_flow_steps`.
 
+25. **Low-End Performance & Lean Telemetry (Zero Dev Bloat in Production).** Shipped Windows distributions must execute smoothly on low-end hardware (4-8 GB RAM, 2-4 cores, slow 5400 RPM HDD). Heavy developer diagnostics are strictly opt-in and MUST NOT run by default in production:
+    - **Failure evidence dumps** (`INSPECT_HEADLESS_EVIDENCE=0`): Never freeze Playwright taking 15s `full_page=True` PNG screenshots and full HTML DOM dumps to `logs/evidence/` on failure unless explicitly requested (`=1`).
+    - **Continuous stdout/stderr runlogs** (`META_ENABLE_RUNLOG=0`): `server/runlog.js` must return `null` and avoid continuous disk writes unless explicitly enabled (`=1`).
+    - **DOM discovery telemetry** (`META_DEBUG_DOM=0`): `_dump_dom_discovery` in `instagram/helpers.py` is bypassed in production.
+    - **Chromium resource constraints**: Chromium launches with `--renderer-process-limit=2` (or 1 on weak boxes), `--js-flags=--max-old-space-size=256` (V8 heap capped at 256MB instead of 512MB), `--disable-logging`, `--disable-crash-reporter`, `--disable-background-timer-throttling`, and `--disable-renderer-backgrounding`.
+    - **Diagnostic polling**: `public/js/nova-diag.js` only polls `/api/diag/reasons` and `/api/logs` when the diagnostic accordion details element (`.diag-details[open]`) is actively expanded by the user.
+    - **How to re-enable for deep debugging / investigation**: Every stripped dev feature is gated by clean environment variables. When reproducing bugs or reverse-engineering flows:
+      - `set INSPECT_HEADLESS_EVIDENCE=1`: Captures full-page failure PNG screenshots + DOM dumps to `logs/evidence/`.
+      - `set META_ENABLE_RUNLOG=1`: Restores stdout/stderr disk streaming to `logs/<pipeline>_<timestamp>.log`.
+      - `set META_DEBUG_DOM=1`: Restores DOM hierarchy dumps and discovery screenshots during element recovery in `instagram/helpers.py`.
+      - `set INSTA_SCREENSHOTS=1`: Restores step milestone screenshots in `screens/` during signup.
+      - **Windows launch with debug enabled**: Run from terminal: `set INSPECT_HEADLESS_EVIDENCE=1 && set META_ENABLE_RUNLOG=1 && Run-Console.bat` (or edit `Run-Console.bat`).
+      - **Linux dev run**: `INSPECT_HEADLESS_EVIDENCE=1 META_ENABLE_RUNLOG=1 META_DEBUG_DOM=1 python worker.py ...`
+
+26. **Windows Batch Syntax & Launcher Parity (`cmd.exe` Parenthesis Crash).** `cmd.exe` interprets any closing parenthesis `)` inside an `if (...) (` block as the end of that block—even inside an `echo` string. Never nest unescaped parentheses inside `if` statements in `.bat` files. `start.bat` is shipped as a root alias calling `Run.bat`.
+
+27. **Dynamic MTProto Session Resolution.** Absolute session file paths stored in `data/tg_accounts.json` break when folders move or Windows restarts. `tg_accounts.py` and `tg/common.py` must resolve `.session` paths via dynamic fallback searching both `data/tg_sessions/<id>.session` and the application root.
+
+28. **Telegram Bot XLSX Export Compliance.** XLSX exports of 2FA accounts (`/api/meta-insta/export-xlsx`) must omit headers (`rows = []`, data on row 1) and strictly filter for accounts with non-empty 2FA secret keys (`twofa_secret || twofa_key || totp_secret`). Bot uploaders crash if row 1 contains header text.
+
+29. **PayGo publishes an HOURLY STOCK COUNTER that the code ignores.** Verified live 2026-09-29 over MTProto: tapping `📱 Create Inst (Cookies)` makes PayGo post `⚡️ **Available this hour: X/5700**` as its own message *above* the task preview. `X = 0` means **sold out**, and the counter **refills on the hour** (observed `0` → `566` after the rollover) — it is NOT a constant. When Start is pressed at `0` the bot replies `⏳ This hour's limit is reached. Next execution will be available in N min.` (do NOT assume that arrives without a Start press). **Pressing `▶️ Start` costs NOTHING** — PayGo deducts only on a confirmed `✅ Account registered` (balance stayed exactly $0.0260 after Start issued live creds) — so availability probing is free and a Start press is the definitive test. `5700` appears in **zero** logs today: `mtproto_bot.choose_task` returns `True` as soon as the task button is found, ignoring the banner, so a sold-out hour burns the whole `TASK_WINDOW` before failing. Balance (currently $0.696 across 6 accounts ≈ 34 tasks) is the real budget; 5700 is never the binding constraint. Design + evidence: `R&D — Cookie-Farm Pipeline (PayGo drain from the IG Creator pool).md`. Also note Taskly's `🍪 Create Inst (No mail)` has **vanished** from its live `🍪 Cookies` menu (now `🐦 Create Twitter`), so the `cookie_2fa` flow cannot run until `tg_tasks.py` is updated.
+
 # 📚 Knowledge Base
 
 Project memory lives in Obsidian at **`01 Projects/Meta Creator/`**:
@@ -87,7 +109,8 @@ Project memory lives in Obsidian at **`01 Projects/Meta Creator/`**:
 | `TG Tasks/TG Task — Create Inst Cookies (new).md` | The PayGo cookie flow (IG cookie export → submit, no 2FA leg) + first Submitted record |
 | `TG Tasks/TG Bot — FastPay 2025 (Instagram 2FA).md` | The FastPay create bot (bot sends Username/Password → 2FA key → Confirm → paid) |
 | `TG Tasks/TG Tasks — Status & Verified Coverage.md` | Which tasks are actually **verified** (Submitted records) vs merely configured |
-| `Competitor Analysis — sell-toolnew.md` | Competitor teardown |
+| `Competitor Analysis — sell-toolnew.md` | Competitor teardown + their **direct IG private-API** calls (`/api/v1/web/accounts/edit/`) |
+| `R&D — Cookie-Farm Pipeline (PayGo drain from the IG Creator pool).md` | **DESIGN, no code yet.** PayGo's hourly stock counter (`⚡️ Available this hour: X/5700`, refills hourly; Start is FREE), the "Cookie Farm" drain architecture (skip Meta+IG creation, drain IG-Creator accounts by cookie), 5 corrected false assumptions, and the open questions |
 
 UI/UX governance: `30 System/AI/UI_UX_DESIGN_SYSTEM.md` + `10 Maps/UI & UX Design Intelligence MOC.md`.
 

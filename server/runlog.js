@@ -33,6 +33,11 @@ function _hhmmss() {
 
 /** Open a new run log for `pipeline`. Returns a handle for line()/end(). */
 function start(pipeline, meta) {
+  // Continuous stdout/stderr disk logging is dev-only (opt-in via META_ENABLE_RUNLOG=1 or META_DEBUG=1).
+  // Disabled by default to prevent heavy disk I/O bottlenecks and disk bloat on low-end machines.
+  if (process.env.META_ENABLE_RUNLOG !== '1' && process.env.META_DEBUG !== '1') {
+    return null;
+  }
   ensureDir();
   const file = path.join(LOG_DIR, `${pipeline}_${_stamp()}.log`);
   let stream = null;

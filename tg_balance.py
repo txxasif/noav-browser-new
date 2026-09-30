@@ -52,39 +52,90 @@ from ai_config import TG_BOTS, TG_ACCOUNTS_JSON  # noqa: E402
 from mtproto_bot import MtprotoTasklyBot, session_file  # noqa: E402
 
 # Always report BOTH bots, in this order, so the dashboard layout is stable.
-BOT_ORDER = ("taskly", "paygo")
+from tg_tasks import normalize as _norm_btn  # noqa: E402
+
+# Report all enabled bots (Taskly + PayGo + FastPay). Stable ordering.
+try:
+    from tg.registry import enabled_bots
+    BOT_ORDER = tuple(b for b in ("taskly", "paygo", "fastpay") if b in enabled_bots()) or ("taskly", "paygo", "fastpay")
+except Exception:
+    BOT_ORDER = ("taskly", "paygo", "fastpay")
+
+
+def _parse_balance_info(text: str) -> dict:
+    """Extract numeric amounts and clean summary from a bot's balance message.
+
+    Supports:
+      - Taskly: "💰 Your balance: $2.0978"
+      - PayGo:  "💰 Your balance: $0.1000"
+      - FastPay: "💰 **Balance:** `৳6.0` | `$0.05`\n👛 **Pending:** `৳180.0` | `$1.44`"
+    """
+    if not text:
+        return {"amount": None, "pending": None, "summary": ""}
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bal_line = next((line for line in lines if "balance" in line.lower() and "pending" not in line.lower()), None)
+    pending_line = next((line for line in lines if "pending" in line.lower()), None)
+    amount = None
+    pending_amt = None
+    target_line = bal_line if bal_line else text
+
+    # Extract amount from bal_line (prioritizing explicit USD '$')
+    m_usd = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", target_line)
+    if m_usd:
+        amount = round(float(m_usd.group(1)), 4)
+    else:
+        m_bdt = re.search(r"৳\s*([0-9]+(?:\.[0-9]+)?)", target_line)
+        if m_bdt:
+            amount = round(float(m_bdt.group(1)) / 125.0, 4)
+        else:
+            m_gen = re.search(r"[$\u20ac\u00a3]?\s*([0-9]+(?:[.,][0-9]+)?)", target_line)
+            if m_gen:
+                try:
+                    amount = round(float(m_gen.group(1).replace(",", ".")), 4)
+                except Exception:
+                    pass
+
+    # Extract pending amount if present
+    if pending_line:
+        m_pusd = re.search(r"\$\s*([0-9]+(?:\.[0-9]+)?)", pending_line)
+        if m_pusd:
+            pending_amt = round(float(m_pusd.group(1)), 4)
+        else:
+            m_pbdt = re.search(r"৳\s*([0-9]+(?:\.[0-9]+)?)", pending_line)
+            if m_pbdt:
+                pending_amt = round(float(m_pbdt.group(1)) / 125.0, 4)
+
+    # Human-friendly summary string for logs & CLI
+    if bal_line and ("৳" in text or "pending" in text.lower()):
+        m_b = re.search(r"৳\s*([0-9.]+)", bal_line)
+        bdt_str = f"৳{m_b.group(1)}" if m_b else ""
+        usd_str = f"${amount:.2f}" if amount is not None else ""
+        bal_disp = f"{bdt_str} ({usd_str})".strip() if bdt_str and usd_str else (usd_str or bdt_str)
+        summary = f"💰 Balance: {bal_disp}"
+        if pending_line:
+            m_pb = re.search(r"৳\s*([0-9.]+)", pending_line)
+            pbdt_str = f"৳{m_pb.group(1)}" if m_pb else ""
+            pusd_str = f"${pending_amt:.2f}" if pending_amt is not None else ""
+            p_disp = f"{pbdt_str} ({pusd_str})".strip() if pbdt_str and pusd_str else (pusd_str or pbdt_str)
+            summary += f" · Pending: {p_disp}"
+    else:
+        summary = text.strip().replace("\n", " ")
+        if len(summary) > 80:
+            summary = summary[:77] + "..."
+
+    return {"amount": amount, "pending": pending_amt, "summary": summary}
 
 
 def _amount(text: str):
     """Best-effort numeric value out of a bot balance reply (None if absent)."""
-    if not text:
-        return None
-    m = re.search(r"[$\u20ac\u00a3]?\s*([0-9][0-9., ]*[0-9]|[0-9])", text)
-    if not m:
-        return None
-    raw = m.group(1).replace(" ", "")
-    # If both separators appear, the LAST one is the decimal separator.
-    if "," in raw and "." in raw:
-        raw = raw.replace(",", "") if raw.rfind(".") > raw.rfind(",") else raw.replace(".", "").replace(",", ".")
-    else:
-        raw = raw.replace(",", ".")
-    try:
-        return round(float(raw), 4)
-    except Exception:
-        return None
+    return _parse_balance_info(text)["amount"]
 
 
 def _is_balance_reply(text: str) -> bool:
-    """True only if ``text`` is a bot balance answer, not an unrelated push.
-
-    Both bots answer the Balance tap with a fixed "💰 Your balance: $X" shape,
-    so require that marker AND a parsable amount. Anything else (a promo push,
-    a task expiry, a referral notice) is not a balance and must not be
-    scraped by ``_amount``.
-    """
+    """True only if ``text`` is a bot balance answer, not an unrelated push."""
     if not text or "balance" not in text.lower():
         return False
-    return _amount(text) is not None
+    return _parse_balance_info(text)["amount"] is not None
 
 
 def _new_incoming(bot, before_id, timeout, accept=None):
@@ -93,15 +144,6 @@ def _new_incoming(bot, before_id, timeout, accept=None):
     Returns ``(text, message_id, buttons)``; ``(None, None, [])`` on timeout.
     Outgoing echoes (our own ``Balance`` message) are skipped so we never show
     the button we just tapped as the "answer".
-
-    ``accept`` (optional predicate) guards against unsolicited bot traffic.
-    Telegram interleaves promo pushes and task-expiry notices with our own
-    replies, and accepting the FIRST incoming message with any text produced a
-    fabricated amount — observed 2026-09-27: tg_3's PayGo balance was reported
-    as $6.00 when the true value is $0.0000, because a different message landed
-    between the tap and the reply. Same defect class as ``start_task`` reading
-    stale credentials out of chat history. With ``accept`` set we keep polling
-    until a matching message arrives instead of returning the first text.
     """
     deadline = time.time() + max(0.0, timeout)
     while True:
@@ -131,11 +173,13 @@ def check_bot(tg_id, target, timeout=20.0):
                                bot_target=target, log=lambda *_: None)
         bot.start()                         # connect + resolve the bot entity
         bot.reset_to_main_menu()            # /start + escape any submenu
-        btns, _ = bot._buttons()
-        key = next((b for b in btns if "balance" in b.lower()), None)
+        key, _ = bot._wait_for_button("balance", timeout=8.0)
+        if not key:
+            btns, _ = bot._buttons()
+            key = next((b for b in btns if "balance" in _norm_btn(b)), None)
         if not key:
             out["error"] = "no Balance key on the main menu"
-            out["buttons"] = btns
+            out["buttons"] = bot._buttons()[0] if bot._buttons() else []
             out["messages"] = bot._recent_texts(2)
             return out
         before = bot._last_id()
@@ -146,8 +190,15 @@ def check_bot(tg_id, target, timeout=20.0):
             out["error"] = "no reply to Balance (timeout)"
             out["messages"] = bot._recent_texts(2)
             return out
-        out.update({"ok": True, "balance": text, "text": text,
-                    "amount": _amount(text), "buttons": after_btns or []})
+        parsed = _parse_balance_info(text)
+        out.update({
+            "ok": True,
+            "balance": parsed["summary"] or text,
+            "text": text,
+            "amount": parsed["amount"],
+            "pending": parsed["pending"],
+            "buttons": after_btns or [],
+        })
         return out
     except Exception as exc:                # session lost, network, 2FA, …
         out["error"] = str(exc)
@@ -182,10 +233,12 @@ def _pool_records():
 
 
 def check_all(timeout=20.0):
-    """Check Taskly + PayGo for EVERY MTProto account; skip leased (busy) ones."""
+    """Check all enabled bots for EVERY MTProto account; skip leased (busy) ones."""
     recs = [a for a in _pool_records()
             if str(a.get("mode") or "").lower() == "mtproto"]
-    accounts, tot = [], {"taskly": 0.0, "paygo": 0.0}
+    accounts = []
+    tot = {b: 0.0 for b in BOT_ORDER}
+    tot_pending = {b: 0.0 for b in BOT_ORDER}
     for a in recs:
         tid = str(a.get("id") or "")
         name = a.get("name") or a.get("label") or tid
@@ -194,25 +247,29 @@ def check_all(timeout=20.0):
                              "error": "busy (leased by a worker) — skipped",
                              "bots": [], "total": 0.0})
             continue
-        res = check(tid, timeout=timeout)
+        res = check(tid, bots=BOT_ORDER, timeout=timeout)
         for b in res.get("bots", []):
             tgt = b.get("target")
             if tgt in tot:
                 tot[tgt] += (b.get("amount") or 0.0)
+            if tgt in tot_pending:
+                tot_pending[tgt] += (b.get("pending") or 0.0)
         accounts.append({"id": tid, "name": name, "ok": res.get("ok"),
                          "error": res.get("error"), "bots": res.get("bots", []),
                          "total": res.get("total", 0.0)})
-    grand = tot["taskly"] + tot["paygo"]
+    grand = sum(tot.values())
+    totals = {b: round(tot[b], 4) for b in BOT_ORDER}
+    totals["grand"] = round(grand, 4)
+    totals["pending"] = {b: round(tot_pending[b], 4) for b in BOT_ORDER}
+    totals["fastpay_pending"] = round(tot_pending.get("fastpay", 0.0), 4)
     return {"ok": True, "count": len(accounts), "accounts": accounts,
-            "totals": {"taskly": round(tot["taskly"], 4),
-                       "paygo": round(tot["paygo"], 4),
-                       "grand": round(grand, 4)},
+            "totals": totals,
             "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Read Taskly/PayGo balances for MTProto account(s)")
+        description="Read Taskly/PayGo/FastPay balances for MTProto account(s)")
     ap.add_argument("--id", help="pool id (e.g. tg_4)")
     ap.add_argument("--all", action="store_true",
                     help="check every MTProto account in the pool")
@@ -230,7 +287,8 @@ def main():
         return 0 if res.get("ok") else 1
 
     if args.all:
-        print("=== Balances (Taskly + PayGo) ===")
+        labels = " + ".join((TG_BOTS.get(b, {}).get("name") or b) for b in BOT_ORDER)
+        print("=== Balances (%s) ===" % labels)
         for a in res.get("accounts", []):
             if not a.get("ok"):
                 print("%-6s %-14s ⚠ %s" % (a["id"], a.get("name", ""), a.get("error")))
@@ -240,7 +298,8 @@ def main():
                 bits.append("%s %s" % (b["name"], b.get("balance") if b.get("ok") else ("⚠ " + (b.get("error") or "n/a"))))
             print("%-6s %-14s %s" % (a["id"], a.get("name", ""), " | ".join(bits)))
         t = res.get("totals", {})
-        print("TOTALS: Taskly $%.4f · PayGo $%.4f · GRAND $%.4f" % (t.get("taskly", 0), t.get("paygo", 0), t.get("grand", 0)))
+        tot_str = " · ".join("%s $%.4f" % (b.capitalize(), t.get(b, 0)) for b in BOT_ORDER)
+        print("TOTALS: %s · GRAND $%.4f" % (tot_str, t.get("grand", 0)))
         return 0
 
     print("=== Balance for %s (%s) ===" % (args.id, res.get("session", "—")))

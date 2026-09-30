@@ -111,6 +111,18 @@
           '<span class="tg-bot-badge"><img src="img/bot_logo/fastpay.png" width="20" height="20" ' +
             'style="border-radius:50%;object-fit:cover;" onerror="this.style.display=\'none\'" alt=""> FastPay Bot</span>' +
         '</div>' +
+        '<div class="creator-service creator-task-service" style="margin-bottom:0.9rem;">' +
+          '<div class="creator-service-title"><i class="fa-solid fa-list-check" style="color:#22c55e;"></i> SELECT TASK</div>' +
+          '<div class="creator-options">' +
+            '<label class="creator-option" title="Instagram 2FA — create + payout" style="cursor:pointer;">' +
+              '<input type="radio" name="fastpay-task-radio" value="Instagram 2FA" checked> ' +
+              '<i class="fa-brands fa-instagram" style="color:#22c55e;"></i> Instagram 2FA ' +
+              '<span class="creator-option-hint">(create + payout)</span>' +
+            '</label>' +
+          '</div>' +
+          '<div class="creator-service-note">FastPay task — creates account with bot-issued credentials and submits 2FA key for payout.</div>' +
+          '<input type="hidden" id="fastpay-task" value="Instagram 2FA">' +
+        '</div>' +
         '<div class="tg-settings-grid">' +
           tgField('Parallel creators',
             '<input id="fastpay-conc" class="form-control" type="number" min="1" max="10" value="1">',
@@ -118,11 +130,6 @@
           tgField('Target goal',
             '<input id="fastpay-target" class="form-control" type="number" min="0" value="0">',
             '0 = every pending account') +
-          tgField('Task name',
-            '<select id="fastpay-task" class="form-control">' +
-              '<option value="Instagram 2FA">Instagram 2FA</option>' +
-            '</select>',
-            'Only this bot\u2019s tasks') +
           tgSwitch('Visible window', 'fastpay-vis-sw', false, 'fastpay-vis-lbl', 'N/A',
             NA_HINT, true) +
           tgSwitch('Extra email after 2FA + password', 'fastpay-adde-sw', false, 'fastpay-adde-lbl', 'N/A',

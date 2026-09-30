@@ -536,8 +536,14 @@ class IgJoinMixin:
                     p.wait_for_timeout(1500)
                     continue
                 else:
-                    self.log('[⚠️] TG bot replacement task not returned — waiting before retry…')
-                    p.wait_for_timeout(2000)
+                    self.log('[⚠️] TG bot replacement task not returned — mutating username with fresh suffix…')
+                    base = re.sub(r'[\d_]+$', '', self.ig_username or "user") or "user"
+                    fresh_uname = f"{base}_{random.randint(100, 99999)}"
+                    if hasattr(self, "tg_creds") and isinstance(self.tg_creds, dict) and "login" in self.tg_creds:
+                        self.tg_creds["login"] = fresh_uname
+                    self.new_username = fresh_uname
+                    self.username = fresh_uname
+                    p.wait_for_timeout(1500)
 
         # 2b. "Create a password" if prompted during onboarding
         desired_pw = (self.tg_creds.get("password") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_password", None) or getattr(self, "password", None)

@@ -464,8 +464,10 @@ class IgLoginMixin:
                 break
             try:
                 _tail = self._page_tail(p, 300)
-                # (i) One-tap "Continue as <user>" — session IS valid, just tap it.
-                if ("Continue as" in _tail or ("Continue" in _tail and "Use another profile" in _tail)):
+                if self._is_ig_dead_end_chooser(p):
+                    raise IGDeadEnd("IG saved-account chooser detected during login (session dropped) — aborting immediately")
+                # (i) One-tap "Continue as <user>" — ONLY if not the dead-end chooser
+                if "Continue as" in _tail and "Use another profile" not in _tail:
                     if self._try_click(p, f"Continue as {username}", timeout=4000):
                         self.log(f'[➡️] Tapped "Continue as {username}".')
                     elif self._try_click(p, "Continue", timeout=4000):

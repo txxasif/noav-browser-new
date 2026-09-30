@@ -47,18 +47,84 @@
       tasks: [['Instagram 2FA', 'Instagram 2FA — create + payout']] },
   };
 
-  function renderTaskOptions(bot) {
-    var t = $('tg-task');
-    var list = (BOT_META[bot] || BOT_META.taskly).tasks;
-    if (!t) return;
-    var keep = t.value, html = '';
-    for (var i = 0; i < list.length; i++) {
-      html += '<option value="' + esc(list[i][0]) + '">' + esc(list[i][1]) + '</option>';
+  var TASK_NOTES = {
+    '📱 Create Inst (2FA)': 'Native Taskly 2FA task — email and code come directly from the bot; no extra mailbox required.',
+    '🍪 Create Inst (No mail)': 'Taskly Cookie + 2FA task — creates account, sets 2FA, and exports session cookie for verification.',
+    '🔥 Create Inst (No mail)': 'Taskly No-mail task — 2FA flow with direct password setting.',
+    '📱 Create Inst (Cookies)': 'PayGo cookie task — registers via Meta, joins Instagram, and submits exported session cookie.',
+    'Instagram 2FA': 'FastPay task — creates account with bot-issued credentials and submits 2FA key for payout.'
+  };
+
+  function updateTaskNote(taskVal, rawLabel) {
+    var noteEl = $('tg-task-note');
+    if (!noteEl) return;
+    if (TASK_NOTES[taskVal]) {
+      noteEl.textContent = TASK_NOTES[taskVal];
+    } else if (rawLabel && rawLabel.indexOf(' — ') !== -1) {
+      noteEl.textContent = 'Selected task flow: ' + rawLabel.split(' — ')[1];
+    } else {
+      noteEl.textContent = 'Active task: ' + (taskVal || 'Default flow');
     }
-    t.innerHTML = html;
+  }
+
+  function renderTaskOptions(bot) {
+    var hidden = $('tg-task');
+    var container = $('tg-task-options');
+    var list = (BOT_META[bot] || BOT_META.taskly).tasks;
+    if (!container) return;
+
+    var keep = hidden ? hidden.value : '';
     var valid = false;
-    for (var j = 0; j < list.length; j++) { if (list[j][0] === keep) valid = true; }
-    t.value = valid ? keep : list[0][0];
+    for (var j = 0; j < list.length; j++) {
+      if (list[j][0] === keep) valid = true;
+    }
+    var currentVal = valid ? keep : (list[0] ? list[0][0] : '');
+    if (hidden) hidden.value = currentVal;
+
+    var html = '';
+    var selectedRawLabel = '';
+    for (var i = 0; i < list.length; i++) {
+      var val = list[i][0];
+      var rawLabel = list[i][1] || val;
+      var parts = rawLabel.split(' — ');
+      var title = parts[0] || val;
+      var hint = parts[1] ? ' (' + parts[1] + ')' : '';
+      var isChecked = (val === currentVal) ? ' checked' : '';
+      if (val === currentVal) selectedRawLabel = rawLabel;
+
+      var iconHtml = '';
+      if (val.indexOf('Instagram') === 0) {
+        iconHtml = '<i class="fa-brands fa-instagram" style="color:var(--accent-purple);"></i> ';
+      }
+
+      html += '<label class="creator-option" title="' + esc(rawLabel) + '" style="cursor:pointer;">' +
+        '<input type="radio" name="tg-task-radio" value="' + esc(val) + '"' + isChecked + '> ' +
+        iconHtml + esc(title) +
+        (hint ? ' <span class="creator-option-hint">' + esc(hint) + '</span>' : '') +
+      '</label>';
+    }
+    container.innerHTML = html;
+    updateTaskNote(currentVal, selectedRawLabel);
+
+    var radios = container.querySelectorAll('input[name="tg-task-radio"]');
+    for (var r = 0; r < radios.length; r++) {
+      (function (radio) {
+        radio.addEventListener('change', function () {
+          if (this.checked) {
+            if (hidden) {
+              hidden.value = this.value;
+              try { hidden.dispatchEvent(new Event('change')); } catch (e) { applyFlowGuards(); }
+            }
+            var matchingLabel = '';
+            for (var k = 0; k < list.length; k++) {
+              if (list[k][0] === this.value) { matchingLabel = list[k][1]; break; }
+            }
+            updateTaskNote(this.value, matchingLabel);
+            applyFlowGuards();
+          }
+        });
+      })(radios[r]);
+    }
   }
 
   function updateBotBadge(bot) {
@@ -74,21 +140,76 @@
   // toggle so the operator is not misled; it is also ignored server-side.
   // Same for the native 2FA task (bot email+code, no mailbox at all).
   function applyFlowGuards() {
+    var isPayGo = (state.bot === 'paygo');
+    var igPoolField = $('tg-igpool-field');
+    var igPoolSw = $('tg-igpool-sw');
+
+    if (igPoolField) {
+      igPoolField.style.display = isPayGo ? 'flex' : 'none';
+      if (!isPayGo && igPoolSw) {
+        igPoolSw.checked = false;
+      }
+    }
+
+    var isIgPoolActive = isPayGo && !!(igPoolSw && igPoolSw.checked);
+
     var task = ($('tg-task') || {}).value || '';
     var cookie = isCookieTask(task);
     var native = isNativeTask(task);
-    var off = cookie || native;
-    var sw = $('tg-adde-sw');
-    var lbl = $('tg-adde-lbl');
-    var field = sw ? sw.closest('.creator-field') : null;
-    if (sw) {
-      sw.disabled = off;
-      sw.title = cookie
-        ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
-        : (native ? 'Not used by the native 2FA task — email + code come from the bot.' : '');
+    var offAdde = isIgPoolActive || cookie || native;
+
+    var swAdde = $('tg-adde-sw');
+    var fieldAdde = $('tg-adde-field') || (swAdde ? swAdde.closest('.creator-field') : null);
+    if (swAdde) {
+      swAdde.disabled = offAdde;
+      swAdde.title = isIgPoolActive
+        ? 'Disabled: Draining from IG Creator accounts pool'
+        : (cookie
+          ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
+          : (native ? 'Not used by the native 2FA task — email + code come from the bot.' : 'Fresh mail.td email before the task registers.'));
     }
-    if (field) field.style.opacity = off ? '0.5' : '1';
-    if (lbl) lbl.textContent = off ? 'Not used' : (addEmail ? 'On' : 'Off');
+    if (fieldAdde) fieldAdde.style.opacity = offAdde ? '0.4' : '1';
+
+    // When IG Creator Accounts is chosen, disable the rest, leaving ONLY headless and ON/OFF:
+    var concInput = $('tg-conc');
+    var targetInput = $('tg-target');
+    var concField = concInput ? concInput.closest('.creator-field') : null;
+    var targetField = targetInput ? targetInput.closest('.creator-field') : null;
+    var taskSection = document.querySelector('.creator-task-service');
+    var servicesPanel = document.querySelector('.creator-services');
+
+    if (concInput) concInput.disabled = isIgPoolActive;
+    if (concField) concField.style.opacity = isIgPoolActive ? '0.4' : '1';
+
+    if (targetInput) targetInput.disabled = isIgPoolActive;
+    if (targetField) targetField.style.opacity = isIgPoolActive ? '0.4' : '1';
+
+    if (taskSection) {
+      taskSection.style.opacity = isIgPoolActive ? '0.4' : '1';
+      taskSection.style.pointerEvents = isIgPoolActive ? 'none' : 'auto';
+    }
+
+    if (servicesPanel) {
+      servicesPanel.style.opacity = isIgPoolActive ? '0.4' : '1';
+      servicesPanel.style.pointerEvents = isIgPoolActive ? 'none' : 'auto';
+      var serviceInputs = servicesPanel.querySelectorAll('input');
+      for (var s = 0; s < serviceInputs.length; s++) {
+        serviceInputs[s].disabled = isIgPoolActive;
+      }
+    }
+
+    // Only headless and ON/OFF remain enabled
+    var headlessSw = $('tg-headless-sw');
+    if (headlessSw) {
+      headlessSw.disabled = false;
+    }
+
+    if (isIgPoolActive) {
+      var noteEl = $('tg-task-note');
+      if (noteEl) {
+        noteEl.textContent = '⚡ IG Creator Accounts Pool active: Fast copy-paste username change & cookie submission into PayGo. Zero browser creation.';
+      }
+    }
   }
 
   // Called by the sidebar submenu: switch this page to a bot.
@@ -154,34 +275,6 @@
              ' style="color:var(--text-muted);">' + esc(sub) + '</div></div>';
   }
 
-  // Creator-settings building blocks. The ported panel rendered Mail/Captcha
-  // as bare text (looked like empty inputs) and its switch columns used a fixed
-  // height + justify-end, so they never lined up with the inputs. These keep
-  // every column: label -> control -> hint, with the control on the same
-  // vertical grid.
-  function tgField(label, control, hint) {
-    return '<div class="creator-field"><label>' + label + '</label>' + control +
-      (hint ? '<div class="creator-option-hint">' + hint + '</div>' : '') + '</div>';
-  }
-  function tgSwitch(label, swId, checked, lblId, lblText, hint) {
-    return '<div class="creator-field"><label>' + label + '</label>' +
-      '<div class="tg-settings-check">' +
-        '<label class="switch" title="' + esc(hint) + '">' +
-          '<input type="checkbox" id="' + swId + '"' + (checked ? ' checked' : '') + '>' +
-          '<span class="slider"></span></label>' +
-        '<span class="creator-option-hint" id="' + lblId + '">' + esc(lblText) + '</span>' +
-      '</div>' +
-      '<div class="creator-option-hint">' + hint + '</div>' +
-    '</div>';
-  }
-  function tgInfo(label, val, sub) {
-    return '<div class="creator-field"><label>' + label + '</label>' +
-      '<div class="tg-settings-info">' +
-        '<div class="tg-settings-info-val">' + val + '</div>' +
-        '<div class="tg-settings-info-sub">' + sub + '</div>' +
-      '</div></div>';
-  }
-
   function shell() {
     root.innerHTML =
       /* ---- KPIs ---- */
@@ -214,31 +307,80 @@
         '</div>' +
       '</div>' +
 
-/* ---- creator settings ---- */
+      /* ---- creator settings ---- */
       '<div class="card-panel creator-panel tg-settings">' +
-        '<div class="card-top" style="margin-bottom:1rem;">' +
+        '<div class="card-top" style="margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center;">' +
           '<div>' +
             '<h3 class="panel-header" style="margin:0;"><i class="fa-solid fa-sliders" style="color:var(--accent-purple);"></i> Creator Settings</h3>' +
             '<div class="panel-desc" style="margin:0;">Applies to the next TG engine start.</div>' +
           '</div>' +
           '<span class="tg-bot-badge" id="tg-bot-badge"></span>' +
         '</div>' +
-        '<div class="tg-settings-grid">' +
-          tgField('Parallel creators',
-            '<input id="tg-conc" class="form-control" type="number" min="1" max="10" value="1">',
-            '1&ndash;10 simultaneous creators') +
-          tgField('Target goal',
-            '<input id="tg-target" class="form-control" type="number" min="0" value="0">',
-            '0 = run until stopped') +
-          tgField('Task name',
-            '<select id="tg-task" class="form-control"></select>',
-            'Only this bot\u2019s tasks') +
-          tgSwitch('Visible window', 'tg-vis-sw', true, 'tg-vis-lbl', 'Visible',
-            'On = a real browser window opens. Off = background.') +
-          tgSwitch('Extra email after 2FA + password', 'tg-adde-sw', true, 'tg-adde-lbl', 'On',
-            'Fresh mail.td email before the task registers.') +
-          tgInfo('Mail inbox', 'mail.td', 'Only enabled provider') +
-          tgInfo('Captcha solver', 'Visual AI &rarr; Audio fallback', 'Audio used if Visual AI stalls') +
+        '<div class="creator-service creator-task-service" style="margin-bottom:0.9rem;">' +
+          '<div class="creator-service-title"><i class="fa-solid fa-list-check" style="color:var(--accent-purple);"></i> SELECT TASK</div>' +
+          '<div class="creator-options" id="tg-task-options"></div>' +
+          '<div class="creator-service-note" id="tg-task-note"></div>' +
+          '<input type="hidden" id="tg-task" value="">' +
+        '</div>' +
+        '<div class="creator-grid">' +
+          '<div class="creator-field">' +
+            '<label>Parallel</label>' +
+            '<input id="tg-conc" class="form-control" type="number" min="1" max="10" value="1">' +
+          '</div>' +
+          '<div class="creator-field">' +
+            '<label>Target (0 = \u221e)</label>' +
+            '<input id="tg-target" class="form-control" type="number" min="0" value="0">' +
+          '</div>' +
+          '<div class="creator-field creator-field--switch">' +
+            '<label>Headless</label>' +
+            '<label class="switch" title="Run browsers headless (no visible window)">' +
+              '<input type="checkbox" id="tg-headless-sw">' +
+              '<span class="slider"></span>' +
+            '</label>' +
+          '</div>' +
+          '<div class="creator-field creator-field--switch" id="tg-adde-field">' +
+            '<label>Extra Email</label>' +
+            '<label class="switch" title="Fresh mail.td email before task registration">' +
+              '<input type="checkbox" id="tg-adde-sw" checked>' +
+              '<span class="slider"></span>' +
+            '</label>' +
+          '</div>' +
+          '<div class="creator-field creator-field--switch" id="tg-igpool-field" style="display:none;">' +
+            '<label style="color:var(--accent-green);font-weight:700;">IG Creator Accounts</label>' +
+            '<label class="switch" title="Drain pre-created accounts directly from the IG Creator list (PayGo only)">' +
+              '<input type="checkbox" id="tg-igpool-sw">' +
+              '<span class="slider"></span>' +
+            '</label>' +
+          '</div>' +
+        '</div>' +
+        '<div class="creator-services" id="tg-services-panel">' +
+          '<div class="creator-service">' +
+            '<div class="creator-service-title"><i class="fa-solid fa-envelope" style="color:var(--accent-cyan);"></i> MAIL INBOX</div>' +
+            '<div class="creator-options">' +
+              '<label class="creator-option">' +
+                '<input type="radio" name="tg-mail" value="mailtd" checked> ' +
+                '<i class="fa-solid fa-inbox" style="color:var(--accent-green);"></i> mail.td ' +
+                '<span class="creator-option-hint">(only provider)</span>' +
+              '</label>' +
+            '</div>' +
+            '<div class="creator-service-note">mail.td is the only enabled mailbox provider.</div>' +
+          '</div>' +
+          '<div class="creator-service">' +
+            '<div class="creator-service-title"><i class="fa-solid fa-shield-halved" style="color:var(--accent-purple);"></i> CAPTCHA SOLVER</div>' +
+            '<div class="creator-options">' +
+              '<label class="creator-option" title="Visual challenge first via in-browser YOLOv5 ONNX AI extension, automatic fallback to Audio STT">' +
+                '<input type="radio" name="tg-captcha" value="extension" checked> ' +
+                '<i class="fa-solid fa-eye" style="color:var(--accent-green);"></i> Visual AI (JA) ' +
+                '<span class="creator-option-hint">(\u2192 Audio fallback)</span>' +
+              '</label>' +
+              '<label class="creator-option" title="Audio challenge first via Whisper / Vosk speech recognition, automatic fallback to Visual AI">' +
+                '<input type="radio" name="tg-captcha" value="audio"> ' +
+                '<i class="fa-solid fa-headphones" style="color:var(--accent-purple);"></i> Audio (Whisper) ' +
+                '<span class="creator-option-hint">(\u2192 Visual fallback)</span>' +
+              '</label>' +
+            '</div>' +
+            '<div class="creator-service-note">Visual AI is the default; audio is used automatically if the visual solver stalls.</div>' +
+          '</div>' +
         '</div>' +
       '</div>' +
 
@@ -269,18 +411,16 @@
   }
 
   function setWindow(headless) {
-    state.cfg.headless = headless;                       // headless=true -> window OFF
-    var sw = $('tg-vis-sw');
-    if (sw) sw.checked = !headless;                      // switch ON = visible
-    var lbl = $('tg-vis-lbl');
-    if (lbl) lbl.textContent = headless ? 'Background' : 'Visible';
+    state.cfg.headless = !!headless;
+    var sw = $('tg-headless-sw');
+    if (sw) sw.checked = !!headless;
   }
 
   var addEmail = true;
   function setAddEmail(on) {
-    addEmail = on;
-    var sw = $('tg-adde-sw'); if (sw) sw.checked = on;
-    var lbl = $('tg-adde-lbl'); if (lbl) lbl.textContent = on ? 'On' : 'Off';
+    addEmail = !!on;
+    var sw = $('tg-adde-sw');
+    if (sw) sw.checked = !!on;
   }
 
   // Pool preflight for Start. The coupled cycle creates a Meta account BEFORE
@@ -326,21 +466,28 @@
         } else {
           var task = ($('tg-task') || {}).value ||
             ((BOT_META[bot] || BOT_META.taskly).tasks[0] || [''])[0];
-          // Cookie tasks have no email step (tg_flows.py) — force add_email off.
-          // Same for the native 2FA task (bot email+code, no mailbox at all).
-          var effAddEmail = (isCookieTask(task) || isNativeTask(task)) ? false : addEmail;
+          var isIgPool = (bot === 'paygo') && !!($('tg-igpool-sw') && $('tg-igpool-sw').checked);
+          var effConc = isIgPool ? 1 : parseInt(($('tg-conc') || {}).value || 1, 10);
+          var effTarget = isIgPool ? 0 : parseInt(($('tg-target') || {}).value || 0, 10);
+          var effAddEmail = (isIgPool || isCookieTask(task) || isNativeTask(task)) ? false : addEmail;
+          var captchaEl = document.querySelector('input[name="tg-captcha"]:checked');
+          var captchaChoice = captchaEl ? captchaEl.value : 'extension';
           append('> start (' + st.connected + ' connected \u00b7 ' + botName +
-                 ', parallel=' + (($('tg-conc') || {}).value || '?') +
-                 ', target=' + (($('tg-target') || {}).value || '?') +
-                 ', ' + (state.cfg.headless ? 'background' : 'visible') +
+                 (isIgPool ? ' [POOL DRAIN: IG Creator Accounts]' : '') +
+                 ', parallel=' + effConc +
+                 ', target=' + effTarget +
+                 ', ' + (state.cfg.headless ? 'headless' : 'visible') +
+                 ', captcha=' + captchaChoice +
                  ', add_email=' + effAddEmail + ')');
           post('/api/tg/start', {
-            concurrency: parseInt(($('tg-conc') || {}).value || 5, 10),
-            target: parseInt(($('tg-target') || {}).value || 0, 10),
+            concurrency: effConc,
+            target: effTarget,
             headless: state.cfg.headless,
+            captcha: captchaChoice,
             tg_task: task,
             tg_bot: bot,
             add_email: effAddEmail,
+            use_ig_pool: isIgPool,
           });
         }
       })
@@ -356,8 +503,9 @@
     if ($('tg-stop')) $('tg-stop').addEventListener('click', function () { post('/api/tg/stop', {}); });
     window.__setTgBot(state.bot);
     if ($('tg-task')) $('tg-task').addEventListener('change', applyFlowGuards);
-    if ($('tg-vis-sw')) $('tg-vis-sw').addEventListener('change', function () { setWindow(!$('tg-vis-sw').checked); });
-    if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; if ($('tg-adde-lbl')) $('tg-adde-lbl').textContent = addEmail ? 'On' : 'Off'; });
+    if ($('tg-igpool-sw')) $('tg-igpool-sw').addEventListener('change', applyFlowGuards);
+    if ($('tg-headless-sw')) $('tg-headless-sw').addEventListener('change', function () { setWindow($('tg-headless-sw').checked); });
+    if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; });
     if ($('tg-refresh')) $('tg-refresh').addEventListener('click', refresh);
     if ($('tg-clear')) $('tg-clear').addEventListener('click', function () { state.log = []; paintLog(); });
     if ($('tg-copy')) $('tg-copy').addEventListener('click', function () {
@@ -399,18 +547,22 @@
           return isNaN(n) ? null : n;
         };
         var fmt = function (n) { return n == null ? '\u2014' : '$' + n.toFixed(2); };
-        var okCount = 0, tT = 0, tP = 0, tG = 0;
+        var okCount = 0, tT = 0, tP = 0, tF = 0, tG = 0;
 
         var body = $('tg-bal-body');
         if (body) body.innerHTML = accts.map(function (a) {
           var bots = a.bots || [];
           var taskly = bots.filter(function (b) { return b.target === 'taskly'; })[0];
           var paygo  = bots.filter(function (b) { return b.target === 'paygo';  })[0];
-          var nT = NUM(taskly), nP = NUM(paygo);
+          var fastpay = bots.filter(function (b) { return b.target === 'fastpay'; })[0];
+          var nT = NUM(taskly), nP = NUM(paygo), nF = NUM(fastpay);
           if (taskly && taskly.ok) okCount++;
+          if (paygo  && paygo.ok)  okCount++;
+          if (fastpay && fastpay.ok) okCount++;
           if (nT != null) tT += nT;
           if (nP != null) tP += nP;
-          var rowTotal = (nT || 0) + (nP || 0);
+          if (nF != null) tF += nF;
+          var rowTotal = (nT || 0) + (nP || 0) + (nF || 0);
           tG += rowTotal;
           var warn = bots.filter(function (b) { return !b.ok; })
                          .map(function (b) { return '\u26a0 ' + (b.error || b.name); }).join('; ');
@@ -420,13 +572,16 @@
             '</td>' +
             '<td style="padding:5px 6px;text-align:right;">' + (taskly && taskly.ok ? fmt(nT) : '\u26a0') + '</td>' +
             '<td style="padding:5px 6px;text-align:right;">' + (paygo  && paygo.ok  ? fmt(nP) : '\u26a0') + '</td>' +
+            '<td style="padding:5px 6px;text-align:right;">' + (fastpay && fastpay.ok ? (fmt(nF) + (fastpay.pending ? ' <span style="font-size:10px;color:#eab308;" title="Pending: $' + Number(fastpay.pending).toFixed(2) + '">(+$' + Number(fastpay.pending).toFixed(2) + ' pend)</span>' : '')) : '\u26a0') + '</td>' +
             '<td style="padding:5px 6px;text-align:right;">' + fmt(rowTotal) + '</td>' +
           '</tr>';
-        }).join('') || '<tr><td colspan="4" class="creator-option-hint" style="padding:8px;">' +
+        }).join('') || '<tr><td colspan="5" class="creator-option-hint" style="padding:8px;">' +
           'No MTProto accounts yet \u2014 use <b>+ Add MTProto</b>.</td></tr>';
 
+        var t = (j && j.totals) || {};
         if ($('tg-bal-t-taskly')) $('tg-bal-t-taskly').textContent = fmt(tT);
         if ($('tg-bal-t-paygo'))  $('tg-bal-t-paygo').textContent  = fmt(tP);
+        if ($('tg-bal-t-fastpay')) $('tg-bal-t-fastpay').textContent = fmt(tF) + (t.fastpay_pending ? ' (+$' + Number(t.fastpay_pending).toFixed(2) + ')' : '');
         if ($('tg-bal-t-grand'))  $('tg-bal-t-grand').textContent  = '$' + tG.toFixed(2);
         if ($('tg-bal-wrap')) $('tg-bal-wrap').style.display = 'block';
 
@@ -434,9 +589,10 @@
         if (!accts.length) append('! no MTProto accounts in the pool \u2014 add one first');
         else if (!okCount) append('! balance read FAILED for every account \u2014 NOT a zero balance');
         else {
-          var t = (j && j.totals) || {};
-          append('Taskly $' + Number(t.taskly || 0).toFixed(2) + ' \u00b7 PayGo $'
-               + Number(t.paygo || 0).toFixed(2) + ' \u00b7 TOTAL $' + Number(t.grand || 0).toFixed(2)
+          var fpMsg = 'FastPay $' + Number(t.fastpay || 0).toFixed(2) + (t.fastpay_pending ? ' [+$' + Number(t.fastpay_pending).toFixed(2) + ' pend]' : '');
+          append('Taskly $' + Number(t.taskly || 0).toFixed(2) + ' · PayGo $'
+               + Number(t.paygo || 0).toFixed(2) + ' · ' + fpMsg
+               + ' · TOTAL $' + Number(t.grand || 0).toFixed(2)
                + '   (' + okCount + '/' + accts.length + ' accounts read)');
         }
         if (j && j.error) append('! ' + j.error);
@@ -489,7 +645,7 @@
   }
 
   function tgBalanceOne(id) {
-    append('> balance ' + id + ' (Taskly + PayGo)');
+    append('> balance ' + id + ' (Taskly + PayGo + FastPay)');
     fetch('/api/tg/mtproto/balance', { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) })
       .then(function (r) { return r.json(); })
@@ -556,7 +712,7 @@
           '<button type="button" class="tg-icon-btn" data-tg-edit="' + esc(p.id) + '"' +
             ' title="Edit name / phone"><i class="fa-solid fa-pencil"></i></button>' +
           '<button type="button" class="tg-icon-btn tg-icon-btn-indigo" data-tg-bal="' + esc(p.id) + '"' + dis +
-            ' title="Get balance (Taskly + PayGo)"><i class="fa-solid fa-wallet"></i></button>' +
+            ' title="Get balance (Taskly + PayGo + FastPay)"><i class="fa-solid fa-wallet"></i></button>' +
           '<button type="button" class="tg-icon-btn tg-icon-btn-danger" data-tg-del="' + esc(p.id) + '"' + dis +
             ' title="Remove this profile and its session"><i class="fa-solid fa-trash-can"></i></button>' +
         '</div>' +
@@ -773,6 +929,7 @@
         window.__tgEs.onmessage = function (ev) {
           try {
             var d = JSON.parse(ev.data);
+            if (d && (d.pipeline === 'meta' || d.engine === 'metainsta' || d.engine === 'meta' || d.engine === 'ig')) return;
             if (d && d.pipeline && d.pipeline !== 'telegram') return;
             if (d && d.type === 'throttle') {
               hideThrottleBanner();

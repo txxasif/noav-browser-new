@@ -1,7 +1,7 @@
 'use strict';
 /** Telegram APIs (/api/tg/*): balance, pool, MTProto, FastPay, manager, Classic. */
 module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
-  const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, loadAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove } = ctx;
+  const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove } = ctx;
 
   // ---- TG balance (both bots: Taskly + PayGo) ----
   // Reads the 💰 Balance key from the account's Telethon session. A .session
@@ -25,10 +25,13 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_balance.py', ['--all', '--json'], 900000);
       try {
         const t = (r && r.totals) || {};
+        const parts = [];
+        if (t.taskly != null) parts.push('Taskly $' + Number(t.taskly || 0).toFixed(2));
+        if (t.paygo != null) parts.push('PayGo $' + Number(t.paygo || 0).toFixed(2));
+        if (t.fastpay != null) parts.push('FastPay $' + Number(t.fastpay || 0).toFixed(2));
         broadcastEvent({ type: 'log', pipeline: 'telegram',
-          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): Taskly $'
-            + Number(t.taskly || 0).toFixed(2) + ' \u00b7 PayGo $' + Number(t.paygo || 0).toFixed(2)
-            + ' \u00b7 TOTAL $' + Number(t.grand || 0).toFixed(2) });
+          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): '
+            + parts.join(' · ') + ' · TOTAL $' + Number(t.grand || 0).toFixed(2) });
       } catch (e) {}
       sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 500);
     })();
@@ -167,7 +170,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       delete stdinPayload._api_id;
       delete stdinPayload._api_hash;
       try {
-        child = spawn(PYTHON_BIN, [path.join(ROOT_DIR, 'tg_login_mtproto.py'), mode], {
+        child = spawn(PYTHON_BIN, [resolveScript('tg_login_mtproto.py'), mode], {
           cwd: ROOT_DIR, windowsHide: true, env,
         });
       } catch (e) { resolve({ ok: false, error: 'spawn failed: ' + e.message }); return; }
@@ -277,7 +280,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         const started = [];
         for (let i = 0; i < n; i++) {
           if (!chunks[i].length) continue;
-          const args = [path.join(ROOT_DIR, 'tg_fastpay.py'),
+          const args = [resolveScript('tg_fastpay.py'),
             '--profile', profiles[i], '--ids', chunks[i].join(',')];
           let proc;
           try {
@@ -361,42 +364,38 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         ['--all', '--json'], 900000);
       try {
         const t = (r && r.totals) || {};
+        const parts = [];
+        if (t.taskly != null) parts.push('Taskly $' + Number(t.taskly || 0).toFixed(2));
+        if (t.paygo != null) parts.push('PayGo $' + Number(t.paygo || 0).toFixed(2));
+        if (t.fastpay != null) parts.push('FastPay $' + Number(t.fastpay || 0).toFixed(2));
         broadcastEvent({ type: 'log', pipeline: 'telegram',
-          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): Taskly $'
-            + Number(t.taskly || 0).toFixed(2) + ' \u00b7 PayGo $' + Number(t.paygo || 0).toFixed(2)
-            + ' \u00b7 TOTAL $' + Number(t.grand || 0).toFixed(2) });
+          message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): '
+            + parts.join(' · ') + ' · TOTAL $' + Number(t.grand || 0).toFixed(2) });
       } catch (e) {}
       sendJson(req, res, r || { ok: false, error: 'no result' });
     })();
     return true;
   }
 
+  function readTgStats() {
+    try {
+      const f = path.join(ROOT_DIR, 'data', 'tg_stats.json');
+      if (fs.existsSync(f)) {
+        const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+        if (d && typeof d === 'object') return d;
+      }
+    } catch (e) {}
+    return { total: 0, submitted: 0, taskly: 0, paygo: 0, fastpay: 0 };
+  }
+
   if (pathname === '/api/tg/status' && req.method === 'GET') {
     (async () => {
-      let accounts = [];
-      try { accounts = await loadAccounts(); } catch (e) {}
-      const tg = accounts.filter(a => (a.target || '') === 'telegram');
-      const isSub = a => a.status === 'Submitted' || a.tg_submitted;
-      const botOf = a => String(a.tg_bot || '').toLowerCase();
-      const parked = tg.filter(a => a.status === 'Created' && !a.tg_submitted).length;
-      const submitted = tg.filter(isSub).length;
-      // Per-bot task counts — Taskly / PayGo / FastPay are kept SEPARATE: an
-      // account submitted to one bot is never counted for another. The TG panel
-      // is scoped to the bot whose page you are on.
-      const subTaskly = tg.filter(a => isSub(a) && botOf(a) === 'taskly').length;
-      const subPaygo = tg.filter(a => isSub(a) && botOf(a) === 'paygo').length;
-      const subFastpay = tg.filter(a => isSub(a) && botOf(a) === 'fastpay').length;
-      // TOTAL / PARKED are scoped the same way. Records with no tg_bot yet
-      // (legacy parked pool — any bot's submitter can claim them) count toward
-      // every bot so they never vanish from all pages at once.
-      const inScope = (a, bot) => { const b = botOf(a); return !b || b === bot; };
-      const totTaskly = tg.filter(a => inScope(a, 'taskly')).length;
-      const totPaygo = tg.filter(a => inScope(a, 'paygo')).length;
-      const totFastpay = tg.filter(a => inScope(a, 'fastpay')).length;
-      const penTaskly = tg.filter(a => a.status === 'Created' && !a.tg_submitted && inScope(a, 'taskly')).length;
-      const penPaygo = tg.filter(a => a.status === 'Created' && !a.tg_submitted && inScope(a, 'paygo')).length;
-      const penFastpay = tg.filter(a => a.status === 'Created' && !a.tg_submitted && inScope(a, 'fastpay')).length;
-      const paidFastpay = accounts.filter(a => a.fastpay_paid).length;
+      const stats = readTgStats();
+      const subTaskly = stats.taskly || 0;
+      const subPaygo = stats.paygo || 0;
+      const subFastpay = stats.fastpay || 0;
+      const submitted = stats.submitted != null ? stats.submitted : (subTaskly + subPaygo + subFastpay);
+      const total = stats.total != null ? stats.total : submitted;
       sendJson(req, res, {
         status: 'SUCCESS',
         tool: 'tg-classic',
@@ -405,21 +404,21 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         ig_mode: slot().proc ? 'classic' : null,
         engine: slot().config || null,
         // KPIs the TG panel renders (same shape as meta_auto_ai's tg tab)
-        total_accounts: accounts.length,
-        tg_total: tg.length,
-        tg_pending: parked,
+        total_accounts: total,
+        tg_total: total,
+        tg_pending: 0,
         tg_submitted: submitted,
         // Per-bot breakdown (independent counters)
         tg_submitted_taskly: subTaskly,
         tg_submitted_paygo: subPaygo,
         tg_submitted_fastpay: subFastpay,
-        tg_total_taskly: totTaskly,
-        tg_total_paygo: totPaygo,
-        tg_total_fastpay: totFastpay,
-        tg_pending_taskly: penTaskly,
-        tg_pending_paygo: penPaygo,
-        tg_pending_fastpay: penFastpay,
-        tg_paid_fastpay: paidFastpay,
+        tg_total_taskly: subTaskly,
+        tg_total_paygo: subPaygo,
+        tg_total_fastpay: subFastpay,
+        tg_pending_taskly: 0,
+        tg_pending_paygo: 0,
+        tg_pending_fastpay: 0,
+        tg_paid_fastpay: subFastpay,
         // Bots this build ships — the panel defaults its bot/task to these.
         enabled_bots: readEnabledBots(),
         concurrency: (slot().config || {}).concurrency || 0,
@@ -482,12 +481,14 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         return;
       }
 
+      const useIgPool = (tgBot === 'paygo') && (opts.use_ig_pool === true || opts.use_ig_pool === 'true');
+
       slot().config = { concurrency, headless, target, delay, captcha,
-                            coupled: true, tg_task: tgTask, tg_bot: tgBot,
-                            twofa: opts.twofa !== false };
+                        coupled: true, tg_task: tgTask, tg_bot: tgBot,
+                        twofa: opts.twofa !== false, use_ig_pool: useIgPool };
 
       const args = [
-        path.join(ROOT_DIR, 'worker.py'),
+        resolveScript('worker.py'),
         '--concurrency', String(concurrency),
         '--target', String(target),
         '--delay', String(delay),
@@ -510,6 +511,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       // PayGo Cookies task runs a different engine flow (no 2FA leg: Meta ->
       // TG creds -> IG join + follow -> cookie export -> cookie submit).
       if (/cookie/i.test(tgTask)) args.push('--cookie');
+      if (useIgPool) args.push('--use-ig-pool');
       if (headless) args.push('--headless');
 
       console.log(`[MetaCreator] Starting TG Classic: ${PYTHON_BIN} ${args.join(' ')}`);
@@ -547,7 +549,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       // instantly (e.g. a bad kwarg) — you see "started" and no browser tab.
       slot().proc.stdout.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
-        for (const line of feedWorkerStdout(data)) consumeWorkerLine(line);
+        for (const line of feedWorkerStdout(data)) consumeWorkerLine(line, 'tg');
       });
       slot().proc.stderr.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
@@ -555,10 +557,10 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         if (!text) return;
         if (/socket\.send\(\) raised exception\.?/i.test(text)) return;
         console.error(`[TG Worker STDERR] ${text}`);
-        broadcastEvent({ type: 'log', pipeline: 'telegram', message: `[STDERR] ${text}` });
+        broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg', message: `[STDERR] ${text}` });
       });
       slot().proc.on('error', err => {
-        broadcastEvent({ type: 'log', pipeline: 'telegram', message: `[Worker] ${err.message}` });
+        broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg', message: `[Worker] ${err.message}` });
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
         if (slot().proc) slot().proc = null;
       });
@@ -566,9 +568,9 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         flushWorkerBuffer();
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
         console.log(`[TG] loop process exited with code ${code}`);
-        broadcastEvent({ type: 'log', pipeline: 'telegram',
+        broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg',
           message: `[engine] TG worker exited (code ${code})` });
-        broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', exit_code: code });
+        broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', exit_code: code });
         slot().proc = null;
       });
       releaseStartTg();
@@ -590,7 +592,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         slot().proc = null;
       }
       slot().config = null;
-      broadcastEvent({ type: 'loop_stopped', message: 'TG Classic engine stopped by user request.' });
+      broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopped by user request.' });
       sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopped.' });
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });

@@ -257,6 +257,75 @@ def pop_pending(destination: str = "telegram") -> Optional[Dict[str, Any]]:
                 return None
 
 
+def count_ig_creator_accounts() -> int:
+    """Return count of available IG creator accounts with cookies in the pool."""
+    conn = db.get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*) FROM accounts
+        WHERE platform = 'Meta+Instagram'
+          AND cookies IS NOT NULL AND cookies != ''
+          AND (status = 'Created' OR status IS NULL)
+        """
+    )
+    row = cur.fetchone()
+    return row[0] if row else 0
+
+
+def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
+    """Atomically claim the freshest IG creator account with valid cookies from the pool."""
+    conn = db.get_connection()
+    now = time.time()
+    with _lock:
+        with conn:
+            cur = conn.execute(
+                """
+                SELECT id FROM accounts
+                WHERE platform = 'Meta+Instagram'
+                  AND cookies IS NOT NULL AND cookies != ''
+                  AND (status = 'Created' OR status IS NULL)
+                ORDER BY created_at DESC, rowid DESC LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            rec_id = row[0]
+            conn.execute(
+                "UPDATE accounts SET status = 'Submitting_PayGo', claimed_at = ? WHERE id = ?",
+                (now, rec_id)
+            )
+            cur = conn.execute("SELECT * FROM accounts WHERE id = ? LIMIT 1", (rec_id,))
+            res = db.dict_from_row(cur.fetchone())
+            sync_files()
+            return res
+
+
+def restore_ig_creator_account(rec_id: str) -> None:
+    """Restore an account's status to 'Created' if drain cycle was aborted."""
+    conn = db.get_connection()
+    with _lock:
+        with conn:
+            conn.execute(
+                "UPDATE accounts SET status = 'Created', claimed_at = NULL WHERE id = ?",
+                (rec_id,)
+            )
+        sync_files()
+
+
+def mark_ig_creator_dead(rec_id: str, reason: str = "checkpoint_required") -> None:
+    """Permanently mark a dead/suspended account so it is never picked again."""
+    conn = db.get_connection()
+    with _lock:
+        with conn:
+            conn.execute(
+                "UPDATE accounts SET status = 'Failed', extra = ? WHERE id = ?",
+                (f"Dead: {reason}", rec_id)
+            )
+        sync_files()
+
+
 def claim_specific(rec_id: str) -> Optional[Dict[str, Any]]:
     """Atomically claim ONE Created telegram account by id for immediate submit.
 
@@ -630,7 +699,8 @@ def sync_files() -> None:
     """Keep accounts.json, accounts.csv and accounts.txt in sync with SQLite."""
     conn = db.get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT * FROM accounts ORDER BY created_at DESC, rowid DESC")
+    # Strictly store only Meta and Instagram creator accounts (exclude telegram bot tasks)
+    cur.execute("SELECT * FROM accounts WHERE target != 'telegram' OR target IS NULL ORDER BY created_at DESC, rowid DESC")
     recs = [db.dict_from_row(r) for r in cur.fetchall()]
 
     # 1. accounts.json (atomic write)
@@ -647,9 +717,9 @@ def sync_files() -> None:
         except Exception:
             pass
 
-    # 2. accounts.csv (atomic write) — essentials: username, password, email, cookies
+    # 2. accounts.csv (atomic write) — essentials: username, password, email, cookies, twofa_secret
     try:
-        headers = ["username", "password", "email", "cookies"]
+        headers = ["username", "password", "email", "cookies", "twofa_secret"]
         import csv
         tmp_csv = f"{ACCOUNTS_CSV}.tmp.{os.getpid()}_{int(time.time() * 1000)}"
         with open(tmp_csv, "w", newline="", encoding="utf-8") as f:

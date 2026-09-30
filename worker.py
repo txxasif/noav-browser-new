@@ -315,7 +315,7 @@ class AISlotWorker:
         self.user_data_dir = None
 
 
-def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "") -> tuple[bool, str]:
+def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "", twofa: bool = False) -> tuple[bool, str]:
     """Execute one Meta Account Creation cycle."""
     from runner import MetaInstaRunner
 
@@ -344,7 +344,7 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
     try:
         # Full Meta -> Instagram creation flow (always proceed to Instagram join unless explicitly meta-only)
         meta_only = (mode == "meta-only")
-        rec_id = runner.create_account(twofa=False, meta_only=meta_only)
+        rec_id = runner.create_account(twofa=twofa, meta_only=meta_only)
         worker.emit(f"✅ Successfully created {'Meta' if meta_only else 'Instagram'} account: @{runner.ig_username or runner.username or runner.email}")
         duration_ms = int((time.monotonic() - cycle_started) * 1000)
         emit_event({
@@ -397,7 +397,7 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
             pass
 
 
-def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: int = 4, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "", start_stagger_ms: int = 0):
+def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: int = 4, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "", start_stagger_ms: int = 0, twofa: bool = False):
     """Loop for a single slot creating Meta accounts continuously."""
     consecutive_fails = 0
     initial_stagger_done = False
@@ -450,6 +450,7 @@ def slot_loop(slot_id: int, is_headless: bool = False, target: int = 0, delay: i
             mode=mode,
             new_password=new_password,
             new_username=new_username,
+            twofa=twofa,
         )
 
         if not ok:
@@ -517,10 +518,38 @@ _phone_wall_streak = 0
 
 TG_DEFAULT_TASK = "Create Inst (No mail)"
 
+_active_slots_lock = threading.Lock()
+_active_slots = set()
+
+def _is_no_task_error(err_text: str) -> bool:
+    if not err_text:
+        return False
+    e = str(err_text).lower()
+    return any(p in e for p in (
+        "could not select",
+        "no telegram profile slot available",
+        "no logged-in telegram profile",
+        "no task available",
+        "not available right now",
+        "task not found",
+        "no tasks offered",
+        "tasks out of stock",
+        "temporarily out of stock",
+        "no tasks currently available",
+        "no tasks",
+        "limit is reached",
+        "limit reached",
+        "hour's limit",
+        "hourly limit",
+        "no_pool_accounts",
+        "no available ig creator accounts",
+        "pool empty",
+    ))
+
 
 def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
                  tg_bot="taskly", captcha_mode="extension", mail_provider="mailtd",
-                 add_email=False, cookie=False):
+                 add_email=False, cookie=False, use_ig_pool=False):
     """Coupled per-task loop: ONE browser does Meta → TG task → IG → submit.
 
     N slots run in parallel (each opens its own Meta/IG browser up front);
@@ -534,6 +563,9 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
     spawning a profile dir every few seconds). A joined per-cycle thread
     bounds that damage.
     """
+    with _active_slots_lock:
+        _active_slots.add(slot_id)
+
     def _once():
         # Each cycle runs in its own thread → close that thread's SQLite
         # connection on exit so FDs don't churn over a long run.
@@ -575,7 +607,8 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     slot_id=slot_id, worker_factory=AISlotWorker,
                     is_headless=is_headless, captcha_mode=captcha_mode,
                     mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot)
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
+                    use_ig_pool=use_ig_pool)
             elif str(_runner) == "run_native_cycle":
                 # Taskly 2FA native task: NO Meta, NO mailbox — lease TG,
                 # Start, bot email+code, IG native signup, Account Registered.
@@ -604,6 +637,30 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 return "stopped"
             with _session_lock:
                 _session_count = max(0, _session_count - 1)
+
+            # Slot-by-slot graceful shutdown: if bot has no task or pool is empty, retire
+            if _is_no_task_error(err_text):
+                # When pool is empty or bot limit is reached, stop ALL creators immediately
+                is_pool_or_limit = any(k in err_text.lower() for k in ("no_pool_accounts", "pool empty", "limit reached", "limit is reached", "hourly limit"))
+                if is_pool_or_limit:
+                    _stop.set()
+                with _active_slots_lock:
+                    _active_slots.discard(slot_id)
+                    remaining = len(_active_slots)
+                print(f"[*] [Slot {slot_id}] 🛑 Bot/pool has no task available ({err_text}). Creator {slot_id} stopped ({remaining} active creator(s) remaining).", flush=True)
+                emit_event({
+                    "type": "slot_event",
+                    "slot_id": slot_id,
+                    "status": "stopped",
+                    "detail": f"No task available ({err_text}) — Creator {slot_id} stopped ({remaining} remaining)."
+                })
+                emit_event({
+                    "type": "log",
+                    "pipeline": "telegram",
+                    "message": f"[tg:slot-{slot_id}] Stopped: {err_text} ({remaining} creator(s) remaining)."
+                })
+                return "no_task"
+
             if IG_WALL_SPLIT and _is_phone_wall(err_text):
                 # Per-account/region gate: skip this account without pausing the
                 # pool. Only cool everyone if the breaker trips (IP-wide).
@@ -622,19 +679,36 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
         _clear_ig_throttle()
         return "ok"
 
-    while not _stop.is_set():
-        _wait_ig_cooldown()
-        holder = {}
-        t = threading.Thread(target=lambda: holder.setdefault("r", _once()), daemon=True)
-        t.start()
-        while t.is_alive():
-            t.join(timeout=1.0)
-        if holder.get("r") in ("done", "stopped"):
-            break
-        for _ in range(int(delay * 2)):
-            if _stop.is_set():
+    try:
+        while not _stop.is_set():
+            _wait_ig_cooldown()
+            holder = {}
+            t = threading.Thread(target=lambda: holder.setdefault("r", _once()), daemon=True)
+            t.start()
+            while t.is_alive():
+                t.join(timeout=1.0)
+            if holder.get("r") in ("done", "stopped", "no_task"):
                 break
-            time.sleep(0.5)
+            for _ in range(int(delay * 2)):
+                if _stop.is_set():
+                    break
+                time.sleep(0.5)
+    finally:
+        with _active_slots_lock:
+            _active_slots.discard(slot_id)
+            remaining = len(_active_slots)
+        if remaining == 0:
+            print(f"[*] 🛑 All creators stopped — no tasks available from bot. Engine idle until manual restart.", flush=True)
+            emit_event({
+                "type": "log",
+                "pipeline": "telegram",
+                "message": f"[tg] All creators stopped. TG engine is idle until manually started."
+            })
+            emit_event({
+                "type": "loop_stopped",
+                "message": "All creators stopped — no tasks available from bot."
+            })
+            _stop.set()
 
 def main():
     parser = argparse.ArgumentParser(description="MetaAuto Linux — Dedicated Meta Account Creator")
@@ -658,6 +732,8 @@ def main():
                         help="PayGo Cookies task loop: Meta -> TG creds -> IG join + follow -> "
                              "cookie export -> cookie submit -> register (no 2FA leg). "
                              "Takes precedence over --tg-task/--tg-bot.")
+    parser.add_argument("--use-ig-pool", action="store_true",
+                        help="PayGo Cookies task: drain pre-created accounts from the IG Creator pool")
     parser.add_argument("--start-stagger-ms", type=int, default=None,
                         help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
 
@@ -766,12 +842,14 @@ def main():
                    mail_provider=args.mail, captcha_mode=args.captcha)
     if _loop is slot_loop:
         _shared.update(mode=args.mode, new_password=global_password,
-                       new_username=global_username, start_stagger_ms=start_stagger_ms)
+                       new_username=global_username, start_stagger_ms=start_stagger_ms,
+                       twofa=bool(getattr(args, "twofa", False)))
     else:
         # coupled_loop drives Meta -> TG task -> IG -> submit; credentials come
         # from the leased profile, and there is no fixed username/password.
         _shared.update(task=args.tg_task, tg_bot=args.tg_bot, add_email=args.add_email,
-                       cookie=bool(getattr(args, "cookie", False)))
+                       cookie=bool(getattr(args, "cookie", False)),
+                       use_ig_pool=bool(getattr(args, "use_ig_pool", False)))
     # Self-heal TG leases. The Windows Stop button kills the worker with
     # TerminateProcess, so the coupled cycle's `finally: tg_manager.release`
     # never runs and the profile stays `busy` until LEASE_TTL (20 min). Reset
@@ -782,6 +860,8 @@ def main():
             tg_manager.reset_all()
         except Exception:
             pass
+        with _active_slots_lock:
+            _active_slots.clear()
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [
             executor.submit(_loop, slot_id=i + 1, **_shared)

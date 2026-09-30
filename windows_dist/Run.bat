@@ -23,7 +23,30 @@ echo ===========================================================================
 echo   Meta Creator — Starting Automation Engine
 echo ==============================================================================
 
-REM 1. Verify files are properly extracted (prevent running inside zip)
+REM 1. Verify files are properly extracted (prevent running inside zip or temp)
+echo "%~dp0" | findstr /i "\\AppData\\Local\\Temp\\ \\Temp\\" >nul
+if not errorlevel 1 (
+    echo.
+    echo ==============================================================================
+    echo  [ERROR] Running from a Temporary Folder / ZIP Preview!
+    echo ==============================================================================
+    echo.
+    echo  You opened Run.bat directly from inside the ZIP file without extracting it!
+    echo  Windows placed it in a temporary folder that will be WIPED on restart.
+    echo  Any connected Telegram sessions or accounts will be lost on reboot.
+    echo.
+    echo  HOW TO FIX:
+    echo    1. Close this window.
+    echo    2. Right-click 'MetaCreator-Windows-Portable.zip'.
+    echo    3. Select 'Extract All...' and choose a permanent destination
+    echo       e.g., C:\MetaCreator or your Desktop.
+    echo    4. Open the extracted folder and double-click Run.bat there.
+    echo ==============================================================================
+    echo.
+    pause
+    exit /b 1
+)
+
 if not exist "%~dp0public\index.html" (
     echo.
     echo ==============================================================================
@@ -49,6 +72,12 @@ set "PLAYWRIGHT_BROWSERS_PATH=%~dp0_internal\ms-playwright"
 set "PYTHON_BIN=%~dp0_internal\python.exe"
 set "PYTHONPATH=%~dp0"
 set "PATH=%~dp0bin;%~dp0_internal;%~dp0_internal\Scripts;%PATH%"
+
+REM Performance & Low-Spec Optimizations (disable heavy dev telemetry on Windows)
+if not defined INSPECT_HEADLESS_EVIDENCE set "INSPECT_HEADLESS_EVIDENCE=0"
+if not defined INSTA_SCREENSHOTS set "INSTA_SCREENSHOTS=0"
+if not defined META_ENABLE_RUNLOG set "META_ENABLE_RUNLOG=0"
+if not defined META_DEBUG_DOM set "META_DEBUG_DOM=0"
 
 REM 3. If a healthy server is already running, just open it.
 call :probe
@@ -116,12 +145,12 @@ echo  Log files:  %SERVER_LOG%
 echo              %SERVER_ERR%
 echo.
 if exist "%SERVER_ERR%" (
-    echo ----- server.err.log (last 25 lines) -----
+    echo ----- server.err.log [last 25 lines] -----
     powershell -NoProfile -Command "Get-Content -Path '%SERVER_ERR%' -Tail 25 -ErrorAction SilentlyContinue"
     echo ------------------------------------------
 )
 if exist "%SERVER_LOG%" (
-    echo ----- server.log (last 25 lines) -----
+    echo ----- server.log [last 25 lines] -----
     powershell -NoProfile -Command "Get-Content -Path '%SERVER_LOG%' -Tail 25 -ErrorAction SilentlyContinue"
     echo --------------------------------------
 )

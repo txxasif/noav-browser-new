@@ -305,8 +305,8 @@ class EngineLaunchMixin:
                 renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 1, 1, 8)
                 v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 256, 128, 2048)
             else:
-                renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 3, 1, 8)
-                v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 512, 128, 2048)
+                renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 2, 1, 8)
+                v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 256, 128, 2048)
             args += [
                 "--disable-gpu",
                 "--disable-gpu-compositing",
@@ -314,14 +314,11 @@ class EngineLaunchMixin:
                 "--disable-background-networking",
                 f"--js-flags=--max-old-space-size={v8_heap_mb}",
                 f"--renderer-process-limit={renderer_limit}",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-logging",
+                "--disable-crash-reporter",
             ]
-            if _low_end_enabled():
-                args += [
-                    "--disable-background-timer-throttling",
-                    "--disable-renderer-backgrounding",
-                    "--disable-logging",
-                    "--disable-crash-reporter",
-                ]
         # Suppress the "Chrome for Testing v… is only for automated testing"
         # infobar (CfT's "user education UI"). CfT reads a JSON config via
         # --chrome-for-testing-config; keys are camelCase (verified against

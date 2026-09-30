@@ -741,11 +741,17 @@ class MtprotoTasklyBot:
                         if mm:
                             wait_sec = int(mm.group(1))
                         break
+                    if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
+                        self.log(f"[tg] start_task: {self.bot_target} hourly limit reached: {txt[:80]}")
+                        found = {"error": "limit_reached", "detail": txt.strip(), "login": "", "password": ""}
+                        break
                     if re.search(r"Login:\s*.+", txt, re.I) and re.search(r"Password:\s*\S+", txt, re.I):
                         found = self._parse_creds(txt)
                         break
                 if rate_limited or found:
                     break
+            if found and found.get("error") == "limit_reached":
+                return found
             if rate_limited:
                 cooldown = max(5, wait_sec) + 1.5
                 self.log(f"[tg] ⏳ anti-flood: bot asked to wait {wait_sec}s — "

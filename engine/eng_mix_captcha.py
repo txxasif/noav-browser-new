@@ -297,17 +297,26 @@ class EngineCaptchaMixin:
             if cb.count() == 0:
                 return False
             try:
-                if (cb.get_attribute("aria-checked") or "").strip().lower() == "true":
+                aria = (cb.get_attribute("aria-checked") or "").strip().lower()
+                if aria == "true":
                     return True
+                if aria == "false":
+                    return False
             except Exception:
                 pass
-            # Some Google/Linux frames render the green state through the
-            # wrapper class/data-state while leaving aria-checked stale.
+            # Check DOM state without matching 'unchecked' as 'checked'
             return bool(cb.evaluate("""el => {
+                const aria = (el.getAttribute('aria-checked') || '').trim().toLowerCase();
+                if (aria === 'true') return true;
+                if (aria === 'false') return false;
                 const root = el.closest('.recaptcha-checkbox') || el.parentElement || el;
-                const state = [root.className, root.getAttribute('data-state'),
-                               root.getAttribute('aria-label')].join(' ');
-                return /checked|verified|complete/i.test(state);
+                const cls = (root.className || '').toLowerCase();
+                if (cls.includes('recaptcha-checkbox-unchecked') || cls.includes('rc-anchor-checkbox-noglow')) return false;
+                if (cls.includes('recaptcha-checkbox-checked')) return true;
+                const state = [cls, root.getAttribute('data-state') || '',
+                               root.getAttribute('aria-label') || ''].join(' ').toLowerCase();
+                if (state.includes('unchecked')) return false;
+                return /(^|\\s|-)checked(\\s|$)/.test(state) || /(^|\\s|-)verified(\\s|$)/.test(state);
             }"""))
         except Exception:
             return False

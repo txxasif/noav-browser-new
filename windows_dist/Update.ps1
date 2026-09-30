@@ -64,10 +64,13 @@ function Backup-UserData {
 }
 
 function Find-UpdatePackage {
-    foreach ($name in @('update.zip', 'MetaCreator-Windows-Patch.zip', 'MetaCreator-Windows-Portable.zip')) {
+    foreach ($name in @('update.zip', 'MetaCreator-Windows-Patch.zip', 'MetaCreator-Windows-Full-Patch.zip', 'MetaCreator-Windows-Portable.zip', 'MetaCreator-Windows-Full-Portable.zip')) {
         $candidate = Join-Path $root $name
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
+    $any = Get-ChildItem -LiteralPath $root -Filter '*.zip' -File -ErrorAction SilentlyContinue |
+           Where-Object { $_.Name -match '(?i)(patch|update)' } | Select-Object -First 1
+    if ($any) { return $any.FullName }
     return $null
 }
 
