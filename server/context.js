@@ -339,6 +339,14 @@ function broadcastEvent(data) {
     recentLogs.push(data);
     if (recentLogs.length > MAX_RECENT_LOGS) recentLogs.shift();
   }
+  if (data.type === 'account_created') {
+    try {
+      const paygoOrchestrator = require('./paygo-orchestrator');
+      if (paygoOrchestrator && paygoOrchestrator.enabled) {
+        paygoOrchestrator.onAccountCreated(data);
+      }
+    } catch (e) {}
+  }
   if (data.type === 'log' || data.type === 'slot_event') {
     sseBatch.push(data);
     if (!sseBatchTimer) sseBatchTimer = setTimeout(flushSseBatch, SSE_BATCH_MS);

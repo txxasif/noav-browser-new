@@ -452,10 +452,10 @@ class EngineCaptchaMixin:
             if (time.time() - start) >= bail and bframe is not None:
                 if self._checkpoint_action(page, names=("Continue", "Next", "Confirm"),
                                            require_enabled=False) is None:
-                    self.log(f'[⚠️] Visual AI did not finish in {int(bail)}s; falling back to Audio STT…')
+                    self.log(f'[⚠️] Visual AI did not finish in {int(bail)}s.')
                     return False
 
-        self.log(f'[⚠️] Visual AI extension did not finish in {timeout}s; falling back to Audio STT…')
+        self.log(f'[⚠️] Visual AI extension did not finish in {timeout}s.')
         return False
 
     def _meta_selfie_checkpoint(self, page, timeout=900):

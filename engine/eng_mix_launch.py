@@ -301,12 +301,8 @@ class EngineLaunchMixin:
         # SwiftShader anyway), a capped V8 heap and a renderer limit keep each
         # browser small; WebGL is still spoofed by the anti-detect init script.
         if os.environ.get("INSTA_LOW_MEM", "1") != "0":
-            if _low_end_enabled():
-                renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 1, 1, 8)
-                v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 256, 128, 2048)
-            else:
-                renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 2, 1, 8)
-                v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 256, 128, 2048)
+            renderer_limit = _bounded_env_int("INSTA_RENDERER_LIMIT", 1, 1, 8)
+            v8_heap_mb = _bounded_env_int("INSTA_V8_HEAP_MB", 128 if _low_end_enabled() else 192, 128, 2048)
             args += [
                 "--disable-gpu",
                 "--disable-gpu-compositing",
@@ -579,6 +575,21 @@ class EngineLaunchMixin:
                     pass
             if _blocked_n:
                 self.log(f'[🚫] Ad/tracker blocking on ({_blocked_n} domains; INSTA_BLOCK_TRACKERS=0 to disable).')
+        # Block heavy video/audio streams during signup (keeps images & captcha 100% untouched)
+        if os.environ.get("INSTA_BLOCK_MEDIA", "1") != "0":
+            try:
+                def _abort_media(route):
+                    try:
+                        if route.request.resource_type in ("media",):
+                            route.abort()
+                        else:
+                            route.continue_()
+                    except Exception:
+                        pass
+                w.context.route("**/*", _abort_media)
+                self.log('[🚫] Video/audio media streams blocked (images/captcha untouched).')
+            except Exception:
+                pass
         # Extra low-level leak patches (CDP/webdriver/plugins/chrome.runtime).
         # The PC-Mobile contract uses the inline init script only.  The
         # playwright-stealth package injects its own userAgentData brands and

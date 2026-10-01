@@ -2360,6 +2360,145 @@ body {
   flex-shrink: 0;
 }
 
+/* PayGo Radar Bar */
+.paygo-radar-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  margin-bottom: 14px;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, rgba(17, 24, 39, 0.9) 0%, rgba(15, 23, 42, 0.75) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  flex-wrap: wrap;
+}
+.paygo-radar-metric {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+}
+.paygo-radar-label {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.paygo-radar-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  padding: 3px 9px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.paygo-radar-badge.stock-open {
+  background: rgba(16, 185, 129, 0.16);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
+}
+.paygo-radar-badge.stock-closed {
+  background: rgba(245, 158, 11, 0.16);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+}
+.paygo-radar-badge.pool-count {
+  background: rgba(99, 102, 241, 0.16);
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  color: #a5b4fc;
+}
+.paygo-radar-badge.auto-armed {
+  background: rgba(6, 182, 212, 0.16);
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  color: #38bdf8;
+}
+
+/* PayGo Mode Switcher */
+.paygo-mode-switcher {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.paygo-mode-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.2s var(--ease-spring);
+  position: relative;
+  overflow: hidden;
+}
+.paygo-mode-tab:hover {
+  background: var(--bg-card-hover);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+.paygo-mode-tab.is-active {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(18, 23, 31, 0.95) 100%);
+  border-color: rgba(16, 185, 129, 0.55);
+  box-shadow: 0 0 20px -4px rgba(16, 185, 129, 0.25), inset 0 1px 0 0 rgba(16, 185, 129, 0.3);
+}
+.paygo-mode-tab.is-active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-green);
+}
+.paygo-mode-tab[data-mode="browser"].is-active {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12) 0%, rgba(18, 23, 31, 0.95) 100%);
+  border-color: rgba(99, 102, 241, 0.55);
+  box-shadow: 0 0 20px -4px rgba(99, 102, 241, 0.25), inset 0 1px 0 0 rgba(99, 102, 241, 0.3);
+}
+.paygo-mode-tab[data-mode="browser"].is-active::before {
+  background: var(--accent-purple);
+}
+.paygo-mode-title {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.paygo-mode-desc {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+.paygo-mode-pill {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  line-height: 1.4;
+}
+.pill-recommended {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+.pill-slow {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
 /* Telegram Profiles — pooled-login cards (mirrors meta_auto_ai poolCard:
    line 1 = name + id + mode pill + status pill, line 2 = phone number). */
 .tg-profile-row {

@@ -14,7 +14,7 @@
   'use strict';
 
   var root = null, timer = null;
-  var state = { running: false, igMode: null, bot: 'taskly', pool: [], log: [], cfg: { headless: true } };
+  var state = { running: false, igMode: null, bot: 'taskly', pool: [], log: [], cfg: { headless: true }, paygoMode: 'pool' };
   var botLogs = { taskly: [], paygo: [], fastpay: [] };
 
   function esc(s) {
@@ -144,96 +144,83 @@
   // Same for the native 2FA task (bot email+code, no mailbox at all).
   function applyFlowGuards() {
     var isPayGo = (state.bot === 'paygo');
-    var igPoolField = $('tg-igpool-field');
+    var radarBar = $('paygo-radar-bar');
+    var modeSwitcher = $('paygo-mode-switcher');
+    var poolContainer = $('tg-paygo-pool-container');
+    var taskContainer = $('tg-task-service-container');
+    var headlessField = $('tg-headless-field');
+    var servicesPanel = $('tg-services-panel') || document.querySelector('.creator-services');
     var igPoolSw = $('tg-igpool-sw');
-    var autoSw = $('tg-paygo-auto-sw');
-    var cardPool = $('tg-paygo-card-pool');
-    var cardAuto = $('tg-paygo-card-automine');
-
-    if (igPoolField) {
-      igPoolField.style.display = isPayGo ? 'flex' : 'none';
-      if (!isPayGo && igPoolSw) {
-        igPoolSw.checked = false;
-      }
-    }
-
-    if (cardPool && igPoolSw) {
-      if (igPoolSw.checked) cardPool.classList.add('is-active');
-      else cardPool.classList.remove('is-active');
-    }
-    if (cardAuto && autoSw) {
-      if (autoSw.checked) cardAuto.classList.add('is-active');
-      else cardAuto.classList.remove('is-active');
-    }
-
-    if (igPoolSw && !igPoolSw.dataset.cardWired) {
-      igPoolSw.dataset.cardWired = '1';
-      igPoolSw.addEventListener('change', function () {
-        if (cardPool) {
-          if (igPoolSw.checked) cardPool.classList.add('is-active');
-          else cardPool.classList.remove('is-active');
-        }
-      });
-    }
-
-    var isIgPoolActive = isPayGo && !!(igPoolSw && igPoolSw.checked);
-
-    var task = ($('tg-task') || {}).value || '';
-    var cookie = isCookieTask(task);
-    var native = isNativeTask(task);
-    var offAdde = isIgPoolActive || cookie || native;
-
     var swAdde = $('tg-adde-sw');
     var fieldAdde = $('tg-adde-field') || (swAdde ? swAdde.closest('.creator-field') : null);
-    if (swAdde) {
-      swAdde.disabled = offAdde;
-      swAdde.title = isIgPoolActive
-        ? 'Disabled: Draining from IG Creator accounts pool'
-        : (cookie
+
+    if (radarBar) radarBar.style.display = isPayGo ? 'flex' : 'none';
+    if (modeSwitcher) modeSwitcher.style.display = isPayGo ? 'grid' : 'none';
+
+    if (isPayGo) {
+      state.paygoMode = state.paygoMode || 'pool';
+      var tabPool = $('paygo-tab-pool');
+      var tabBrowser = $('paygo-tab-browser');
+      if (tabPool) tabPool.classList.toggle('is-active', state.paygoMode === 'pool');
+      if (tabBrowser) tabBrowser.classList.toggle('is-active', state.paygoMode === 'browser');
+
+      if (state.paygoMode === 'pool') {
+        if (igPoolSw) igPoolSw.checked = true;
+        if (poolContainer) poolContainer.style.display = 'block';
+        if (taskContainer) taskContainer.style.display = 'none';
+        if (headlessField) headlessField.style.display = 'none';
+        if (fieldAdde) fieldAdde.style.display = 'none';
+        if (servicesPanel) servicesPanel.style.display = 'none';
+      } else {
+        if (igPoolSw) igPoolSw.checked = false;
+        if (poolContainer) poolContainer.style.display = 'none';
+        if (taskContainer) taskContainer.style.display = 'block';
+        if (headlessField) headlessField.style.display = 'flex';
+        if (fieldAdde) fieldAdde.style.display = 'none'; // PayGo cookie flow has no email step
+        if (servicesPanel) {
+          servicesPanel.style.display = 'grid';
+          servicesPanel.style.opacity = '1';
+          servicesPanel.style.pointerEvents = 'auto';
+          servicesPanel.style.filter = 'none';
+          var sInputs = servicesPanel.querySelectorAll('input');
+          for (var i = 0; i < sInputs.length; i++) sInputs[i].disabled = false;
+        }
+      }
+    } else {
+      if (igPoolSw) igPoolSw.checked = false;
+      if (poolContainer) poolContainer.style.display = 'none';
+      if (taskContainer) {
+        taskContainer.style.display = 'block';
+        taskContainer.style.opacity = '1';
+        taskContainer.style.pointerEvents = 'auto';
+      }
+      if (headlessField) headlessField.style.display = 'flex';
+      if (servicesPanel) {
+        servicesPanel.style.display = 'grid';
+        servicesPanel.style.opacity = '1';
+        servicesPanel.style.pointerEvents = 'auto';
+        servicesPanel.style.filter = 'none';
+        var allInputs = servicesPanel.querySelectorAll('input');
+        for (var j = 0; j < allInputs.length; j++) allInputs[j].disabled = false;
+      }
+
+      var task = ($('tg-task') || {}).value || '';
+      var cookie = isCookieTask(task);
+      var native = isNativeTask(task);
+      var offAdde = cookie || native;
+      if (swAdde) {
+        swAdde.disabled = offAdde;
+        swAdde.title = cookie
           ? 'Not used by the Cookie task — it verifies via the exported IG cookie.'
-          : (native ? 'Not used by the native 2FA task — email + code come from the bot.' : 'Fresh mail.td email before the task registers.'));
-    }
-    if (fieldAdde) {
-      fieldAdde.style.display = offAdde ? 'none' : 'flex';
-      fieldAdde.style.opacity = offAdde ? '0.4' : '1';
-    }
-
-    // When IG Creator Accounts is chosen, disable the rest, leaving ONLY headless and ON/OFF:
-    var concInput = $('tg-conc');
-    var targetInput = $('tg-target');
-    var concField = concInput ? concInput.closest('.creator-field') : null;
-    var targetField = targetInput ? targetInput.closest('.creator-field') : null;
-    var taskSection = document.querySelector('.creator-task-service');
-    var servicesPanel = document.querySelector('.creator-services');
-
-    // Parallel and Target stay enabled so users can drain pool in parallel with N slots
-    if (concInput) concInput.disabled = false;
-    if (concField) concField.style.opacity = '1';
-
-    if (targetInput) targetInput.disabled = false;
-    if (targetField) targetField.style.opacity = '1';
-
-    if (taskSection) {
-      taskSection.style.opacity = isIgPoolActive ? '0.4' : '1';
-      taskSection.style.pointerEvents = isIgPoolActive ? 'none' : 'auto';
-    }
-
-    if (servicesPanel) {
-      servicesPanel.style.opacity = isIgPoolActive ? '0.25' : '1';
-      servicesPanel.style.pointerEvents = isIgPoolActive ? 'none' : 'auto';
-      servicesPanel.style.filter = isIgPoolActive ? 'grayscale(0.85)' : 'none';
-      var serviceInputs = servicesPanel.querySelectorAll('input');
-      for (var s = 0; s < serviceInputs.length; s++) {
-        serviceInputs[s].disabled = isIgPoolActive;
+          : (native ? 'Not used by the native 2FA task — email + code come from the bot.' : 'Fresh mail.td email before the task registers.');
+      }
+      if (fieldAdde) {
+        fieldAdde.style.display = offAdde ? 'none' : 'flex';
+        fieldAdde.style.opacity = offAdde ? '0.4' : '1';
       }
     }
 
-    // Only headless and ON/OFF remain enabled
-    var headlessSw = $('tg-headless-sw');
-    if (headlessSw) {
-      headlessSw.disabled = false;
-    }
-
+    // Wiring Auto-Mine controls if present
     var autoSw = $('tg-paygo-auto-sw');
     var autoConc = $('tg-paygo-auto-conc');
     if (autoSw && !autoSw.dataset.wired) {
@@ -252,13 +239,6 @@
         post('/api/tg/paygo-auto/toggle', { enabled: autoSw ? autoSw.checked : true, concurrency: conc })
           .then(function (j) { if (j && j.status) updatePayGoAutoUI(j.status); });
       });
-    }
-
-    if (isIgPoolActive) {
-      var noteEl = $('tg-task-note');
-      if (noteEl) {
-        noteEl.textContent = '⚡ IG Creator Accounts Pool active: Fast copy-paste username change & cookie submission into PayGo. Zero browser creation.';
-      }
     }
   }
 
@@ -337,8 +317,24 @@
         statCard('TG - SUBMITTED', 'tg-kpi-submitted', 'task accepted', 'tg-kpi-submitted-sub') +
       '</div>' +
 
+      /* PayGo Live Radar Bar */
+      '<div id="paygo-radar-bar" class="paygo-radar-bar" style="display:none;">' +
+        '<div class="paygo-radar-metric">' +
+          '<span class="paygo-radar-label"><i class="fa-solid fa-bolt" style="color:#34d399;"></i> HOURLY STOCK:</span>' +
+          '<span id="paygo-radar-stock" class="paygo-radar-badge stock-closed"><i class="fa-solid fa-hourglass-half"></i> Checking stock...</span>' +
+        '</div>' +
+        '<div class="paygo-radar-metric">' +
+          '<span class="paygo-radar-label"><i class="fa-solid fa-database" style="color:#a5b4fc;"></i> IG CREATOR POOL:</span>' +
+          '<span id="paygo-radar-pool" class="paygo-radar-badge pool-count">0 Accounts Ready</span>' +
+        '</div>' +
+        '<div class="paygo-radar-metric">' +
+          '<span class="paygo-radar-label"><i class="fa-solid fa-clock-rotate-left" style="color:#38bdf8;"></i> AUTO-MINE:</span>' +
+          '<span id="paygo-radar-auto" class="paygo-radar-badge auto-armed">Standby</span>' +
+        '</div>' +
+      '</div>' +
+
       /* LiveEngineBanner — COPIED from meta_auto_ai/public/index.html */
-      '<div id="tg-liveBanner" class="bg-[#111726]/80 rounded-xl border border-slate-800 p-4 flex flex-wrap items-center justify-between gap-4" style="margin-top:1rem;">' +
+      '<div id="tg-liveBanner" class="bg-[#111726]/80 rounded-xl border border-slate-800 p-4 flex flex-wrap items-center justify-between gap-4" style="margin-top:0.75rem;">' +
         '<div class="flex items-center space-x-4 flex-wrap gap-y-2">' +
           '<div class="flex items-center space-x-2">' +
             '<span id="tg-badge" class="px-2 py-0.5 rounded text-[11px] font-bold bg-slate-800 text-slate-400 border border-slate-700 tracking-wider">IDLE</span>' +
@@ -368,29 +364,27 @@
           '</div>' +
           '<span class="tg-bot-badge" id="tg-bot-badge"></span>' +
         '</div>' +
-        '<div class="paygo-modules-container" id="tg-igpool-field" style="display:none;">' +
-          '<div class="paygo-feature-card paygo-feature-pool" id="tg-paygo-card-pool">' +
-            '<div class="paygo-feature-main">' +
-              '<div class="paygo-feature-icon">' +
-                '<i class="fa-solid fa-bolt"></i>' +
-              '</div>' +
-              '<div class="paygo-feature-text">' +
-                '<div class="paygo-feature-title">' +
-                  'DRAIN FROM IG CREATOR ACCOUNTS' +
-                  '<span class="paygo-feature-badge pool-badge">Instant Drain</span>' +
-                '</div>' +
-                '<div class="paygo-feature-desc">' +
-                  'Fast direct API username update in ~0.4s &amp; cookie submission into PayGo. Zero browser creation overhead.' +
-                '</div>' +
-              '</div>' +
+
+        /* PayGo Dedicated Mode Switcher */
+        '<div id="paygo-mode-switcher" class="paygo-mode-switcher" style="display:none;">' +
+          '<button type="button" class="paygo-mode-tab is-active" id="paygo-tab-pool" data-mode="pool">' +
+            '<div class="paygo-mode-title">' +
+              '<i class="fa-solid fa-bolt" style="color:var(--accent-green);"></i> Instant Pool Drain' +
+              '<span class="paygo-mode-pill pill-recommended">Recommended · ~4s</span>' +
             '</div>' +
-            '<div class="paygo-feature-controls">' +
-              '<label class="switch" title="Drain pre-created accounts directly from the IG Creator list (PayGo only)">' +
-                '<input type="checkbox" id="tg-igpool-sw">' +
-                '<span class="slider"></span>' +
-              '</label>' +
+            '<div class="paygo-mode-desc">Direct Web API rename (~0.4s) & cookie submission into PayGo. Zero browser creation.</div>' +
+          '</button>' +
+          '<button type="button" class="paygo-mode-tab" id="paygo-tab-browser" data-mode="browser">' +
+            '<div class="paygo-mode-title">' +
+              '<i class="fa-solid fa-globe" style="color:var(--accent-purple);"></i> Full Browser Creator' +
+              '<span class="paygo-mode-pill pill-slow">Slow · 60-90s</span>' +
             '</div>' +
-          '</div>' +
+            '<div class="paygo-mode-desc">Launches Chromium to create fresh Meta + Instagram accounts from scratch.</div>' +
+          '</button>' +
+        '</div>' +
+
+        /* PayGo Pool Drain Container */
+        '<div id="tg-paygo-pool-container" style="display:none;margin-bottom:1rem;">' +
           '<div class="paygo-feature-card paygo-feature-automine" id="tg-paygo-card-automine" style="flex-direction:column;align-items:stretch;">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;gap:1.25rem;width:100%;">' +
               '<div class="paygo-feature-main">' +
@@ -427,13 +421,17 @@
               '</div>' +
             '</div>' +
           '</div>' +
+          '<input type="checkbox" id="tg-igpool-sw" style="display:none;" checked>' +
         '</div>' +
-        '<div class="creator-service creator-task-service" style="margin-bottom:0.9rem;">' +
+
+        /* Task Selector Container */
+        '<div id="tg-task-service-container" class="creator-service creator-task-service" style="margin-bottom:0.9rem;">' +
           '<div class="creator-service-title"><i class="fa-solid fa-list-check" style="color:var(--accent-purple);"></i> SELECT TASK</div>' +
           '<div class="creator-options" id="tg-task-options"></div>' +
           '<div class="creator-service-note" id="tg-task-note"></div>' +
           '<input type="hidden" id="tg-task" value="">' +
         '</div>' +
+
         '<div class="creator-grid">' +
           '<div class="creator-field">' +
             '<label>Parallel</label>' +
@@ -443,7 +441,7 @@
             '<label>Target (0 = \u221e)</label>' +
             '<input id="tg-target" class="form-control" type="number" min="0" value="0">' +
           '</div>' +
-          '<div class="creator-field creator-field--switch">' +
+          '<div id="tg-headless-field" class="creator-field creator-field--switch">' +
             '<label>Headless</label>' +
             '<label class="switch" title="Run browsers headless (no visible window)">' +
               '<input type="checkbox" id="tg-headless-sw" checked>' +
@@ -473,18 +471,13 @@
           '<div class="creator-service">' +
             '<div class="creator-service-title"><i class="fa-solid fa-shield-halved" style="color:var(--accent-purple);"></i> CAPTCHA SOLVER</div>' +
             '<div class="creator-options">' +
-              '<label class="creator-option" title="Visual challenge first via in-browser YOLOv5 ONNX AI extension, automatic fallback to Audio STT">' +
+              '<label class="creator-option" title="Visual challenge solver via in-browser YOLOv5 ONNX AI extension">' +
                 '<input type="radio" name="tg-captcha" value="extension" checked> ' +
                 '<i class="fa-solid fa-eye" style="color:var(--accent-green);"></i> Visual AI (JA) ' +
-                '<span class="creator-option-hint">(\u2192 Audio fallback)</span>' +
-              '</label>' +
-              '<label class="creator-option" title="Audio challenge first via Whisper / Vosk speech recognition, automatic fallback to Visual AI">' +
-                '<input type="radio" name="tg-captcha" value="audio"> ' +
-                '<i class="fa-solid fa-headphones" style="color:var(--accent-purple);"></i> Audio (Whisper) ' +
-                '<span class="creator-option-hint">(\u2192 Visual fallback)</span>' +
+                '<span class="creator-option-hint">(YOLOv5 ONNX)</span>' +
               '</label>' +
             '</div>' +
-            '<div class="creator-service-note">Visual AI is the default; audio is used automatically if the visual solver stalls.</div>' +
+            '<div class="creator-service-note">Visual AI (YOLOv5 ONNX) is the only enabled solver — fast &amp; lightweight.</div>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -609,6 +602,24 @@
     window.__setTgBot(state.bot);
     if ($('tg-task')) $('tg-task').addEventListener('change', applyFlowGuards);
     if ($('tg-igpool-sw')) $('tg-igpool-sw').addEventListener('change', applyFlowGuards);
+    var tabPool = $('paygo-tab-pool');
+    var tabBrowser = $('paygo-tab-browser');
+    if (tabPool && !tabPool.dataset.wired) {
+      tabPool.dataset.wired = '1';
+      tabPool.addEventListener('click', function () {
+        state.paygoMode = 'pool';
+        applyFlowGuards();
+        setStatus(state.running, state.igMode);
+      });
+    }
+    if (tabBrowser && !tabBrowser.dataset.wired) {
+      tabBrowser.dataset.wired = '1';
+      tabBrowser.addEventListener('click', function () {
+        state.paygoMode = 'browser';
+        applyFlowGuards();
+        setStatus(state.running, state.igMode);
+      });
+    }
     if ($('tg-conc')) $('tg-conc').addEventListener('input', function () { setStatus(state.running, state.igMode); });
     if ($('tg-headless-sw')) $('tg-headless-sw').addEventListener('change', function () { setWindow($('tg-headless-sw').checked); });
     if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; });
@@ -896,6 +907,15 @@
           : ('Creators are running (' + runningConc + ' parallel slots) — one browser per task, coupled cycle.');
       } else if (isOtherBotRunning) {
         sub.textContent = '⚡ ' + activeBotName + ' is currently running in the background (' + runningConc + ' parallel slots). Only one Telegram bot can run at a time. Stop ' + activeBotName + ' to start ' + botName + '.';
+      } else if (bot === 'paygo' && state.paygoMode === 'pool') {
+        var waitSec = (window.__paygoWaitSec != null) ? window.__paygoWaitSec : (pSt ? pSt.wait_seconds : null);
+        var m = waitSec ? Math.ceil(waitSec / 60) : null;
+        var isSoldOut = (window.__paygoStock === 0) || (pSt && pSt.stock === 0);
+        if (isSoldOut && m) {
+          sub.textContent = '⏳ PayGo limit reached (Stock 0/5700). Auto-Mine is armed to run at :00 (in ' + m + 'm).';
+        } else {
+          sub.textContent = '⚡ Instant Pool Drain ready. Click Start below to drain stock at maximum speed (~4s/task).';
+        }
       } else if (pSt && pSt.enabled) {
         var m = Math.floor(pSt.wait_seconds / 60);
         var s = pSt.wait_seconds % 60;
@@ -918,8 +938,19 @@
       } else {
         start.style.display = '';
         start.disabled = false;
-        if (isIgPool) {
-          start.innerHTML = '<i class="fa-solid fa-bolt"></i> Start PayGo Pool Drain (Manual · ' + effConc + ' Slots)';
+        if (bot === 'paygo') {
+          if (state.paygoMode === 'pool') {
+            var waitSec = (window.__paygoWaitSec != null) ? window.__paygoWaitSec : (pSt ? pSt.wait_seconds : null);
+            var m = waitSec ? Math.ceil(waitSec / 60) : null;
+            var isSoldOut = (window.__paygoStock === 0) || (pSt && pSt.stock === 0);
+            if (isSoldOut && m) {
+              start.innerHTML = '<i class="fa-solid fa-hourglass-half" style="color:#fbbf24;"></i> Run PayGo Now (' + effConc + ' Slots) <span style="font-size:0.75rem;opacity:0.85;">[Stock: 0 · Refill in ' + m + 'm]</span>';
+            } else {
+              start.innerHTML = '<i class="fa-solid fa-bolt"></i> Start Instant Pool Drain (' + effConc + ' Slots)';
+            }
+          } else {
+            start.innerHTML = '<i class="fa-solid fa-globe"></i> Start Browser Creator (' + effConc + ' Slots)';
+          }
         } else {
           start.innerHTML = '<i class="fa-solid fa-play"></i> Start ' + botName + ' Engine (' + effConc + ' Slots)';
         }
@@ -948,11 +979,62 @@
     el.textContent = pad(Math.floor(t / 3600)) + ':' + pad(Math.floor(t / 60) % 60) + ':' + pad(t % 60);
   }
 
+  function updatePayGoRadar(s, st) {
+    if (state.bot !== 'paygo') return;
+    var stockEl = $('paygo-radar-stock');
+    var poolEl = $('paygo-radar-pool');
+    var autoEl = $('paygo-radar-auto');
+
+    if (poolEl && s && s.ig_pool_available != null) {
+      poolEl.textContent = s.ig_pool_available + ' Accounts Ready';
+    }
+
+    var stock = (s && s.paygo_stock != null) ? s.paygo_stock : (st && st.stock != null ? st.stock : null);
+    var maxStock = (s && s.paygo_max_stock) || (st && st.max_stock) || 5700;
+    var waitSec = (s && s.paygo_wait_seconds != null) ? s.paygo_wait_seconds : (st && st.wait_seconds != null ? st.wait_seconds : null);
+    if (waitSec == null) {
+      var now = new Date();
+      waitSec = ((59 - now.getMinutes()) * 60) + (60 - now.getSeconds());
+    }
+    window.__paygoStock = stock;
+    window.__paygoWaitSec = waitSec;
+
+    if (stockEl) {
+      if (stock != null && stock > 0) {
+        stockEl.className = 'paygo-radar-badge stock-open';
+        stockEl.innerHTML = '<i class="fa-solid fa-bolt"></i> Available: ' + stock + '/' + maxStock;
+      } else {
+        var m = Math.floor(waitSec / 60);
+        var sec = waitSec % 60;
+        var secStr = sec < 10 ? '0' + sec : sec;
+        stockEl.className = 'paygo-radar-badge stock-closed';
+        stockEl.innerHTML = '<i class="fa-solid fa-hourglass-half"></i> Sold Out (Refill in ' + m + 'm ' + secStr + 's)';
+      }
+    }
+
+    if (autoEl) {
+      if (st && st.is_paygo_active) {
+        autoEl.className = 'paygo-radar-badge stock-open';
+        autoEl.innerHTML = '<i class="fa-solid fa-bolt"></i> Active (Draining)';
+      } else if (st && st.enabled) {
+        autoEl.className = 'paygo-radar-badge auto-armed';
+        autoEl.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Armed for :00';
+      } else {
+        autoEl.className = 'paygo-radar-badge';
+        autoEl.style.background = 'rgba(255,255,255,0.06)';
+        autoEl.style.borderColor = 'rgba(255,255,255,0.1)';
+        autoEl.style.color = 'var(--text-dim)';
+        autoEl.innerHTML = 'Standby (Manual)';
+      }
+    }
+  }
+
   function refresh() {
     if (!root) return;
     fetch('/api/tg/status', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) { setStatus(false, null, null, null); return; }
+        window.__latestTgStatus = s;
         // Follow the build manifest: a single-bot build (e.g. --bots fastpay)
         // must not stay on a 'taskly' that was never shipped.
         var eb = s.enabled_bots || [];
@@ -965,6 +1047,7 @@
         var activeBot = (s.running && s.engine && s.engine.tg_bot) ? s.engine.tg_bot : null;
         setStatus(!!s.running, s.ig_mode, activeBot, s.engine);
         renderPool(s.pool && s.pool.accounts ? s.pool.accounts : s.pool);
+        updatePayGoRadar(s, window.__paygoAutoStatus);
         // ALL KPIs are PER BOT — Taskly, PayGo and FastPay never share a number.
         // (Unassigned parked records count toward every bot: any submitter can
         // claim them. Falls back to the combined counters against an old server.)
@@ -992,7 +1075,12 @@
         // Refresh PayGo Auto-Mining status
         fetch('/api/tg/paygo-auto/status', { cache: 'no-store' })
           .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (j) { if (j && j.status) updatePayGoAutoUI(j.status); })
+          .then(function (j) {
+            if (j && j.status) {
+              updatePayGoAutoUI(j.status);
+              updatePayGoRadar(window.__latestTgStatus, j.status);
+            }
+          })
           .catch(function () {});
       })
       .catch(function () { setStatus(false, null); });
@@ -1001,6 +1089,7 @@
   function updatePayGoAutoUI(st) {
     if (!st) return;
     window.__paygoAutoStatus = st;
+    updatePayGoRadar(window.__latestTgStatus, st);
     var sw = $('tg-paygo-auto-sw');
     var autoConc = $('tg-paygo-auto-conc');
     var pill = $('tg-paygo-auto-pill');

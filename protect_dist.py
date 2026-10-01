@@ -54,13 +54,15 @@ KEEP_SOURCE = {"ai_config.py"}
 SERVER_JS = ["server.js", "server/context.js", "server/routes-license.js",
              "server/routes-updates.js", "server/routes-meta.js",
              "server/routes-tg.js", "server/routes-diag.js", "server/diag.js",
-             "server/runlog.js", "server/routes-static.js"]
+             "server/runlog.js", "server/routes-static.js",
+             "server/paygo-orchestrator.js"]
 
 # Node scripts carrying commercial logic.
 JS_SENSITIVE = ["server.js", "server/context.js", "server/routes-license.js",
                 "server/routes-updates.js", "server/routes-meta.js",
                 "server/routes-tg.js", "server/routes-diag.js", "server/diag.js",
                 "server/runlog.js", "server/routes-static.js",
+                "server/paygo-orchestrator.js",
                 "core/licenseManager.js", "core/updateManager.js", "core/licenseConfig.js"]
 
 # Dashboard scripts (client UI). Obfuscated with a CONSERVATIVE profile so the

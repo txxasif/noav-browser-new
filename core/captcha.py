@@ -274,10 +274,10 @@ class CaptchaMixin:
             return False
 
     def _captcha_order(self):
-        """Solver order: dashboard pick first, the other second (auto-fallback)."""
-        if getattr(self, "captcha_mode", "extension") == "audio":
-            return ("audio", "extension")
-        return ("extension", "audio")
+        """Solver order: Visual AI (JA YOLOv5 ONNX) only. Audio STT/Whisper removed for CPU/RAM performance."""
+        if os.environ.get("INSTA_ENABLE_AUDIO_CAPTCHA", "0") == "1":
+            return ("audio", "extension") if getattr(self, "captcha_mode", "extension") == "audio" else ("extension", "audio")
+        return ("extension",)
 
     def _extension_available(self):
         """True when the Visual AI extension directory is present."""
@@ -312,7 +312,7 @@ class CaptchaMixin:
         falling back to Audio STT anyway.
         """
         if not self._extension_active():
-            self.log("[🧩] Visual AI extension not running in this browser (headless shell) — Audio STT directly…")
+            self.log("[🧩] Visual AI extension not active in this browser context.")
             return False
         return super()._wait_for_extension_solve(page, timeout=timeout)
 
@@ -332,12 +332,14 @@ class CaptchaMixin:
                         _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "20") or 20)
                     except Exception:
                         _vt = 20.0
-                    self._in_extension_fallback = False
                     if self._wait_for_extension_solve(page, timeout=_vt):
                         return True
-                    self.log("[⚠️] Visual AI did not finish; falling back to Audio STT…")
-                else:
-                    self._in_extension_fallback = (solver == "audio" and "extension" in self._captcha_order())
+                    if "audio" in self._captcha_order():
+                        self.log("[⚠️] Visual AI did not finish; falling back to Audio STT…")
+                    else:
+                        self.log("[⚠️] Visual AI did not finish in time.")
+                elif solver == "audio":
+                    self._in_extension_fallback = ("extension" in self._captcha_order())
                     if self._solve_recaptcha_audio(page, tries=2):
                         return True
                     self.log("[⚠️] Audio STT did not finish.")

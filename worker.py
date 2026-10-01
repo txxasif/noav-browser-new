@@ -522,30 +522,26 @@ _active_slots_lock = threading.Lock()
 _active_slots = set()
 
 def _is_no_task_error(err_text: str) -> bool:
+    """True ONLY for definitive terminal conditions: bot hourly limit reached or pool empty.
+
+    Transient profile lease delays, network button lags, or single-task credential
+    glitches must NOT trip this and must not kill the entire fleet prematurely.
+    """
     if not err_text:
         return False
     e = str(err_text).lower()
     return any(p in e for p in (
-        "could not select",
-        "no telegram profile slot available",
-        "no logged-in telegram profile",
-        "no task available",
-        "not available right now",
-        "task not found",
-        "no tasks offered",
-        "tasks out of stock",
-        "temporarily out of stock",
-        "no tasks currently available",
-        "no tasks",
         "limit is reached",
         "limit reached",
         "hour's limit",
         "hourly limit",
+        "available this hour: 0/",
+        "available this hour: 0 ",
         "no_pool_accounts",
         "no available ig creator accounts",
         "pool empty",
-        "no usable credentials",
-        "did not send task credentials",
+        "tasks out of stock",
+        "temporarily out of stock",
         "all tasks completed",
         "task list is empty",
     ))
@@ -699,8 +695,10 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 t.join(timeout=1.0)
             if holder.get("r") in ("done", "stopped", "no_task"):
                 break
-            eff_delay = 8 if use_ig_pool else int(delay)
-            for _ in range(int(eff_delay * 2)):
+            # Pool drain: per-profile pacing in run_cookie_cycle already guards individual
+            # Telegram accounts from anti-flood, so slots on DIFFERENT accounts can drain immediately.
+            eff_delay = 1.5 if use_ig_pool else int(delay)
+            for _ in range(max(1, int(eff_delay * 2))):
                 if _stop.is_set():
                     break
                 time.sleep(0.5)
@@ -873,16 +871,46 @@ def main():
             pass
         with _active_slots_lock:
             _active_slots.clear()
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = [
-            executor.submit(_loop, slot_id=i + 1, **_shared)
-            for i in range(concurrency)
-        ]
-        for f in futures:
+
+    stop_flag_path = os.path.join(DATA_DIR, "stop_tg.flag")
+    if os.path.exists(stop_flag_path):
+        try:
+            os.remove(stop_flag_path)
+        except Exception:
+            pass
+
+    def _watch_stop_flag():
+        while not _stop.is_set():
+            if os.path.exists(stop_flag_path):
+                _stop.set()
+                try:
+                    os.remove(stop_flag_path)
+                except Exception:
+                    pass
+                print("[*] Graceful stop requested — allowing in-flight tasks to finish...", flush=True)
+                break
+            time.sleep(0.3)
+
+    threading.Thread(target=_watch_stop_flag, daemon=True).start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [
+                executor.submit(_loop, slot_id=i + 1, **_shared)
+                for i in range(concurrency)
+            ]
+            for f in futures:
+                try:
+                    f.result()
+                except Exception as exc:
+                    print(f"[!] Worker exception: {exc}")
+    finally:
+        if _loop is coupled_loop:
             try:
-                f.result()
-            except Exception as exc:
-                print(f"[!] Worker exception: {exc}")
+                from tg_accounts import tg_manager
+                tg_manager.reset_all()
+            except Exception:
+                pass
 
     emit_event({"type": "loop_stopped", "message": "All slots finished."})
     print("[*] Meta Account Creator stopped.")

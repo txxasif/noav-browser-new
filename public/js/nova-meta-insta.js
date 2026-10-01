@@ -147,16 +147,12 @@ function miCreatorPanelHtml(def) {
       <div class="creator-service">
         <div class="creator-service-title"><i class="fa-solid fa-shield-halved" style="color: var(--accent-purple);"></i> Captcha Solver</div>
         <div class="creator-options">
-          <label class="creator-option" title="Visual challenge first via in-browser YOLOv5 ONNX AI extension, automatic fallback to Audio STT">
+          <label class="creator-option" title="Visual challenge solver via in-browser YOLOv5 ONNX AI extension">
             <input type="radio" name="mi-captcha-${k}" value="extension" checked>
-            <i class="fa-solid fa-eye" style="color: var(--accent-green);"></i> Visual AI (JA) <span class="creator-option-hint">(→ Audio fallback)</span>
-          </label>
-          <label class="creator-option" title="Audio challenge first via Whisper / Vosk speech recognition, automatic fallback to Visual AI">
-            <input type="radio" name="mi-captcha-${k}" value="audio">
-            <i class="fa-solid fa-headphones" style="color: var(--accent-purple);"></i> Audio (Whisper) <span class="creator-option-hint">(→ Visual fallback)</span>
+            <i class="fa-solid fa-eye" style="color: var(--accent-green);"></i> Visual AI (JA) <span class="creator-option-hint">(YOLOv5 ONNX)</span>
           </label>
         </div>
-        <div class="creator-service-note">Visual AI is the default; audio is used automatically if the visual solver stalls.</div>
+        <div class="creator-service-note">Visual AI (YOLOv5 ONNX) is the only enabled solver — fast &amp; lightweight.</div>
       </div>
     </div>
 

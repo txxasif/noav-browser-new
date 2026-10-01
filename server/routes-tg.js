@@ -6,7 +6,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     _orchestratorInit = true;
     paygoOrchestrator.init(ctx);
   }
-  const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove } = ctx;
+  const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, getAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove } = ctx;
 
   // ---- TG balance: single-flight + short TTL cache ------------------------
   // A .session file serves ONE Telethon client at a time. Two concurrent
@@ -437,6 +437,19 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const subFastpay = stats.fastpay || 0;
       const submitted = stats.submitted != null ? stats.submitted : (subTaskly + subPaygo + subFastpay);
       const total = stats.total != null ? stats.total : submitted;
+
+      let igPoolAvail = 0;
+      try {
+        const allAccs = getAccounts() || [];
+        igPoolAvail = allAccs.filter(a =>
+          (a.platform === 'Meta+Instagram' || a.cookies) &&
+          (a.status === 'Created' || !a.status) &&
+          a.cookies && a.cookies.length > 20
+        ).length;
+      } catch (e) {}
+
+      const autoStatus = paygoOrchestrator ? paygoOrchestrator.getStatus() : null;
+
       sendJson(req, res, {
         status: 'SUCCESS',
         tool: 'tg-classic',
@@ -460,6 +473,10 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         tg_pending_paygo: 0,
         tg_pending_fastpay: 0,
         tg_paid_fastpay: subFastpay,
+        ig_pool_available: igPoolAvail,
+        paygo_stock: autoStatus ? autoStatus.stock : null,
+        paygo_max_stock: 5700,
+        paygo_wait_seconds: autoStatus ? autoStatus.wait_seconds : 0,
         // Bots this build ships — the panel defaults its bot/task to these.
         enabled_bots: readEnabledBots(),
         concurrency: (slot().config || {}).concurrency || 0,
@@ -626,19 +643,36 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
 
   if (pathname === '/api/tg/stop' && req.method === 'POST') {
     try {
+      const stopFlag = path.join(ROOT_DIR, 'data', 'stop_tg.flag');
+      try {
+        fs.mkdirSync(path.join(ROOT_DIR, 'data'), { recursive: true });
+        fs.writeFileSync(stopFlag, '1', 'utf8');
+      } catch (e) {}
+
       if (slot().proc) {
+        const proc = slot().proc;
         const isWinStop = process.platform === 'win32';
         if (!isWinStop) {
-          try { process.kill(-slot().proc.pid, 'SIGTERM'); }
-          catch (e) { try { slot().proc.kill('SIGTERM'); } catch (e2) {} }
-        } else {
-          try { slot().proc.kill(); } catch (e2) {}
+          try { process.kill(-proc.pid, 'SIGTERM'); }
+          catch (e) { try { proc.kill('SIGTERM'); } catch (e2) {} }
         }
-        slot().proc = null;
+        // Two-phase graceful stop: allow in-flight tasks (rename/submit) up to 5s to finish cleanly
+        setTimeout(() => {
+          if (slot().proc === proc) {
+            try {
+              if (!isWinStop) {
+                try { process.kill(-proc.pid, 'SIGKILL'); } catch (e) {}
+              } else {
+                try { proc.kill(); } catch (e) {}
+              }
+            } catch (e) {}
+            slot().proc = null;
+          }
+        }, 5000);
       }
       slot().config = null;
-      broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopped by user request.' });
-      sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopped.' });
+      broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopping gracefully...' });
+      sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopping gracefully...' });
       paygoOrchestrator.notifyUserStopped();
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });

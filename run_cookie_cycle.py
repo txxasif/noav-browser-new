@@ -70,8 +70,28 @@ def _is_account_dead_error(msg: str) -> bool:
     ))
 
 
+_IG_SESSION = None
+_IG_SESSION_LOCK = threading.Lock()
+
+def _get_ig_session():
+    global _IG_SESSION
+    if _IG_SESSION is None:
+        with _IG_SESSION_LOCK:
+            if _IG_SESSION is None:
+                try:
+                    import requests
+                    from requests.adapters import HTTPAdapter
+                    s = requests.Session()
+                    adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=1)
+                    s.mount("https://", adapter)
+                    _IG_SESSION = s
+                except Exception:
+                    _IG_SESSION = False
+    return _IG_SESSION
+
+
 def change_ig_username_fast(cookie_str: str, target_username: str, ua: str = None) -> tuple[bool, str]:
-    """Change Instagram username via direct Web API in ~0.4s.
+    """Change Instagram username via direct Web API in ~0.1s using persistent Keep-Alive connections.
 
     POST https://www.instagram.com/api/v1/web/accounts/edit/
     Requires sessionid and csrftoken in cookie_str.
@@ -94,6 +114,31 @@ def change_ig_username_fast(cookie_str: str, target_username: str, ua: str = Non
         "Cookie": cookie_str,
         "Accept": "*/*",
     }
+
+    # Fast path: persistent Keep-Alive session (~0.1s)
+    session = _get_ig_session()
+    if session:
+        try:
+            resp = session.post(
+                "https://www.instagram.com/api/v1/web/accounts/edit/",
+                data={"username": target_username},
+                headers=headers,
+                timeout=10,
+            )
+            body = resp.text
+            try:
+                res_json = resp.json()
+                if res_json.get("status") == "ok":
+                    return True, "ok"
+                msg = res_json.get("message") or body[:200]
+                return False, f"IG API: {msg}"
+            except Exception:
+                if resp.status_code == 200:
+                    return True, body[:100]
+                return False, f"HTTP {resp.status_code}: {body[:100]}"
+        except Exception:
+            pass  # Fall back to standard urllib below
+
     data = urllib.parse.urlencode({"username": target_username}).encode("utf-8")
     req = urllib.request.Request(
         "https://www.instagram.com/api/v1/web/accounts/edit/",
@@ -170,9 +215,10 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
     try:
         if not tg_manager.usable():
             raise RuntimeError("No logged-in Telegram profile available")
-        tg_acct = tg_manager.acquire(timeout=15, bot=bot_id)
+        tg_acct = tg_manager.acquire(timeout=30, bot=bot_id)
         if not tg_acct:
-            raise RuntimeError("No Telegram profile slot available")
+            log(slot_id, "[pool] All Telegram profiles busy — waiting for next slot cycle.")
+            return False, "lease_busy"
         log(slot_id, f"[pool] Leased TG {tg_acct['id']}")
 
         clog = lambda m, _id=tg_acct["id"]: print(f"[tg:{_id}:{bot_id}] {m}", flush=True)
@@ -196,10 +242,10 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         threading.Thread(target=_beat, daemon=True).start()
 
-        # Profile pacing: wait at least 8.0s between task starts on the SAME Telegram profile
+        # Profile pacing: wait at least 12.0s between task starts on the SAME Telegram profile
         with _profile_pacing_lock:
             last_t = _profile_last_start.get(tg_acct["id"], 0.0)
-            wait_rem = 8.0 - (time.time() - last_t)
+            wait_rem = 12.0 - (time.time() - last_t)
             if wait_rem > 0:
                 time.sleep(wait_rem)
             _profile_last_start[tg_acct["id"]] = time.time()
@@ -228,7 +274,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         # Claim an account from the pool (skip any that turn out to be checkpointed/dead)
         pool_acc = None
-        for _attempt in range(3):
+        for _attempt in range(10):
             cand = store.pop_ig_creator_account()
             if not cand or not cand.get("cookies"):
                 break
@@ -292,11 +338,14 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         log(slot_id, f"✅ [paygo] Cookie accepted by {bot_id} — confirming registration…")
 
-        # Register confirm
-        submitted = bot.mark_registered()
-        if not submitted:
-            log(slot_id, "register receipt not seen — retrying confirm tap…")
+        # Register confirm (retry up to 3 times to ensure receipt)
+        submitted = False
+        for _rc in range(3):
             submitted = bot.mark_registered()
+            if submitted:
+                break
+            log(slot_id, f"register receipt not seen (attempt {_rc+1}/3) — retrying confirm tap…")
+            time.sleep(1.2)
         if not submitted:
             store.restore_ig_creator_account(acc_id)
             pool_acc = None

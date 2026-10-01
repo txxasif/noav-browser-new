@@ -85,14 +85,10 @@ class MetaBaseMixin:
         else:
             os.environ["INSTA_NO_EXTENSION"] = "1"
             os.environ.pop("RECAPTCHA_EXT_DIR", None)
-        if getattr(self, "captcha_mode", "extension") == "audio":
-            self.log('[🎙️] Captcha solver: Audio STT first, Visual AI on fallback')
-        elif is_headless and not headless_ext_ok:
-            self.log('[🧩] Captcha solver: Background mode — Audio STT first (Visual needs Visible window)')
-        elif is_headless:
+        if is_headless:
             self.log('[🧩] Captcha solver: Background mode — Visual AI extension via new-headless (channel=chromium)')
         else:
-            self.log(f'[🧩] Captcha solver: Visual AI first, Audio STT on fallback ({os.path.basename(CAPTCHA_EXT_DIR) if os.path.isdir(CAPTCHA_EXT_DIR) else "extension missing — audio only"})')
+            self.log('[🧩] Captcha solver: Visual AI (JA YOLOv5 ONNX)')
         super()._launch()
         self.selfie_path = get_random_selfie()
         if os.path.exists(self.selfie_path):

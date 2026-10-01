@@ -488,16 +488,29 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/Run.bat",
             "MetaCreator/Run-Console.bat",
             "MetaCreator/Stop.bat",
+            "MetaCreator/start.bat",
             "MetaCreator/Update.bat",
             "MetaCreator/Update.ps1",
             "MetaCreator/core/licenseManager.js",
             "MetaCreator/core/license_mgr.py",
             "MetaCreator/core/licenseConfig.js",
             "MetaCreator/core/updateManager.js",
+            "MetaCreator/server/paygo-orchestrator.js",
+            "MetaCreator/tg_tasks.py",
+            "MetaCreator/tg_flows.py",
+            "MetaCreator/tg_steps.py",
+            "MetaCreator/tg_paygo_probe.py",
+            "MetaCreator/run_cookie_cycle.py",
+            "MetaCreator/run_native_cycle.py",
+            "MetaCreator/tg_fastpay.py",
+            "MetaCreator/tg_manager_cli.py",
             "MetaCreator/instagram/__init__.py",
             "MetaCreator/instagram/helpers.py",
             "MetaCreator/public/index.html",
+            "MetaCreator/public/js/nova-core.js",
             "MetaCreator/public/js/nova-license.js",
+            "MetaCreator/public/js/nova-meta-insta.js",
+            "MetaCreator/public/js/nova-tg.js",
             "MetaCreator/bin/node.exe",
             "MetaCreator/_internal/python.exe",
             "MetaCreator/extensions/Captcha/manifest.json",
@@ -508,7 +521,7 @@ def build_portable_zip(protect_mode: bool = True):
         if protect_mode:
             # Protected build ships sourceless bytecode, not .py.
             required_in_zip = [n[:-3] + ".pyc" if n.endswith(".py") else n
-                               for n in required_in_zip]
+                                for n in required_in_zip]
         forbidden_provider_files = [
             n for n in names
             if n in ("MetaCreator/mail_providers.py", "MetaCreator/mem_guard.py", "MetaCreator/core/mail_fish.py")
@@ -603,6 +616,13 @@ def build_patch_zip():
                 f"{forbidden_provider_files}"
             )
 
+        forbidden_in_patch = [
+            f for f in names
+            if f.startswith("MetaCreator/data/") or f in ("MetaCreator/accounts.txt", "MetaCreator/data") or f.lower().endswith(".md")
+        ]
+        if forbidden_in_patch:
+            raise RuntimeError(f"Forbidden user data or markdown leaked into Patch ZIP: {forbidden_in_patch}")
+
     size_mb = os.path.getsize(patch_path) / (1024 * 1024)
     sha256 = compute_sha256(patch_path)
     log("OK", f"Created {patch_path}")
@@ -649,6 +669,45 @@ def ensure_python_deps():
         log("ERROR", f"Could not install Python deps ({exc}). MTProto/TG Classic will not work on Windows.")
 
 
+def update_dist_manifest(zip_path, zip_sha256, patch_path=None, patch_sha256=None):
+    """Automatically updates dist/latest.json with the freshly built archive metadata."""
+    pkg_path = os.path.join(ROOT_LIN, "package.json")
+    version = "1.0.0"
+    if os.path.exists(pkg_path):
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as f:
+                version = json.load(f).get("version", "1.0.0")
+        except Exception:
+            pass
+    manifest = {
+        "version": version,
+        "notes": "Production release with Visual AI ONNX, PayGo auto-mining orchestrator, and hardened licensing.",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "files": {
+            "win-x64": {
+                "file": os.path.basename(zip_path),
+                "sha256": zip_sha256,
+                "size": os.path.getsize(zip_path),
+            },
+            "win-portable": {
+                "file": os.path.basename(zip_path),
+                "sha256": zip_sha256,
+                "size": os.path.getsize(zip_path),
+            }
+        }
+    }
+    if patch_path and os.path.exists(patch_path):
+        manifest["files"]["win-patch"] = {
+            "file": os.path.basename(patch_path),
+            "sha256": patch_sha256,
+            "size": os.path.getsize(patch_path),
+        }
+    manifest_path = os.path.join(DIST_DIR, "latest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    log("OK", f"Updated dist manifest: {manifest_path}")
+
+
 def main():
     print("=" * 70)
     print("  Meta Creator — Build & Packaging Workflow")
@@ -674,6 +733,8 @@ def main():
 
     zip_path, size_mb, sha256 = build_portable_zip(protect_mode)
     patch_path, patch_size_mb, patch_sha256 = build_patch_zip()
+
+    update_dist_manifest(zip_path, sha256, patch_path, patch_sha256)
 
     print("=" * 70)
     print("  BUILD COMPLETE SUCCESSFULLY")

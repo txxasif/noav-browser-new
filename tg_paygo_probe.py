@@ -127,7 +127,14 @@ def probe_paygo(timeout: float = 0.0) -> dict:
 
 
 def main():
-    res = probe_paygo()
+    timeout = 0.0
+    for i, arg in enumerate(sys.argv):
+        if arg == "--timeout" and i + 1 < len(sys.argv):
+            try:
+                timeout = float(sys.argv[i + 1])
+            except Exception:
+                pass
+    res = probe_paygo(timeout=timeout)
     print(json.dumps(res))
 
 

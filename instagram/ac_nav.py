@@ -210,7 +210,10 @@ class IgAcNavMixin:
                         self.log(f'[ac] Step 1 fallback note: {exc}')
                     # The fallback can land on a logged-out visitor view with a
                     # stray action sheet open (observed 2026-09-19: Block /
-                    # Restrict / Cancel sheet) — clear it before gear hunting.
+                    # Restrict / Cancel sheet) — clear it or bail immediately.
+                    if self._walled_or_chooser(p):
+                        raise IGDeadEnd(
+                            "IG visitor view on profile fallback — account is logged out (fast dead end)")
                     try:
                         self._dismiss_ig_sheets(p)
                     except Exception:
@@ -219,6 +222,9 @@ class IgAcNavMixin:
                 # Wait up to 10s for Profile page to load (recovering from "Something went wrong" if present)
                 for _ in range(10):
                     p.wait_for_timeout(1000)
+                    if self._walled_or_chooser(p):
+                        raise IGDeadEnd(
+                            "IG login wall/chooser or visitor view during profile wait (fast dead end)")
                     if self._recover_something_went_wrong(p, max_attempts=3):
                         self.log('[ac] Recovered profile page from "Something went wrong".')
                     cur_url = p.url or ""
@@ -645,18 +651,21 @@ class IgAcNavMixin:
         link) is reachable. Extracted from `_ac_navigate_in_app` so the reload /
         direct-page escalation can reuse it unchanged.
         """
+        if self._walled_or_chooser(p):
+            raise IGDeadEnd(
+                "IG login wall/chooser or visitor view before gear tap (fast dead end)")
         gear_selectors = (
             'a[href*="/accounts/settings/?entrypoint=profile"]',
             'a[href*="/accounts/settings/"]',
             'header a[href*="settings"]',
             'a[href*="accounts/settings"]',
-            'a:has(svg[aria-label="Options"])',
-            'svg[aria-label="Options"]',
-            'button:has(svg[aria-label="Options"])',
-            'button[aria-label="Options"]',
-            '[aria-label="Options"]',
+            'header a:has(svg[aria-label="Options"])',
+            'header svg[aria-label="Options"]',
+            'header button:has(svg[aria-label="Options"])',
+            'header button[aria-label="Options"]',
+            'header [aria-label="Options"]',
+            'header [aria-label="Settings"]',
             '[aria-label="Settings"]',
-            '[aria-label*="options" i]',
             '[aria-label*="settings" i]',
         )
         for _gear in range(3):
@@ -769,8 +778,8 @@ class IgAcNavMixin:
     )
 
     def _walled_or_chooser(self, p) -> bool:
-        """FAST dead-end probe: login wall, saved-account chooser, or the
-        logged-out "Remove profile" surface.
+        """FAST dead-end probe: login wall, saved-account chooser, logged-out
+        "Remove profile" surface, or public visitor view (Block/Restrict/Log in).
 
         Checked inside the Step 1/2 retry loops so the cycle quits the MOMENT
         Instagram bounces to /accounts/login (e.g. the ``__coig_login=1`` login
@@ -784,10 +793,24 @@ class IgAcNavMixin:
                 return True
             if "/accounts/login" in (p.url or ""):
                 return True
+            t = (p.inner_text("body") or "").lower()
             # Logged-out "Remove profile" sheet: a saved profile + a red
             # "Remove profile" action + the "Learn more … remove it" copy.
-            t = (p.inner_text("body") or "").lower()
             if "remove profile" in t and "learn more" in t:
+                return True
+            # Visitor profile / logged-out visitor view:
+            # 1. Moderation sheet: Block + Restrict + Share to...
+            if "block" in t and "restrict" in t:
+                self.log('[🚪] Detected IG visitor moderation sheet (Block/Restrict) — session is logged out.')
+                return True
+            # 2. Public profile header has "Log in" and "Open app" buttons
+            if ("log in" in t or "login" in t) and "open app" in t:
+                self.log('[🚪] Detected IG public visitor profile ("Log in" / "Open app") — session is logged out.')
+                return True
+            # 3. Check for visitor log-in button on a profile page
+            cur = (p.url or "").rstrip("/")
+            if "/accounts/" not in cur and p.locator('a[href*="/accounts/login"], button:has-text("Log in"), button:has-text("Log In")').count() > 0:
+                self.log('[🚪] Detected Log-in link on profile page — session is unauthenticated.')
                 return True
         except Exception:
             pass
