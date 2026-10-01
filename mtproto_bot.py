@@ -184,10 +184,12 @@ def _make_client(tg_id: str, sess_path: str):
     """Create a sync Telethon client bound to this thread's event loop."""
     import asyncio
     from telethon.sync import TelegramClient
+    loop = None
     try:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     except Exception:
-        pass
+        loop = None
     api_id, api_hash = _api_credentials()
     os.makedirs(os.path.dirname(sess_path) or ".", exist_ok=True)
     # catch_up=False: do NOT fetch the update backlog on connect. A session that
@@ -209,7 +211,34 @@ def _make_client(tg_id: str, sess_path: str):
     # lets readers proceed while a write is in flight.
     _harden_session_db(client)
     _OPEN_SESSIONS.add(os.path.abspath(sess_path))
+    # Pin the connection loop so Playwright's sync API (which resets the
+    # process's running loop via asyncio._set_running_loop) cannot make Telethon
+    # build a DIFFERENT loop later — that raises "The asyncio event loop must
+    # not change after connection". _pin_loop() re-asserts this on every
+    # connect/auth-check.
+    try:
+        client._pinned_loop = loop
+    except Exception:
+        pass
     return client
+
+
+def _pin_loop(client) -> None:
+    """Re-assert ``client``'s connection loop on the CURRENT thread.
+
+    Playwright's sync API changes the process asyncio loop; the pooled bot's
+    owner thread then has NO current loop, Telethon builds a fresh one, and
+    every request fails with "The asyncio event loop must not change after
+    connection". Re-setting the pinned loop before each connect/auth-check keeps
+    the running loop identical to the one the client connected on.
+    """
+    try:
+        import asyncio
+        lp = getattr(client, "_pinned_loop", None)
+        if lp is not None:
+            asyncio.set_event_loop(lp)
+    except Exception:
+        pass
 
 
 def _harden_session_db(client, timeout_s: float = 30.0) -> None:
@@ -445,6 +474,7 @@ class MtprotoTasklyBot:
         """
         if self._client is None:
             self._client = _make_client(self.tg_id, self.session_path)
+        _pin_loop(self._client)
         if not self._client.is_connected():
             self._client.connect()
         return self._probe_authorization()
@@ -527,6 +557,7 @@ class MtprotoTasklyBot:
         """
         if self._client is None:
             self._client = _make_client(self.tg_id, self.session_path)
+        _pin_loop(self._client)
         if not self._client.is_connected():
             self._client.connect()
         self._assert_authorized()
@@ -601,6 +632,7 @@ class MtprotoTasklyBot:
         """Resolve the target bot entity (MTProto has no 'open chat' step)."""
         if self._client is None:
             self._client = _make_client(self.tg_id, self.session_path)
+        _pin_loop(self._client)
         if not self._client.is_connected():
             self._client.connect()
         try:
@@ -843,7 +875,7 @@ class MtprotoTasklyBot:
 
             # Step 2: Check if task was just submitted or is under review
             low = self._last_text().lower()
-            if any(p in low for p in ("report has been received", "please wait", "under review")):
+            if any(p in low for p in ("report has been received", "under review", "check your work")):
                 # Submitted/under-review screen: PayGo / Taskly ALWAYS provide the main menu.
                 # NEVER send /start here — doing so right after task completion trips Telegram's
                 # SendMessage command flood filter and triggers FloodWait 4000+s.
@@ -917,8 +949,7 @@ class MtprotoTasklyBot:
         """
         try:
             low = self._last_text().lower()
-            if any(p in low for p in ("report has been received", "please wait",
-                                      "under review")):
+            if any(p in low for p in ("report has been received", "under review", "check your work")):
                 self.log("[tg] cancel_task: task looks SUBMITTED/under review — "
                          "refusing to cancel (invariant 23).")
                 return False

@@ -93,6 +93,11 @@
             <i class="fa-solid fa-bolt" style="color: #229ED9;"></i>
             <span>Taksly Bot</span>
           </button>
+          <button class="nav-item nav-sub" data-view="view-tg-taskly2fa" title="Taskly Create Inst (2FA) — pooled IG drain (no Meta, reuses an existing IG account)">
+            <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
+            <span>Taskly 2FA</span>
+            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+          </button>
           <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="paygo" title="Meta → Instagram → PayGo cookie submit">
             <i class="fa-solid fa-cookie-bite" style="color: #f59e0b;"></i>
             <span>PayGo Bot</span>
@@ -157,6 +162,11 @@
                .creator-mount and defaults unknown data-kind to "meta", which
                rendered the Meta Creator UI inside this panel. -->
           <div id="tg-classic-root"></div>
+        </section>
+
+        <!-- ================= VIEW: TASKLY 2FA (POOL DRAIN) ================= -->
+        <section id="view-tg-taskly2fa" class="view-panel" aria-label="Taskly 2FA pool drain">
+          <div id="tg-taskly2fa-root"></div>
         </section>
 
         <!-- ================= VIEW: TG MANAGER ================= -->
@@ -501,6 +511,7 @@
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
        disagreed with the pool card). Bump these when shipping JS changes. -->
   <script src="js/nova-tg.js?v=10" defer></script>
+  <script src="js/nova-taskly2fa.js?v=2" defer></script>
   <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:
        FastPay is a TG Classic create bot now. The file is kept on disk. -->
   <script src="js/nova-manager.js?v=1" defer></script>

@@ -800,9 +800,19 @@ class IgAcNavMixin:
                 return True
             # Visitor profile / logged-out visitor view:
             # 1. Moderation sheet: Block + Restrict + Share to...
+            #    Require the actual VISIBLE Block AND Restrict controls. The bare
+            #    text "block"/"restrict" also appears on the LOGGED-IN Settings
+            #    page ("Blocked", "Restricted accounts"), which made a healthy
+            #    session look logged-out and killed the cycle (observed 2026-10-02).
             if "block" in t and "restrict" in t:
-                self.log('[🚪] Detected IG visitor moderation sheet (Block/Restrict) — session is logged out.')
-                return True
+                try:
+                    _blk = p.locator('button:has-text("Block"), div[role="button"]:has-text("Block"), a:has-text("Block")').first
+                    _rst = p.locator('button:has-text("Restrict"), div[role="button"]:has-text("Restrict"), a:has-text("Restrict")').first
+                    if _blk.count() and _blk.is_visible() and _rst.count() and _rst.is_visible():
+                        self.log('[🚪] Detected IG visitor moderation sheet (Block/Restrict) — session is logged out.')
+                        return True
+                except Exception:
+                    pass
             # 2. Public profile header has "Log in" and "Open app" buttons
             if ("log in" in t or "login" in t) and "open app" in t:
                 self.log('[🚪] Detected IG public visitor profile ("Log in" / "Open app") — session is logged out.')

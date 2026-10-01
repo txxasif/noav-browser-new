@@ -622,6 +622,17 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     is_headless=is_headless, captcha_mode=captcha_mode,
                     mail_provider=mail_provider, stop_event=_stop,
                     add_email=add_email, tg_task=task, tg_bot=tg_bot)
+            elif str(_runner) == "run_pool_2fa_cycle":
+                # Taskly "📱 Create Inst (2FA)" POOL DRAIN (new "Taskly 2FA"
+                # panel): reuse a pre-created IG account from the pool — rename
+                # via Web API + 2FA from the stored inbox — no Meta, no signup.
+                from run_pool_2fa_cycle import run_pool_2fa_cycle_once
+                ok, detail = run_pool_2fa_cycle_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
+                    use_ig_pool=True)
             else:
                 ok, detail = tg_worker.run_tg_coupled_cycle(
                     AISlotWorker, slot_id=slot_id, is_headless=is_headless,
@@ -697,7 +708,7 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 break
             # Pool drain: per-profile pacing in run_cookie_cycle already guards individual
             # Telegram accounts from anti-flood, so slots on DIFFERENT accounts can drain immediately.
-            eff_delay = 1.5 if use_ig_pool else int(delay)
+            eff_delay = 0.5 if use_ig_pool else int(delay)
             for _ in range(max(1, int(eff_delay * 2))):
                 if _stop.is_set():
                     break

@@ -85,6 +85,7 @@ SYNC_ROOT_FILES = [
     "tg_steps.py",          # step registry (single source of truth for one step)
     "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
     "run_native_cycle.py",  # one-shot Taskly 2FA native cycle (lease -> bot email+code -> IG signup -> register)
+    "run_pool_2fa_cycle.py",  # one-shot Taskly 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + register)
     "tg_fastpay.py",        # FastPay2025 IG-2FA payout runner (key -> code -> Confirm)
     "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
     "tg_manager_cli.py",    # dashboard <-> tg.manager bridge (summary/balance/bots)
@@ -502,6 +503,7 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/tg_paygo_probe.py",
             "MetaCreator/run_cookie_cycle.py",
             "MetaCreator/run_native_cycle.py",
+            "MetaCreator/run_pool_2fa_cycle.py",
             "MetaCreator/tg_fastpay.py",
             "MetaCreator/tg_manager_cli.py",
             "MetaCreator/instagram/__init__.py",
@@ -511,6 +513,7 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/public/js/nova-license.js",
             "MetaCreator/public/js/nova-meta-insta.js",
             "MetaCreator/public/js/nova-tg.js",
+            "MetaCreator/public/js/nova-taskly2fa.js",
             "MetaCreator/bin/node.exe",
             "MetaCreator/_internal/python.exe",
             "MetaCreator/extensions/Captcha/manifest.json",

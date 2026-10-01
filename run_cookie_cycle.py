@@ -317,27 +317,35 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         # Profile pacing: minimum gap between task starts on the SAME Telegram
         # profile.
         #
-        # THIS IS THE ANTI-FLOOD LEVER. A drain cycle costs 6-9 SENDS:
+        # THIS IS THE THROUGHPUT / ANTI-FLOOD LEVER. A drain cycle costs 6-9 SENDS:
         #   reset_to_main_menu (inside choose_task)  1-4
         #   choose_task menu navigation                2
         #   start_task / submit_cookie / mark_registered 3
-        # At the old 12.0s gap that is 5 cycles/min => 30-45 sends/min PER
-        # ACCOUNT, against Telegram's practical SendMessage ceiling of ~20/min.
-        # That is what produced the multi-hour FloodWaits that blocked every
-        # account (observed 2026-10-01: all 6 on 3-5h waits).
         #
-        # 30s => ~2 cycles/min => ~14 sends/min, safely under the ceiling. It
-        # looks slower per cycle but it is strictly FASTER in practice: at 12s
-        # the accounts were banned, so throughput was ZERO.
+        # Default 12s — FAST profile, selected deliberately for max throughput:
+        # 6 profiles / 12s => ~30 cycles/min total (~5/min per ACCOUNT) =>
+        # ~30-45 sends/min PER ACCOUNT, at/above Telegram's practical
+        # SendMessage ceiling of ~20/min. 12s is the exact gap that previously
+        # produced the multi-hour FloodWaits that blocked every account
+        # (observed 2026-10-01: all 6 on 3-5h waits) — expect FloodWait
+        # penalties under load and let bot._sleep_flood() park the throttled
+        # profile; the pool re-verifies and resumes.
+        #
+        # For the conservative profile (30s ≈ 2 cycles/min ≈ 14 sends/min,
+        # safely under the ceiling) set INSTA_TG_PROFILE_PACING_SEC=30 — no code
+        # change needed. Raising it is the ONLY safe way to add headroom; going
+        # lower multiplies the ban risk.
         try:
-            _pacing = float(os.environ.get("INSTA_TG_PROFILE_PACING_SEC", "30") or 30)
+            _pacing = float(os.environ.get("INSTA_TG_PROFILE_PACING_SEC", "12") or 12)
         except (TypeError, ValueError):
-            _pacing = 30.0
+            _pacing = 12.0
         _pacing = max(0.0, _pacing)
         with _profile_pacing_lock:
             last_t = _profile_last_start.get(tg_acct["id"], 0.0)
             wait_rem = _pacing - (time.time() - last_t)
-            if wait_rem > 0:
+            if wait_rem > 1:
+                log(slot_id, f"[pace] {tg_acct['id']} idle {wait_rem:.1f}s "
+                             f"(start-to-start pacing {_pacing:.0f}s)")
                 time.sleep(wait_rem)
             _profile_last_start[tg_acct["id"]] = time.time()
 
@@ -529,6 +537,23 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         log(slot_id, f"FAILED: {exc}")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error",
                     "detail": f"Cookie pool drain error: {exc}"})
+        # If the failure itself is a dead/banned signal (raised rather than
+        # returned by an explicit branch), take the account OUT of the pool —
+        # restoring it just makes the next slot re-claim and fail on it forever.
+        if pool_acc is not None and _is_account_dead_error(detail):
+            log(slot_id, f"⚠️ [pool] Account {pool_acc['id']} is dead/banned ({detail[:90]}) — permanently removing.")
+            try:
+                store.delete_record(pool_acc["id"])
+            except Exception:
+                pass
+            if pool_acc.get("session_file") and os.path.exists(pool_acc["session_file"]):
+                try:
+                    os.remove(pool_acc["session_file"])
+                except Exception:
+                    pass
+            emit_event({"type": "account_deleted", "account_id": pool_acc["id"]})
+            emit_event({"type": "accounts_updated"})
+            pool_acc = None
         if pool_acc is not None:
             try:
                 store.restore_ig_creator_account(pool_acc["id"])
@@ -548,8 +573,11 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             pass
         if tg_acct:
             try:
-                with _profile_pacing_lock:
-                    _profile_last_start[tg_acct["id"]] = time.time()
+                # NOTE: `_profile_last_start` is stamped once, at task start
+                # (above), so pacing really is start-to-start as documented.
+                # Re-stamping here at release would make the effective window
+                # `cycle_time + pacing` (~2x the configured value) — that is
+                # what pinned each profile to ~60s at a 30s setting.
                 tg_manager.release(tg_acct["id"], ok=ok,
                                    account_id=rec_id if ok else None)
             except Exception:

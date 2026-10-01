@@ -433,6 +433,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     (async () => {
       const stats = readTgStats();
       const subTaskly = stats.taskly || 0;
+      const subTaskly2fa = stats.taskly2fa || 0;
       const subPaygo = stats.paygo || 0;
       const subFastpay = stats.fastpay || 0;
       const submitted = stats.submitted != null ? stats.submitted : (subTaskly + subPaygo + subFastpay);
@@ -464,6 +465,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         tg_submitted: submitted,
         // Per-bot breakdown (independent counters)
         tg_submitted_taskly: subTaskly,
+        tg_submitted_taskly2fa: subTaskly2fa,
         tg_submitted_paygo: subPaygo,
         tg_submitted_fastpay: subFastpay,
         tg_total_taskly: subTaskly,

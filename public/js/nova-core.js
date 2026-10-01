@@ -90,6 +90,7 @@ function initThemeNav() {
     'view-ig-creator': '#/ig',
     'view-tg-manager': '#/manager',
     'view-guide': '#/guide',
+    'view-tg-taskly2fa': '#/taskly2fa',
   };
 
   function routeForItem(item) {

@@ -602,18 +602,21 @@ class PayGoOrchestrator {
     const runningProc = slot ? slot.proc : null;
     const runningConfig = slot ? slot.config : null;
 
-    // CRITICAL: Always reset savedJob. Only store a previous job if
-    // a DIFFERENT bot (e.g. taskly, fastpay) was genuinely running.
+    // If PayGo is ALREADY draining, do NOT touch savedJob. A re-trigger here
+    // (rapid probe / tick) used to reset it to null, so the previous bot
+    // (Taskly / Taskly 2FA pool / FastPay) was never restored after PayGo.
+    if (runningProc && runningConfig
+        && runningConfig.tg_bot === 'paygo' && runningConfig.use_ig_pool) {
+      this.isPayGoActive = true;
+      this.state = 'paygo_running';
+      return;
+    }
+
+    // A genuine NEW preempt: reset, then (re)save the previous job if it was a
+    // DIFFERENT bot.
     this.savedJob = null;
 
     if (runningProc && runningConfig) {
-      // If already running PayGo with IG pool, don't preempt itself
-      if (runningConfig.tg_bot === 'paygo' && runningConfig.use_ig_pool) {
-        this.isPayGoActive = true;
-        this.state = 'paygo_running';
-        return;
-      }
-
       // Only save if it was genuinely a DIFFERENT bot (e.g. Taskly or FastPay).
       // Never save PayGo to restore itself!
       if (runningConfig.tg_bot && runningConfig.tg_bot !== 'paygo') {

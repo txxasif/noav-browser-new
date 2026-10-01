@@ -53,6 +53,11 @@ from __future__ import annotations
 # Canonical task ids. UI / CLI / worker strings resolve to these via ALIASES.
 NOMAIL = "nomail"        # Create Inst (No mail) — Taskly only
 INST_2FA = "inst_2fa"    # Create Inst (2FA) — Taskly only (PayGo button gone)
+# Taskly "📱 Create Inst (2FA)" run as a POOL DRAIN: reuse a pre-created IG
+# account from the IG Creator pool (rename via direct Web API + set 2FA from the
+# account's stored mail.td inbox) instead of creating Meta→IG from scratch.
+# Same bot button/path as INST_2FA — only the flow (runner) differs.
+INST_2FA_POOL = "inst_2fa_pool"
 COOKIES_NOMAIL = "cookies_nomail"  # Taskly: Cookies → Create Inst (No mail) (2FA + cookie)
 COOKIES = "cookies"      # Create Inst (Cookies) — PayGo only
 FASTPAY_2FA = "fastpay_ig_2fa"  # Instagram 2FA payout — FastPay bot (key -> code)
@@ -65,6 +70,7 @@ FASTPAY_2FA = "fastpay_ig_2fa"  # Instagram 2FA payout — FastPay bot (key -> c
 LABELS = {
     NOMAIL: "🔥 Create Inst (No mail)",
     INST_2FA: "📱 Create Inst (2FA)",
+    INST_2FA_POOL: "📱 Create Inst (2FA)",
     COOKIES_NOMAIL: "🍪 Create Inst (No mail)",
     COOKIES: "📱 Create Inst (Cookies)",
     FASTPAY_2FA: "Instagram 2FA",
@@ -82,6 +88,11 @@ ALIASES = {
     "Create Inst (2FA)": INST_2FA,
     "📱 Create Inst (2FA)": INST_2FA,
     "Create Inst": INST_2FA,
+    # Dashboard-only alias for the NEW "Taskly 2FA" panel (pooled drain mode).
+    # It resolves to the same bot button/path but the pool flow/runner.
+    "Taskly 2FA": INST_2FA_POOL,
+    "Taskly 2FA (Pool)": INST_2FA_POOL,
+    "Pool 2FA": INST_2FA_POOL,
     "Create Inst (Cookies)": COOKIES,
     "📱 Create Inst (Cookies)": COOKIES,
     "Cookies": COOKIES,
@@ -120,6 +131,21 @@ TASKS = {
                 {"all": ["task"], "none": ["cookie"]},
                 {"all": ["create inst", "2fa"], "none": ["no mail"]},
             ],
+            "steps": ["password", "email_link", "2fa", "register"],
+        },
+        # SAME bot button as INST_2FA, but run as a POOL DRAIN (no Meta, no
+        # browser signup): pop a pre-created IG account, rename it to the bot
+        # login, enable 2FA using the account's stored mail.td inbox, register.
+        INST_2FA_POOL: {
+            "label": LABELS[INST_2FA_POOL],
+            "flow": "pool_2fa",
+            "price": 0.018,
+            "path": [
+                {"all": ["task"], "none": ["cookie"]},
+                {"all": ["create inst", "2fa"], "none": ["no mail"]},
+            ],
+            # SAME step order as the regular Taskly 2FA task (tg_coupled):
+            # password -> email_link (bot email via 📥 Get code) -> 2fa -> register.
             "steps": ["password", "email_link", "2fa", "register"],
         },
         # 🍪 Cookies → 🍪 Create Inst (No mail): 2FA first, then cookie submit.

@@ -39,8 +39,7 @@ FLOWS = {
         "needs_email": False,
         "needs_2fa": True,
     },
-    # Taskly "📱 Create Inst (2FA)" — NATIVE signup (learned live 2026-09-28).
-    # The bot issues First name/Login/Password/Email (Email ordered async
+    # Taskly "📱 Create Inst (2FA)" — NATIVE signup (learned live 2026-09-28).    # The bot issues First name/Login/Password/Email (Email ordered async
     # after Start) plus the email code via its Get-code key. IG NATIVE email
     # signup with the bot data — NO Meta account, NO temp mail — then the
     # "Account Registered" key. Shares nothing with the "2fa" (Meta-coupled)
@@ -50,6 +49,18 @@ FLOWS = {
         "runner": "run_native_cycle",
         "steps": ["ig_signup", "2fa", "register"],
         "needs_email": False,
+        "needs_2fa": True,
+    },
+    # Taskly "📱 Create Inst (2FA)" run as a POOL DRAIN (no Meta, no signup):
+    # reuse a pre-created IG account from the IG Creator pool — rename it to the
+    # bot login via the direct Web API, enable 2FA from the account's STORED
+    # mail.td inbox (`extra.mail_tokens`), submit the key to Taskly, confirm the
+    # code, register, then consume (delete) the account. Own runner.
+    "pool_2fa": {
+        "label": "Create Inst (2FA) — pooled account drain (no Meta)",
+        "runner": "run_pool_2fa_cycle",
+        "steps": ["ig_rename", "2fa", "register"],
+        "needs_email": True,
         "needs_2fa": True,
     },
     # Taskly "🔥 Create Inst (No mail)" (Meta-coupled; the 2FA task moved to
@@ -72,6 +83,7 @@ FLOWS = {
 # Human labels for the task-window gate log (phase names).
 STEP_LABELS = {
     "ig_join": "IG join",
+    "ig_rename": "IG rename",
     "ig_signup": "IG native signup",
     "cookie_export": "cookie export",
     "submit_cookie": "cookie submit",

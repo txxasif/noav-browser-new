@@ -78,6 +78,7 @@ UI_JS = [
     "public/js/nova-diag.js",
     "public/js/nova-meta-insta.js",
     "public/js/nova-tg.js",
+    "public/js/nova-taskly2fa.js",
     "public/js/nova-fastpay.js",
     "public/js/nova-manager.js",
 ]

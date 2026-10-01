@@ -84,6 +84,10 @@ STEPS = {
         "label": "cookie export", "side": "ig", "needs": ["browser"], "optional": False,
         "doc": "Build the IG cookie header string (hard gate on sessionid + >=100 chars).",
     },
+    "ig_rename": {
+        "label": "IG rename", "side": "ig", "needs": ["browser", "creds"], "optional": False,
+        "doc": "Rename a pooled IG account to the bot-issued username via the direct IG Web API (run_cookie_cycle.change_ig_username_fast).",
+    },
 }
 
 # Steps that ONLY make sense with a given flow family — used for validation.
