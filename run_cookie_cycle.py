@@ -169,6 +169,47 @@ def change_ig_username_fast(cookie_str: str, target_username: str, ua: str = Non
         return False, str(exc)
 
 
+def _all_flooded_until():
+    """Earliest ``flood_until`` when EVERY leasable account is flood-limited.
+
+    Returns ``None`` if at least one account is usable (so the caller keeps its
+    normal busy/retry behaviour) or if flood state cannot be read.
+    """
+    try:
+        from tg_accounts import tg_manager as _m
+        _m._reload()
+        now = time.time()
+        untils = []
+        for a in _m.accounts:
+            if a.get("enabled") is False or not a.get("logged_in"):
+                continue
+            fu = a.get("flood_until")
+            try:
+                fu = float(fu) if fu else 0.0
+            except (TypeError, ValueError):
+                fu = 0.0
+            if fu <= now:
+                return None          # one usable account -> not "all flooded"
+            untils.append(fu)
+        return min(untils) if untils else None
+    except Exception:
+        return None
+
+
+def _sleep_until(when, stop_event=None, chunk=30.0):
+    """Sleep until ``when`` (epoch secs) in stop-aware chunks."""
+    while True:
+        try:
+            if stop_event is not None and stop_event.is_set():
+                return
+        except Exception:
+            pass
+        left = float(when) - time.time()
+        if left <= 0:
+            return
+        time.sleep(min(chunk, left))
+
+
 def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                           tg_task=COOKIE_TASK, tg_bot="paygo"):
     """Run ONE PayGo drain cycle using pre-created accounts from data/accounts.json.
@@ -217,6 +258,37 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             raise RuntimeError("No logged-in Telegram profile available")
         tg_acct = tg_manager.acquire(timeout=30, bot=bot_id)
         if not tg_acct:
+            # Distinguish "merely busy" from "FLOOD-LIMITED until a known time".
+            # A flood ban has a definite expiry, so spinning the loop every 1.5s
+            # (30s acquire + 1.5s sleep) just spams the log with zero chance of
+            # work — observed 2026-10-01: the same two lines every ~12s forever
+            # while all 6 accounts served 3-5h waits. Sleep it out instead.
+            wait_until = _all_flooded_until()
+            if wait_until and wait_until > time.time():
+                secs = int(wait_until - time.time())
+                # NEVER sleep the full recorded window. `flood_until` is a
+                # STALE RECORD that nothing re-verifies: it is written from a
+                # FloodWaitError at one moment, and the real throttle can lift
+                # much earlier. Trusting it benched six accounts that could
+                # demonstrably still send (verified 2026-10-01 22:00 — all six
+                # passed reset_to_main_menu while the record claimed 128 min).
+                # Sleep a bounded slice, then let the loop re-try: if the
+                # throttle is real the attempt re-parks it (re-recording the
+                # fresh value); if it lifted, work resumes within one slice.
+                try:
+                    _cap = int(os.environ.get("INSTA_TG_PARK_MAX_SLEEP", "300") or 300)
+                except (TypeError, ValueError):
+                    _cap = 300
+                slice_s = max(30, min(secs, _cap))
+                log(slot_id, f"[pool] Every Telegram profile is reported FLOOD-LIMITED "
+                             f"(recorded {secs // 60}m {secs % 60}s). Sleeping {slice_s}s, "
+                             f"then re-verifying against reality.")
+                _sleep_until(time.time() + slice_s, stop_event)
+                try:
+                    tg_manager.clear_flood()
+                except Exception:
+                    pass
+                return False, "flooded"
             log(slot_id, "[pool] All Telegram profiles busy — waiting for next slot cycle.")
             return False, "lease_busy"
         log(slot_id, f"[pool] Leased TG {tg_acct['id']}")
@@ -242,10 +314,29 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         threading.Thread(target=_beat, daemon=True).start()
 
-        # Profile pacing: wait at least 12.0s between task starts on the SAME Telegram profile
+        # Profile pacing: minimum gap between task starts on the SAME Telegram
+        # profile.
+        #
+        # THIS IS THE ANTI-FLOOD LEVER. A drain cycle costs 6-9 SENDS:
+        #   reset_to_main_menu (inside choose_task)  1-4
+        #   choose_task menu navigation                2
+        #   start_task / submit_cookie / mark_registered 3
+        # At the old 12.0s gap that is 5 cycles/min => 30-45 sends/min PER
+        # ACCOUNT, against Telegram's practical SendMessage ceiling of ~20/min.
+        # That is what produced the multi-hour FloodWaits that blocked every
+        # account (observed 2026-10-01: all 6 on 3-5h waits).
+        #
+        # 30s => ~2 cycles/min => ~14 sends/min, safely under the ceiling. It
+        # looks slower per cycle but it is strictly FASTER in practice: at 12s
+        # the accounts were banned, so throughput was ZERO.
+        try:
+            _pacing = float(os.environ.get("INSTA_TG_PROFILE_PACING_SEC", "30") or 30)
+        except (TypeError, ValueError):
+            _pacing = 30.0
+        _pacing = max(0.0, _pacing)
         with _profile_pacing_lock:
             last_t = _profile_last_start.get(tg_acct["id"], 0.0)
-            wait_rem = 12.0 - (time.time() - last_t)
+            wait_rem = _pacing - (time.time() - last_t)
             if wait_rem > 0:
                 time.sleep(wait_rem)
             _profile_last_start[tg_acct["id"]] = time.time()
@@ -457,6 +548,8 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             pass
         if tg_acct:
             try:
+                with _profile_pacing_lock:
+                    _profile_last_start[tg_acct["id"]] = time.time()
                 tg_manager.release(tg_acct["id"], ok=ok,
                                    account_id=rec_id if ok else None)
             except Exception:

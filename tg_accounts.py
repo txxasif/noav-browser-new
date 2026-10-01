@@ -439,6 +439,20 @@ class TGAccountManager:
                     # is never leased for task completion. Missing = enabled.
                     if a.get("enabled") is False:
                         continue
+                    # FLOOD-LIMITED accounts are not leasable. Telegram returns an
+                    # absolute retry time, so a request inside that window cannot
+                    # succeed — and hammering it risks EXTENDING the penalty.
+                    # Without this check a 3–5h FloodWait (observed 2026-10-01)
+                    # made every slot cycle through all 6 accounts every ~25s
+                    # with zero possible submissions.
+                    _fu = a.get("flood_until")
+                    if _fu:
+                        try:
+                            if float(_fu) > time.time():
+                                continue
+                            a["flood_until"] = None      # expired -> clear
+                        except (TypeError, ValueError):
+                            a["flood_until"] = None
                     if (a.get("status") in ("idle", "available")
                             and session_ok(a)):
                         eligible.append(a)
@@ -664,8 +678,26 @@ class TGAccountManager:
                 a["status"] = "idle"
                 a["leased_at"] = None
                 a["lease_note"] = None
+                a["busy_bot"] = None
+                a["flood_until"] = None
+                a.pop("probe_pid", None)
                 a["logged_in"] = session_ok(a)
             self.save()
+            self._cv.notify_all()
+            return True
+
+    def clear_flood(self, tg_id=None):
+        """Clear the flood_until lockout for one or all profiles."""
+        with self._cv:
+            self._reload()
+            changed = False
+            for a in self.accounts:
+                if tg_id is None or a.get("id") == tg_id:
+                    if a.get("flood_until") is not None:
+                        a["flood_until"] = None
+                        changed = True
+            if changed:
+                self.save()
             self._cv.notify_all()
             return True
 

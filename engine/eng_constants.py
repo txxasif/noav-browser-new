@@ -298,6 +298,13 @@ _NOVA_FLAGS = [
     # Explicit even though recent Playwright also passes it by default:
     # suppresses the automation / Chrome-for-Testing infobar.
     "--disable-infobars",
-    "--disable-features=PasswordManager,AutofillServerCommunication,PasswordGeneration,BackForwardCache,Translate,MediaRouter,IsolateOrigins,site-per-process",
+    "--disable-features=PasswordManager,AutofillServerCommunication,PasswordGeneration,BackForwardCache,Translate,MediaRouter,IsolateOrigins,site-per-process,OptimizationHints,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,DialMediaRouteProvider",
     "--password-store=basic",
+    "--disable-component-update",
+    "--disable-domain-reliability",
+    "--disable-sync",
+    "--disable-speech-api",
+    "--disable-breakpad",
+    "--disk-cache-size=1",
+    "--media-cache-size=1",
 ]

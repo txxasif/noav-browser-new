@@ -380,6 +380,7 @@ class EngineLaunchMixin:
                 "--disable-gpu",
                 "--disable-gpu-compositing",
                 "--disable-accelerated-2d-canvas",
+                "--disable-software-rasterizer",
                 "--disable-background-networking",
                 f"--js-flags=--max-old-space-size={v8_heap_mb}",
                 f"--renderer-process-limit={renderer_limit}",
@@ -650,19 +651,23 @@ class EngineLaunchMixin:
                     pass
             if _blocked_n:
                 self.log(f'[🚫] Ad/tracker blocking on ({_blocked_n} domains; INSTA_BLOCK_TRACKERS=0 to disable).')
-        # Block heavy video/audio streams during signup (keeps images & captcha 100% untouched)
+        # Block heavy video/audio streams and web fonts during signup (keeps images & captcha 100% untouched)
         if os.environ.get("INSTA_BLOCK_MEDIA", "1") != "0":
             try:
-                def _abort_media(route):
+                def _abort_heavy(route):
                     try:
-                        if route.request.resource_type in ("media",):
+                        req = route.request
+                        rt = req.resource_type
+                        if rt in ("media", "font"):
+                            route.abort()
+                        elif "logging_client_events" in req.url or "/tr/" in req.url or "google-analytics" in req.url:
                             route.abort()
                         else:
                             route.continue_()
                     except Exception:
                         pass
-                w.context.route("**/*", _abort_media)
-                self.log('[🚫] Video/audio media streams blocked (images/captcha untouched).')
+                w.context.route("**/*", _abort_heavy)
+                self.log('[🚫] Video/audio media, web fonts & telemetry blocked (images/captcha untouched).')
             except Exception:
                 pass
         # Extra low-level leak patches (CDP/webdriver/plugins/chrome.runtime).

@@ -700,13 +700,25 @@
           tG += rowTotal;
           var warn = bots.filter(function (b) { return !b.ok; })
                          .map(function (b) { return '\u26a0 ' + (b.error || b.name); }).join('; ');
+          // A LEASED account is SKIPPED by the balance read (one .session file
+          // serves one client, so a worker holding it cannot be queried in
+          // parallel). Show "busy" rather than a generic warning glyph — the
+          // old output looked like a missing/zero balance and prompted
+          // "why are these accounts missing?" when nothing was wrong.
+          var busy = !!a.busy;
+          var busyCell = '<span style="color:var(--text-muted);" title="Leased by a running worker — a .session serves one client at a time. Stop the engine or wait for the slot cycle to read it.">busy</span>';
+          var cell = function (b, n) {
+            if (busy) return busyCell;
+            return (b && b.ok) ? fmt(n) : '\u26a0';
+          };
           return '<tr style="border-top:1px solid var(--border-color);">' +
             '<td style="padding:5px 6px;">' + esc(a.id || '?') +
-              (warn ? '<div class="creator-option-hint" style="font-size:10px;">' + esc(warn) + '</div>' : '') +
+              (busy ? '<div class="creator-option-hint" style="font-size:10px;">busy \u2014 leased by a worker, balance not read</div>'
+                    : (warn ? '<div class="creator-option-hint" style="font-size:10px;">' + esc(warn) + '</div>' : '')) +
             '</td>' +
-            '<td style="padding:5px 6px;text-align:right;">' + (taskly && taskly.ok ? fmt(nT) : '\u26a0') + '</td>' +
-            '<td style="padding:5px 6px;text-align:right;">' + (paygo  && paygo.ok  ? fmt(nP) : '\u26a0') + '</td>' +
-            '<td style="padding:5px 6px;text-align:right;">' + (fastpay && fastpay.ok ? (fmt(nF) + (fastpay.pending ? ' <span style="font-size:10px;color:#eab308;" title="Pending: $' + Number(fastpay.pending).toFixed(2) + '">(+$' + Number(fastpay.pending).toFixed(2) + ' pend)</span>' : '')) : '\u26a0') + '</td>' +
+            '<td style="padding:5px 6px;text-align:right;">' + cell(taskly, nT) + '</td>' +
+            '<td style="padding:5px 6px;text-align:right;">' + cell(paygo, nP) + '</td>' +
+            '<td style="padding:5px 6px;text-align:right;">' + (busy ? busyCell : (fastpay && fastpay.ok ? (fmt(nF) + (fastpay.pending ? ' <span style="font-size:10px;color:#eab308;" title="Pending: $' + Number(fastpay.pending).toFixed(2) + '">(+$' + Number(fastpay.pending).toFixed(2) + ' pend)</span>' : '')) : '\u26a0')) + '</td>' +
             '<td style="padding:5px 6px;text-align:right;">' + fmt(rowTotal) + '</td>' +
           '</tr>';
         }).join('') || '<tr><td colspan="5" class="creator-option-hint" style="padding:8px;">' +

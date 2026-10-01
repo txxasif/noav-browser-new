@@ -81,15 +81,32 @@ def probe_paygo(timeout: float = 0.0) -> dict:
             log=lambda *_: None
         )
         bot.start()
-        bot.reset_to_main_menu()
-        bot.choose_task("📱 Create Inst (Cookies)")
 
-        # Inspect newest incoming messages from PayGo
-        texts = bot._recent_texts(5)
-        combined = "\n".join(texts)
+        # ── READ-ONLY FIRST (the big one) ────────────────────────────────
+        # PayGo posts "⚡️ Available this hour: X/N" as a CHAT MESSAGE and it
+        # stays in history. Reading costs ZERO Telegram requests, while the old
+        # body navigated the entire menu to obtain the same number:
+        #   reset_to_main_menu()  -> up to 4 sends
+        #   choose_task(...)      -> calls reset_to_main_menu() AGAIN (4 more)
+        #                            + one send per menu level, x2 retries
+        # ~8-12 SENDS per probe, every 30-60s, per account — purely to read a
+        # value already sitting in the chat. That was the single largest source
+        # of the multi-hour FloodWaits that blocked every account.
+        combined = "\n".join(bot._recent_texts(40))
+
+        m_stock = re.search(r"Available this hour:\s*(\d+)/(\d+)", combined, re.IGNORECASE)
+        if not m_stock:
+            # Counter genuinely absent (first run, or history rolled past it):
+            # navigate ONCE. Rare — the normal path never sends anything.
+            try:
+                bot.reset_to_main_menu()
+                bot.choose_task("📱 Create Inst (Cookies)")
+            except Exception:
+                pass
+            combined = "\n".join(bot._recent_texts(10))
+            m_stock = re.search(r"Available this hour:\s*(\d+)/(\d+)", combined, re.IGNORECASE)
 
         # 1. Parse stock: "Available this hour: 0/5700"
-        m_stock = re.search(r"Available this hour:\s*(\d+)/(\d+)", combined, re.IGNORECASE)
         if m_stock:
             stock = int(m_stock.group(1))
             max_stock = int(m_stock.group(2))

@@ -353,7 +353,14 @@ def check(tg_id, bots=BOT_ORDER, timeout=20.0, cache=None, cache_ttl=0.0):
     finally:
         _close_client(client)
     total = sum((r.get("amount") or 0.0) for r in results)
-    return {"ok": any(r.get("ok") for r in results), "id": tg_id,
+    is_ok = any(r.get("ok") for r in results)
+    if is_ok:
+        try:
+            from tg_accounts import tg_manager
+            tg_manager.clear_flood(tg_id)
+        except Exception:
+            pass
+    return {"ok": is_ok, "id": tg_id,
             "session": os.path.basename(sess), "bots": results,
             "total": round(total, 4)}
 

@@ -697,7 +697,7 @@ class MtprotoTasklyBot:
     # slot, cycling accounts and churning the entire pool for nothing.
     @staticmethod
     def _flood_wait_seconds(exc) -> int:
-        """Seconds Telegram demands, or 0. Handles wrapped/nested forms."""
+        """Seconds Telegram demands, or 0. Handles wrapped/nested/transported forms."""
         seen = 0
         cur = exc
         while cur is not None and seen < 6:
@@ -710,60 +710,185 @@ class MtprotoTasklyBot:
                 break
             cur = nxt
             seen += 1
+        # Fallback: parse the canonical Telethon wording. Some paths transport
+        # the exception across the pool's queue (`_call` does `raise res`), and
+        # an exception re-raised that way can lose the `.seconds` attribute
+        # while keeping its message — which made the drain log a plain FAILED
+        # instead of recognising a FloodWait (observed 2026-10-01 21:11).
+        try:
+            import re as _re
+            m = _re.search(r"a wait of\s+(\d+)\s+seconds", str(exc), _re.I)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            pass
         return 0
 
     def _sleep_flood(self, exc, what: str = "request") -> int:
         """Brief pause on a FloodWait, then hand the account back.
 
-        Sleeping the FULL penalty (e.g. 105s) inside the slot blocks that slot
-        for the whole window while other accounts sit idle — throughput loss for
-        no gain, because the account is unusable either way. So sleep only a
-        short slice and report the flood: the caller releases the lease and the
-        pool rotates to a healthy account, and this one is re-probed later.
+        Sleeping the FULL penalty inside the slot blocks that slot for the whole
+        window while other accounts sit idle — throughput loss for no gain,
+        because the account is unusable either way. So sleep only a short slice
+        and report the flood; the caller releases the lease and the pool rotates.
+
+        The account is ALSO marked ``flood_until`` so acquire() stops leasing it
+        until Telegram will actually accept requests again. Without that, the
+        pool kept re-leasing a flood-limited account every ~25s — a request that
+        cannot succeed, and one that risks extending the penalty (observed
+        2026-10-01: all 6 accounts on 3–5h waits, ~430 pointless attempts each).
         """
         secs = self._flood_wait_seconds(exc)
         if secs <= 0:
             return 0
+        self._last_flood_wait = time.time() + secs
+        self._record_flood_until(secs)
         try:
             cap = int(os.environ.get("INSTA_TG_FLOOD_MAX_SLEEP", "25") or 25)
         except Exception:
             cap = 25
         wait = max(1, min(secs, cap))
-        self.log(f"[tg] ⏳ FloodWait {secs}s on {what} — pausing {wait}s then "
-                 f"releasing the account (penalty is longer than our slice).")
+        self.log(f"[tg] ⏳ FloodWait {secs}s on {what} — pausing {wait}s, then the "
+                 f"account is parked for {secs}s (not re-leased until Telegram "
+                 f"accepts requests again).")
         end = time.time() + wait
         while time.time() < end:
             time.sleep(min(1.0, max(0.0, end - time.time())))
         return wait
 
-    # -- task flow ------------------------------------------------------
-    def reset_to_main_menu(self, timeout=30):
-        """Escape to a clean menu — NEVER cancels a submitted task (invariant 23)."""
+    def _record_flood_until(self, seconds: int) -> None:
+        """Persist the absolute time this account becomes usable again (capped to prevent multi-hour lockouts)."""
         try:
-            low = self._last_text().lower()
-            # NOTE: "review time" is deliberately NOT a marker — the pre-start
-            # task PREVIEW also says "⏳ Review time: 64 min ⏳" (169 occurrences
-            # in one run), so it would match a non-submitted state. The real
-            # post-submit text is "report has been received! Please wait."
-            if any(p in low for p in ("report has been received", "please wait",
-                                      "under review")):
-                # Submitted/under-review screen: /start only, never Cancel.
-                self._send("/start")
-                time.sleep(1.0)
+            import tg_accounts as _tgm
+            mgr = getattr(_tgm, "tg_manager", None)
+            if mgr is None:
+                return
+            mgr._reload()
+            # Capping: Telegram RPC throttle must never bench an account for hours without allowing a retry.
+            try:
+                max_rec = int(os.environ.get("INSTA_TG_FLOOD_MAX_RECORD", "120") or 120)
+            except Exception:
+                max_rec = 120
+            capped = max(1, min(int(seconds), max_rec))
+            for a in mgr.accounts:
+                if a.get("id") == self.tg_id:
+                    a["flood_until"] = int(time.time() + capped)
+                    break
+            mgr.save()
+        except Exception:
+            pass
+
+    def _clear_flood_until(self) -> None:
+        """Clear any flood lockout when the account communicates successfully."""
+        try:
+            import tg_accounts as _tgm
+            mgr = getattr(_tgm, "tg_manager", None)
+            if mgr is None:
+                return
+            mgr.clear_flood(self.tg_id)
+        except Exception:
+            pass
+
+    _last_start_times = {}
+
+    def _is_at_main_menu(self, btns: list) -> bool:
+        """Check if the reply keyboard is currently showing the bot's main menu."""
+        if not btns:
+            return False
+        # 1. Match against the top level of any registered task for this bot
+        try:
+            from tg_tasks import resolve as _resolve
+            for _t in ("📱 Create Inst (Cookies)", "Create Inst (No mail)",
+                       "Instagram 2FA", "Create Inst (2FA)"):
+                _tid, _lv = _resolve(self.bot_target, _t)
+                if _lv and isinstance(_lv, list):
+                    l0 = _lv[0]
+                    for b in btns:
+                        b_low = _norm_btn(b)
+                        if isinstance(l0, dict):
+                            alls = [str(x).lower() for x in (l0.get("all") or [])]
+                            nones = [str(x).lower() for x in (l0.get("none") or [])]
+                            if bool(alls) and all(a in b_low for a in alls) and not any(n in b_low for n in nones):
+                                return True
+                        elif str(l0).lower() in b_low:
+                            return True
+                    break
+        except Exception:
+            pass
+        # 2. General heuristic: 'tasks' or 'balance' on the keyboard
+        for b in btns:
+            nb = _norm_btn(b)
+            if any(k in nb for k in ("tasks", "task", "balance")):
                 return True
+        return False
+
+    def reset_to_main_menu(self, timeout=15):
+        """Escape to a clean menu — NEVER cancels a submitted task and NEVER spams /start (invariant 23)."""
+        try:
+            # Step 1: Check if already at main menu (or poll briefly up to 2.5s for keyboard)
             btns, _m = self._buttons()
-            cbtn = next((b for b in btns if "cancel" in b.lower()), None)
+            if self._is_at_main_menu(btns):
+                self.log("[tg] reset_to_main_menu: already at the main menu — no send.")
+                self._clear_flood_until()
+                return True
+
+            end_wait = time.time() + min(2.5, float(timeout))
+            while time.time() < end_wait:
+                time.sleep(0.4)
+                btns, _m = self._buttons()
+                if self._is_at_main_menu(btns):
+                    self.log("[tg] reset_to_main_menu: already at the main menu — no send.")
+                    self._clear_flood_until()
+                    return True
+
+            # Step 2: Check if task was just submitted or is under review
+            low = self._last_text().lower()
+            if any(p in low for p in ("report has been received", "please wait", "under review")):
+                # Submitted/under-review screen: PayGo / Taskly ALWAYS provide the main menu.
+                # NEVER send /start here — doing so right after task completion trips Telegram's
+                # SendMessage command flood filter and triggers FloodWait 4000+s.
+                self.log("[tg] reset_to_main_menu: task submitted/under review — main menu ready, zero sends.")
+                self._clear_flood_until()
+                return True
+
+            # Step 3: Handle cancel or back buttons in active sub-menus
+            cbtn = next((b for b in btns if "cancel" in _norm_btn(b)), None)
             if cbtn:
                 self._send(cbtn)
-                time.sleep(1.5)
+                time.sleep(1.0)
                 btns, _m = self._buttons()
-                rbtn = next((b for b in btns
-                             if "return" in b.lower() or "main menu" in b.lower()), None)
-                if rbtn:
-                    self._send(rbtn)
-                    time.sleep(1.2)
+                if self._is_at_main_menu(btns):
+                    self._clear_flood_until()
+                    return True
+
+            rbtn = next((b for b in btns
+                         if any(k in _norm_btn(b) for k in ("return", "back", "main menu"))), None)
+            if rbtn:
+                self._send(rbtn)
+                time.sleep(1.0)
+                btns, _m = self._buttons()
+                if self._is_at_main_menu(btns):
+                    self._clear_flood_until()
+                    return True
+
+            # Step 4: If buttons already exist (some other sub-menu), don't blindly /start
+            if self._is_at_main_menu(btns):
+                self._clear_flood_until()
+                return True
+
+            # Step 5: Absolute fallback when NO buttons exist at all:
+            # Strictly throttle /start to once every 60s per account
+            now = time.time()
+            last_start = MtprotoTasklyBot._last_start_times.get(self.tg_id, 0.0)
+            if now - last_start < 60.0:
+                self.log(f"[tg] reset_to_main_menu: /start throttled ({int(60 - (now - last_start))}s cooldown left) — skipping.")
+                return True
+
+            MtprotoTasklyBot._last_start_times[self.tg_id] = now
+            self.log("[tg] reset_to_main_menu: no menu buttons found — sending /start fallback.")
             self._send("/start")
             time.sleep(1.0)
+            self._clear_flood_until()
             return True
         except Exception as exc:
             # A FloodWait here means Telegram is throttling this ACCOUNT, not a
@@ -775,7 +900,28 @@ class MtprotoTasklyBot:
             return False
 
     def cancel_task(self):
+        """Cancel a PENDING task — NEVER a submitted one (invariant 23).
+
+        This was UNGUARDED, and the drain's error handler calls it on every
+        failure. So a failed cycle sent Cancel, PayGo replied "Our previous
+        conversation was reset, please start again from the main menu", and the
+        NEXT cycle then found a reset menu and failed with
+        "'📱 Create Inst (Cookies)' not available right now (level 2/3 missing)"
+        — which failed again, cancelled again. A self-sustaining failure loop
+        (observed 2026-10-01 22:02: tg_2/tg_4/tg_6 all stuck on it while only
+        tg_5 completed).
+
+        It also risked destroying a real submission: with a task submitted and
+        "under review", a Cancel would throw the work away. reset_to_main_menu
+        already refuses in that state; this now matches it.
+        """
         try:
+            low = self._last_text().lower()
+            if any(p in low for p in ("report has been received", "please wait",
+                                      "under review")):
+                self.log("[tg] cancel_task: task looks SUBMITTED/under review — "
+                         "refusing to cancel (invariant 23).")
+                return False
             btns, _m = self._buttons()
             cbtn = next((b for b in btns if "cancel" in b.lower()), None)
             if cbtn:
@@ -844,7 +990,10 @@ class MtprotoTasklyBot:
             return False
         want = LABELS.get(task_id, task)
         for _try in range(2):
-            self.reset_to_main_menu()
+            if not self.reset_to_main_menu():
+                if getattr(self, "_last_flood_wait", 0) > time.time():
+                    self.log("[tg] choose_task: aborting — account is currently flood-limited by Telegram.")
+                    return False
             navigated = []
             failed = None
             for depth, level in enumerate(levels):
@@ -1481,6 +1630,36 @@ class MtprotoPooledBot:
 
     def cancel_task(self):
         return self._call("cancel_task")
+
+    def _sleep_flood(self, exc, what: str = "request") -> int:
+        secs = MtprotoTasklyBot._flood_wait_seconds(exc)
+        if secs <= 0:
+            return 0
+        try:
+            import tg_accounts as _tgm
+            mgr = getattr(_tgm, "tg_manager", None)
+            if mgr is not None:
+                mgr._reload()
+                try:
+                    max_rec = int(os.environ.get("INSTA_TG_FLOOD_MAX_RECORD", "120") or 120)
+                except Exception:
+                    max_rec = 120
+                capped = max(1, min(int(secs), max_rec))
+                for a in mgr.accounts:
+                    if a.get("id") == self.tg_id:
+                        a["flood_until"] = int(time.time() + capped)
+                        break
+                mgr.save()
+        except Exception:
+            pass
+        try:
+            cap = int(os.environ.get("INSTA_TG_FLOOD_MAX_SLEEP", "25") or 25)
+        except Exception:
+            cap = 25
+        wait = max(1, min(secs, cap))
+        self.log(f"[tg] ⏳ FloodWait {secs}s on {what} — pausing {wait}s, then the account is parked for {secs}s.")
+        time.sleep(wait)
+        return wait
 
     def close(self, ok=True):
         try:

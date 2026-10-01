@@ -762,7 +762,7 @@ class PayGoOrchestrator {
       const currentSpawned = slot.proc;
 
       slot.proc.stdout.on('data', data => {
-        for (const line of this.ctx.feedWorkerStdout(data)) {
+        for (const line of this.ctx.feedWorkerStdout(data, 'tg')) {
           this.ctx.consumeWorkerLine(line, 'tg');
         }
       });
@@ -773,7 +773,7 @@ class PayGoOrchestrator {
         }
       });
       slot.proc.on('close', code => {
-        this.ctx.flushWorkerBuffer();
+        this.ctx.flushWorkerBuffer('tg');
         this.ctx.broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg', message: `[engine] TG worker exited (code ${code})` });
         this.ctx.broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', exit_code: code });
         if (slot.proc === currentSpawned) slot.proc = null;
