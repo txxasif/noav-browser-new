@@ -172,6 +172,14 @@ def _device_identity(tg_id: str) -> dict:
     }
 
 
+# Session files this PROCESS currently holds open. SQLite cannot resolve a lock
+# whose holder is ourselves: busy_timeout waits, then fails anyway, because the
+# holder is the one blocked. Tracking it lets us name the real cause instead of
+# retrying a self-deadlock (observed 2026-10-01: a slot leased tg_2 and the same
+# worker built a second client for it -> "bot start failed: database is locked").
+_OPEN_SESSIONS: set = set()
+
+
 def _make_client(tg_id: str, sess_path: str):
     """Create a sync Telethon client bound to this thread's event loop."""
     import asyncio
@@ -188,8 +196,58 @@ def _make_client(tg_id: str, sess_path: str):
     # "Security error … Too many messages had to be ignored consecutively"
     # (observed 2026-09-21). We read history explicitly via get_messages(), so
     # the update stream buys us nothing and only risks dropping the connection.
-    return TelegramClient(sess_path, api_id, api_hash, catch_up=False,
-                          **_device_identity(tg_id))
+    client = TelegramClient(sess_path, api_id, api_hash, catch_up=False,
+                            **_device_identity(tg_id))
+    # Telethon opens its session store with sqlite3's DEFAULT busy timeout (0),
+    # so ANY concurrent writer — the PayGo orchestrator probing the same account,
+    # a balance check, a pool lease handed to a second slot, or an orphaned engine
+    # from a previous run — makes the next write fail INSTANTLY with
+    # "database is locked" instead of waiting its turn (observed 2026-10-01:
+    # "bot boot: bot start failed: database is locked" the instant a slot leased
+    # tg_5). SQLite serialises writers; the correct behaviour is to WAIT for the
+    # holder to finish, which is exactly what busy_timeout does. WAL additionally
+    # lets readers proceed while a write is in flight.
+    _harden_session_db(client)
+    _OPEN_SESSIONS.add(os.path.abspath(sess_path))
+    return client
+
+
+def _harden_session_db(client, timeout_s: float = 30.0) -> None:
+    """Give Telethon's session SQLite a busy timeout + WAL (best effort).
+
+    NOTE on the attribute name: Telethon's ``SQLiteSession`` stores its handle
+    as ``._conn`` (private) and creates it LAZILY inside ``_cursor()``. An
+    earlier version of this helper read ``.conn`` -- which does not exist -- so
+    ``getattr(..., None)`` returned None and the whole call was a silent NO-OP.
+    That is why "database is locked" persisted after the "fix". Resolve the
+    handle defensively (both spellings) and FORCE creation via ``_cursor()``
+    when it is still None, so the PRAGMAs always land.
+    """
+    try:
+        sess = getattr(client, "session", None)
+        if sess is None:
+            return
+        conn = getattr(sess, "_conn", None) or getattr(sess, "conn", None)
+        if conn is None:
+            # Lazy-created: ask the session for a cursor, which opens the
+            # connection as a side effect.
+            try:
+                sess._cursor()
+            except Exception:
+                pass
+            conn = getattr(sess, "_conn", None) or getattr(sess, "conn", None)
+        if conn is None:
+            return
+        secs = int(timeout_s)
+        conn.execute(f"PRAGMA busy_timeout={secs * 1000}")
+        # WAL is persistent per-database; failures here are harmless (e.g. a
+        # read-only mount), so they must never abort the connect.
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def _reply_button_texts(msg) -> list:
@@ -377,14 +435,19 @@ class MtprotoTasklyBot:
     open = start
 
     def logged_in(self):
-        try:
-            if self._client is None:
-                self._client = _make_client(self.tg_id, self.session_path)
-            if not self._client.is_connected():
-                self._client.connect()
-            return bool(self._client.is_user_authorized())
-        except Exception:
-            return None
+        """True=authorized | False=definitively logged out | None=unknown.
+
+        ``_boot_bot`` treats ``False`` as "session lost" and DISABLES the
+        profile, so a transient network failure must surface as ``None``
+        (unknown), never ``False``. The old body returned
+        ``bool(is_user_authorized())`` -- which is ``False`` on ANY exception --
+        so every dropped connection permanently disabled a healthy account.
+        """
+        if self._client is None:
+            self._client = _make_client(self.tg_id, self.session_path)
+        if not self._client.is_connected():
+            self._client.connect()
+        return self._probe_authorization()
 
     def close(self, ok=True):
         """MTProto has no browser — but the Telethon client DOES hold a lock on
@@ -401,12 +464,48 @@ class MtprotoTasklyBot:
         self.disconnect()
         return True
 
+    def _release_session_handle(self):
+        """Force-close the session's SQLite handle and drop its file lock.
+
+        ``disconnect()`` below only runs when the client reports ``is_connected()``.
+        On a LOCK failure the client never connected, so disconnect() is a no-op
+        and the sqlite connection (and its OS file lock) is leaked — which is why
+        "database is locked" kept recurring on the SAME account: the pool released
+        the LEASE, but the dead process still held the FILE. Telethon keeps the
+        handle on ``session._conn`` and does not close it on a failed boot.
+
+        This is pure resource cleanup — it changes no task/earning behaviour.
+        """
+        sess = None
+        try:
+            sess = getattr(self._client, "session", None)
+            conn = getattr(sess, "_conn", None) or getattr(sess, "conn", None)
+            if conn is not None:
+                for step in (lambda: conn.commit(), conn.close):
+                    try:
+                        step()
+                    except Exception:
+                        pass
+                try:
+                    sess._conn = None
+                except Exception:
+                    pass
+            fname = getattr(sess, "filename", None)
+            if fname:
+                _OPEN_SESSIONS.discard(os.path.abspath(fname))
+        except Exception:
+            pass
+
     def disconnect(self):
+        # Release the network connection first (normal path), then ALWAYS drop
+        # the SQLite handle — including when the client never connected, which
+        # is exactly the lock-failure case that leaked the file before.
         try:
             if self._client is not None and self._client.is_connected():
                 self._client.disconnect()
         except Exception:
             pass
+        self._release_session_handle()
 
     # -- low level ------------------------------------------------------
     def _ensure_conn(self):
@@ -430,13 +529,73 @@ class MtprotoTasklyBot:
             self._client = _make_client(self.tg_id, self.session_path)
         if not self._client.is_connected():
             self._client.connect()
-        if not self._client.is_user_authorized():
-            raise RuntimeError(
-                f"Telegram session is not logged in ({os.path.basename(self.session_path)}) "
-                f"— session lost. Run: tg_login_mtproto.py --id {self.tg_id}")
+        self._assert_authorized()
         if self._entity is None:
             self.open_bot()
         return self._client
+
+    #: Marker prefix for a FAILED auth CHECK (network/lock/flood) as opposed to a
+    #: genuinely revoked session. Deliberately contains none of the phrases in
+    #: ``tg_support._is_tg_session_lost`` ("not logged in", "session lost", …),
+    #: so a transient failure can never be classified as a dead session — which
+    #: would DISABLE the profile.
+    TRANSIENT_AUTH_MARKER = "transient-auth-check-failed"
+
+    @staticmethod
+    def _is_auth_death(exc) -> bool:
+        """True ONLY for Telethon's definitive auth-revocation errors.
+
+        Everything else (network drop, SQLite lock, FloodWait, timeout) is a
+        TRANSIENT failure and must never be read as "logged out".
+        """
+        name = type(exc).__name__.upper()
+        msg = str(exc).upper()
+        return any(m in name or m in msg for m in (
+            "AUTH_KEY_UNREGISTERED", "AUTH_KEY_INVALID",
+            "SESSION_REVOKED", "SESSION_EXPIRED",
+            "USER_DEACTIVATED", "AUTH_KEY_DUPLICATED"))
+
+    def _probe_authorization(self):
+        """True=authorized | False=definitively logged out | None=unknown.
+
+        ``TelegramClient.is_user_authorized()`` swallows EVERY exception and
+        returns ``False``, so a dropped connection ("Server closed the
+        connection: 0 bytes read"), a SQLite lock or a FloodWait was
+        indistinguishable from a revoked auth key. Callers treat ``False`` as
+        "session lost" and DISABLE the profile, which turned ordinary network
+        blips into permanent account loss and spammed the dashboard with
+        "A Telegram session is dead". Classify by exception TYPE instead.
+
+        ``None`` (unknown) is the safe answer for a transient failure: the
+        caller keeps the profile enabled and simply retries.
+        """
+        try:
+            me = self._client.get_me()
+        except Exception as exc:
+            if self._is_auth_death(exc):
+                return False
+            try:
+                self.log(f"[tg] {os.path.basename(self.session_path)}: auth check "
+                         f"failed transiently ({exc}) — session NOT considered lost.")
+            except Exception:
+                pass
+            return None
+        return me is not None
+
+    def _assert_authorized(self):
+        """Raise if the session is genuinely dead; mark transient failures apart."""
+        state = self._probe_authorization()
+        if state is False:
+            raise RuntimeError(
+                f"Telegram session is not logged in "
+                f"({os.path.basename(self.session_path)}) — session lost. "
+                f"Run: tg_login_mtproto.py --id {self.tg_id}")
+        if state is None:
+            raise RuntimeError(
+                f"{self.TRANSIENT_AUTH_MARKER}: "
+                f"{os.path.basename(self.session_path)}: auth check unavailable "
+                f"(network/lock/flood) — session NOT lost.")
+        return True
 
     def open_bot(self):
         """Resolve the target bot entity (MTProto has no 'open chat' step)."""
@@ -528,6 +687,55 @@ class MtprotoTasklyBot:
         msgs = [(getattr(m, "text", "") or "").strip() for m in self._messages(limit=max_msgs)]
         return {"buttons": btns[:max_btns], "messages": [t for t in msgs if t]}
 
+    # -- flood control ---------------------------------------------------
+    # Telegram answers a rate-limited account with FloodWaitError, whose
+    # ``seconds`` field says exactly how long to stop. It was being swallowed by
+    # a bare ``except Exception`` upstream (reset_to_main_menu / the cookie
+    # drain loop), logged as a harmless "note", and retried ~2s later — so every
+    # retry landed INSIDE the penalty window and re-armed it. Observed as an
+    # ever-changing "A wait of 483 / 388 / 245 ... seconds is required" on every
+    # slot, cycling accounts and churning the entire pool for nothing.
+    @staticmethod
+    def _flood_wait_seconds(exc) -> int:
+        """Seconds Telegram demands, or 0. Handles wrapped/nested forms."""
+        seen = 0
+        cur = exc
+        while cur is not None and seen < 6:
+            secs = getattr(cur, "seconds", None)
+            if isinstance(secs, (int, float)) and secs > 0:
+                return int(secs)
+            # Telethon sometimes nests the original under .original_exception.
+            nxt = getattr(cur, "original_exception", None)
+            if nxt is None or nxt is cur:
+                break
+            cur = nxt
+            seen += 1
+        return 0
+
+    def _sleep_flood(self, exc, what: str = "request") -> int:
+        """Brief pause on a FloodWait, then hand the account back.
+
+        Sleeping the FULL penalty (e.g. 105s) inside the slot blocks that slot
+        for the whole window while other accounts sit idle — throughput loss for
+        no gain, because the account is unusable either way. So sleep only a
+        short slice and report the flood: the caller releases the lease and the
+        pool rotates to a healthy account, and this one is re-probed later.
+        """
+        secs = self._flood_wait_seconds(exc)
+        if secs <= 0:
+            return 0
+        try:
+            cap = int(os.environ.get("INSTA_TG_FLOOD_MAX_SLEEP", "25") or 25)
+        except Exception:
+            cap = 25
+        wait = max(1, min(secs, cap))
+        self.log(f"[tg] ⏳ FloodWait {secs}s on {what} — pausing {wait}s then "
+                 f"releasing the account (penalty is longer than our slice).")
+        end = time.time() + wait
+        while time.time() < end:
+            time.sleep(min(1.0, max(0.0, end - time.time())))
+        return wait
+
     # -- task flow ------------------------------------------------------
     def reset_to_main_menu(self, timeout=30):
         """Escape to a clean menu — NEVER cancels a submitted task (invariant 23)."""
@@ -558,6 +766,11 @@ class MtprotoTasklyBot:
             time.sleep(1.0)
             return True
         except Exception as exc:
+            # A FloodWait here means Telegram is throttling this ACCOUNT, not a
+            # broken menu. Sleeping it out is the whole point — retrying early
+            # re-arms the penalty and burns the slot.
+            if self._sleep_flood(exc, "reset_to_main_menu"):
+                return False
             self.log(f"[tg] reset_to_main_menu note: {exc}")
             return False
 

@@ -375,6 +375,66 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
     except Exception as exc:
         detail = str(exc)
+        # Telegram throttles per ACCOUNT, not per slot. Without this the slot
+        # returned instantly and the loop leased the next account ~2s later, so
+        # every account kept re-arming its own FloodWait and the whole pool
+        # churned through hundreds of pointless retries (observed: "A wait of
+        # 483 / 388 / 245s required" on every slot, seconds apart). Sleep the
+        # penalty out BEFORE restoring the lease, and report it as throttled so
+        # the slot backs off instead of hammering.
+        _fw = 0
+        if bot is not None:
+            try:
+                _fw = bot._sleep_flood(exc, "cookie pool drain")
+            except Exception:
+                _fw = 0
+        if _fw:
+            log(slot_id, f"⏳ Telegram rate limit — slept {_fw}s before retrying.")
+            emit_event({"type": "slot_event", "slot_id": slot_id, "status": "throttled",
+                        "detail": f"Telegram FloodWait — waited {_fw}s (account throttled)."})
+            return False, "floodwait"
+        # A locked session is a RESOURCE problem, not a task failure: the sqlite
+        # file is still held (usually by a client that failed to boot, so
+        # disconnect() never ran). Drop the handle NOW so the next lease of this
+        # account opens cleanly instead of re-locking. Business logic untouched.
+        if "database is locked" in detail.lower() or "database is locked" in str(exc).lower():
+            if bot is not None:
+                try:
+                    bot.disconnect()          # releases the sqlite handle
+                except Exception:
+                    pass
+            log(slot_id, "🔓 Session file was locked — released the handle; "
+                         "the account is free to be leased again.")
+            emit_event({"type": "slot_event", "slot_id": slot_id, "status": "lock_released",
+                        "detail": "Session DB lock released — account returned to the pool."})
+        # A DEAD session must take the account OUT of rotation. The cookie drain
+        # imported _is_tg_session_lost but never called it, so a genuinely
+        # revoked profile stayed enabled: the pool re-leased it within ~3s and
+        # failed again, forever — a tight loop that spammed "session lost" and
+        # starved the slot. tg_coupled already disables; this path was missing it.
+        if _is_tg_session_lost(detail):
+            try:
+                bot.close(ok=False)          # release the sqlite handle first
+            except Exception:
+                pass
+            if tg_acct:
+                try:
+                    tg_manager.disable(
+                        tg_acct["id"],
+                        reason="dead Telegram session (cookie pool drain)")
+                    log(slot_id, f"🔒 {tg_acct['id']} Telegram session is dead — "
+                                 f"DISABLED so the pool stops re-leasing it.")
+                    emit_event({"type": "slot_event", "slot_id": slot_id,
+                                "status": "disabled",
+                                "detail": f"{tg_acct['id']} disabled (dead Telegram session)."})
+                except Exception:
+                    pass
+            if pool_acc is not None:
+                try:
+                    store.restore_ig_creator_account(pool_acc["id"])
+                except Exception:
+                    pass
+            return False, "session_lost"
         log(slot_id, f"FAILED: {exc}")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error",
                     "detail": f"Cookie pool drain error: {exc}"})

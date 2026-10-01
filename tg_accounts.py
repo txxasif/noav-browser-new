@@ -45,6 +45,49 @@ def profile_dir(tg_id: str) -> str:
 
 
 LEASE_TTL = 1200  # seconds; a busy lease older than this is presumed orphaned
+# A probe lease is intentionally short-lived (the probe reads one counter and
+# releases). The orchestrator caps it at 30s and SIGKILLs on timeout, which
+# skips the probe's `finally` and orphans the lease — so reclaim probes far
+# sooner than a real task lease, or one slow probe wedges an account for 20 min.
+PROBE_LEASE_TTL = 90
+
+
+def _pid_alive(pid) -> bool:
+    """True when ``pid`` names a live process. Missing/unknown -> False.
+
+    Paired with :func:`_pid_is_set` below: a MISSING pid means "not recorded yet"
+    (the probe stamps it moments after acquiring), which must NOT be read as
+    "owner gone" or we would steal a lease from an actively working probe.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    except Exception:
+        return False
+
+
+def _pid_is_set(pid) -> bool:
+    """True only when a real, positive pid was actually recorded."""
+    try:
+        return int(pid) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _owner_gone(rec: dict) -> bool:
+    """True when a probe lease was stamped with a pid that is now DEAD."""
+    pid = rec.get("probe_pid")
+    return _pid_is_set(pid) and not _pid_alive(pid)
 
 
 def _lease_age(rec: dict) -> float | None:
@@ -346,10 +389,36 @@ class TGAccountManager:
                                 self.save()
                         else:
                             age = _lease_age(a)
-                            if age is not None and age > LEASE_TTL:
+                            # A PROBE lease is short by construction: the probe
+                            # reads the hourly counter and releases (its own
+                            # finally). But the orchestrator runs it via
+                            # runPythonJson with a 30s cap and a SIGKILL on
+                            # timeout — SIGKILL skips `finally`, so the lease is
+                            # orphaned. Under the normal 20-min LEASE_TTL that
+                            # wedges one TG account for 20 minutes after every
+                            # slow probe, and acquire() silently skips it (this
+                            # is the "not using all TG accounts" symptom). A
+                            # probe never legitimately holds an account longer
+                            # than its own timeout, so reclaim it on a short TTL.
+                            is_probe = "probe" in str(a.get("busy_bot") or "").lower()
+                            ttl = PROBE_LEASE_TTL if is_probe else LEASE_TTL
+                            if is_probe and _owner_gone(a):
+                                # Definitive: the probe process is GONE, so the
+                                # lease can never be released by its owner.
+                                # Reclaim immediately instead of waiting out the
+                                # TTL — this is what left tg_2/tg_3 stuck "BUSY -
+                                # PAYGO_PROBE" with no probe running at all.
                                 a["status"] = "idle"
                                 a["leased_at"] = None
                                 a["lease_note"] = None
+                                a["busy_bot"] = None
+                                a.pop("probe_pid", None)
+                            elif age is not None and age > ttl:
+                                a["status"] = "idle"
+                                a["leased_at"] = None
+                                a["lease_note"] = None
+                                a["busy_bot"] = None
+                                a.pop("probe_pid", None)
                 # Pass 2 — fair-share pick. The old loop returned the FIRST
                 # eligible profile in fixed index order, so tg_1 absorbed the
                 # bulk of every run (lifetime 94 / 52 / 23) while later

@@ -348,10 +348,18 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
     res.write(': connected\n\n');
     sseClients.add(res);
 
-    // Replay recent activity so terminal immediately displays logs on connection or page refresh
+    // Replay recent activity so terminal immediately displays logs on connection or page refresh.
+    //
+    // Marked `replay: true` ON PURPOSE: the client shows these for continuity,
+    // but must NOT re-raise operator ALERTS from them. Without the marker every
+    // page refresh / SSE reconnect re-delivered the last 150 events and
+    // re-fired their toasts — so an old "Telegram session is dead" kept
+    // reappearing long after the condition cleared (observed 2026-10-01:
+    // restarting the server did not stop the toasts because the replay put the
+    // old lines back on the wire).
     for (const item of recentLogs) {
       try {
-        res.write(`data: ${JSON.stringify(item)}\n\n`);
+        res.write(`data: ${JSON.stringify(Object.assign({}, item, { replay: true }))}\n\n`);
       } catch (e) {}
     }
 
@@ -443,12 +451,15 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       const workerMode = (mode === 'meta-ig') ? 'meta-ig' : 'meta-only';
       // 2FA Key extraction: strictly enabled only for IG Creator when explicitly checked
       const twofa = (mode === 'meta-ig') && Boolean(opts.twofa);
+      // Follow step: the account follows ~2 suggested profiles after joining.
+      // Dashboard switch; default ON (unchanged behaviour for older clients).
+      const follow = opts.follow !== false;
       // Global password: request override, else the saved dashboard setting.
       const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
       // Optional fixed username (workspace field). Also env-only.
       const newUsername = String(opts.new_username || '').trim().slice(0, 64);
 
-      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa };
+      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa, follow };
 
       const args = [
         path.join(ROOT_DIR, 'worker.py'),
@@ -481,6 +492,9 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
             PYTHONUTF8: '1',
             PYTHONIOENCODING: 'utf-8',
             PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || defaultBrowsersPath,
+            // Follow switch -> the engine's documented follow tunable. "0"
+            // makes ig_follow_suggested() a no-op (step skipped entirely).
+            INSTA_FOLLOW_AFTER_LOGIN: follow ? '1' : '0',
             ...(newPassword ? { META_NEW_PASSWORD: newPassword } : {}),
             ...(newUsername ? { META_NEW_USERNAME: newUsername } : {})
           })
@@ -501,7 +515,8 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         target,
         headless,
         mode,
-        twofa
+        twofa,
+        follow
       });
       broadcastEvent({
         type: 'loop_started',

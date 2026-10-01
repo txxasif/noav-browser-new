@@ -20,6 +20,9 @@ class PayGoOrchestrator {
     this.isPayGoActive = false;
     this.activePayGoProc = null;
     this._lastPreemptedHour = null;
+    // Set when a cycle submits 0 tasks: blocks the drain gate from restarting
+    // on a stale positive probe. Cleared by a probe that confirms real stock.
+    this._lastEmptyHour = null;
     this.timer = null;
     this._probing = false;
     this._paygoStartSubmissions = 0;
@@ -70,8 +73,10 @@ class PayGoOrchestrator {
     const availPool = this.getAvailableIgAccountsCount();
     if (availPool <= 0) return;
 
-    // If we have verified that PayGo stock is available:
-    if (this.lastProbe && this.lastProbe.available && (this.lastProbe.stock === null || this.lastProbe.stock > 0)) {
+    // If we have verified that PayGo stock is available. A sold-out or unknown
+    // counter must NOT trigger a drain (same latch rationale as tick()).
+    if (this.lastProbe && this.lastProbe.available
+        && typeof this.lastProbe.stock === 'number' && this.lastProbe.stock > 0) {
       console.log(`[PayGo-Auto] ⚡ New account created (${availPool} ready in pool)! Draining to PayGoBot...`);
       if (this.ctx && this.ctx.broadcastEvent) {
         this.ctx.broadcastEvent({
@@ -240,6 +245,32 @@ class PayGoOrchestrator {
 
     // Either tasks were drained (> 0), OR grace window has expired (min >= 5).
     this._lastPreemptedHour = hourKey;
+    // A cycle that submits NOTHING outside the grace window means PayGo had no
+    // task to give. The probe's "stock" reading is then either STALE or wrong,
+    // and must be INVALIDATED — otherwise the drain gate in tick() keeps seeing
+    // the old positive value, restarts PayGo ~5s later, and loops forever
+    // (observed 2026-10-01: ~15s start/stop cycle for 90s straight, each pass
+    // leasing all 6 TG accounts and hitting "hourly limit reached 0/5000").
+    //
+    // Earlier versions latched only when `lastProbe.stock === 0`, which left a
+    // hole exactly here: a stale POSITIVE probe never satisfies that test, so
+    // nothing latched and the loop continued.
+    if (tasksSubmitted === 0 && !inGraceWindow) {
+      this._lastEmptyHour = hourKey;
+      this.lastProbe = Object.assign({}, this.lastProbe || {}, {
+        available: false, stock: 0, checked_at: Math.floor(Date.now() / 1000),
+      });
+      console.log('[PayGo-Auto] Cycle submitted 0 tasks — treating this hour as SOLD OUT '
+                + 'and invalidating the stale probe. A fresh probe is required to restart.');
+      if (this.ctx && this.ctx.broadcastEvent) {
+        this.ctx.broadcastEvent({
+          type: 'log',
+          pipeline: 'telegram',
+          engine: 'tg',
+          message: `⚡ [Auto-PayGo] PayGo returned no task this cycle — holding until a probe confirms stock again (no restart loop).`,
+        });
+      }
+    }
     this.state = 'restoring';
 
     const hasJobToRestore = !!(this.savedJob && this.savedJob.tg_bot && this.savedJob.tg_bot !== 'paygo');
@@ -299,8 +330,74 @@ class PayGoOrchestrator {
     return Math.max(5, Math.floor((nextHour.getTime() - now.getTime()) / 1000));
   }
 
+  // Reclaim stale PROBE leases eagerly — no acquire() required.
+  //
+  // Reclamation previously ran only inside tg_manager.acquire(). When nothing
+  // was leasing (Auto-Mine idle at stock 0, no drain running) nothing swept, so
+  // a probe that the orchestrator SIGKILLed on its 30s timeout left its account
+  // stuck as "BUSY - PAYGO_PROBE" indefinitely — the dashboard showed 2 busy
+  // profiles with no probe process in existence, and those accounts were
+  // unavailable for the next drain. Sweeping here (and in tg_manager) fixes it.
+  //
+  // Cheap: one file read; only writes when something actually needed reclaiming.
+  sweepStaleLeases() {
+    try {
+      const fs = this.ctx.fs, path = this.ctx.path;
+      const f = path.join(this.ctx.ROOT_DIR, 'data', 'tg_accounts.json');
+      if (!fs.existsSync(f)) return 0;
+      const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const isArr = Array.isArray(raw);
+      const arr = isArr ? raw : (raw.accounts || []);
+      const now = Date.now() / 1000;
+      let freed = 0;
+      for (const a of arr) {
+        if (!a || a.status !== 'busy') continue;
+        const bot = String(a.busy_bot || '').toLowerCase();
+        if (!bot.includes('probe')) continue;
+        // Owner alive? process.kill(pid,0) throws ESRCH when the pid is gone.
+        // NOTE: "no pid" must NOT mean "owner gone" — the probe stamps its pid
+        // moments AFTER acquiring, so reclaiming on a missing pid would steal a
+        // lease from a probe that is actively working. Missing pid falls back to
+        // the TTL; only a RECORDED, DEAD pid settles immediately.
+        let alive = false;
+        const pid = Number(a.probe_pid);
+        const hasPid = Number.isInteger(pid) && pid > 0;
+        if (hasPid) {
+          try { process.kill(pid, 0); alive = true; }
+          catch (e) { alive = (e && e.code === 'EPERM'); }
+        }
+        const age = a.leased_at ? (now - Number(a.leased_at)) : null;
+        const stale = (hasPid && !alive) || (age !== null && age > 90);
+        if (stale) {
+          a.status = 'idle';
+          a.leased_at = null;
+          a.lease_note = null;
+          a.busy_bot = null;
+          delete a.probe_pid;
+          freed++;
+        }
+      }
+      if (freed) {
+        fs.writeFileSync(f, JSON.stringify(isArr ? arr : raw, null, 2));
+        console.log(`[PayGo-Auto] Reclaimed ${freed} stale probe lease(s) (owner gone / past TTL).`);
+      }
+      return freed;
+    } catch (e) {
+      return 0;
+    }
+  }
+
   async tick() {
     if (!this.enabled || this._probing || this.isPayGoActive) return;
+    // Self-heal orphaned probe leases. Throttled: the probe TTL is 90s and a
+    // tick fires every 5s, so sweeping each tick re-read the pool 12x more than
+    // needed. 30s is well inside the TTL and still clears a dead-owner lease
+    // almost immediately (the PID check is exact, not time-based).
+    const _now = Date.now();
+    if (_now - (this._lastSweep || 0) > 30000) {
+      this._lastSweep = _now;
+      this.sweepStaleLeases();
+    }
 
     const now = new Date();
     const min = now.getMinutes();
@@ -335,10 +432,23 @@ class PayGoOrchestrator {
       }
     }
 
-    // CONTINUOUS POOL DRAIN: Listen to creator and drain whenever PayGo tasks are available
-    const isPayGoStockActive = this.lastProbe && this.lastProbe.available && (this.lastProbe.stock === null || this.lastProbe.stock > 0);
+    // CONTINUOUS POOL DRAIN: drain whenever PayGo tasks are available.
+    // Only a numeric zero latches the hour shut. `available === false` with
+    // `busy_skip` means "all accounts already working" — that is success, not
+    // sold-out, and must never block a drain. `stock === null` is unknown, so
+    // re-probe rather than assume (that assumption caused the restart loop).
+    const stockKnownSoldOut = !!(this.lastProbe
+      && this.lastProbe.stock === 0 && this.lastProbe.busy_skip !== true);
+    // Require a POSITIVE, parsed counter.
+    const isPayGoStockActive = !stockKnownSoldOut
+      && !!(this.lastProbe && this.lastProbe.available
+           && typeof this.lastProbe.stock === 'number' && this.lastProbe.stock > 0);
     const poolCount = this.getAvailableIgAccountsCount();
-    if (isPayGoStockActive && poolCount > 0 && !this.isPayGoActive) {
+    // Also honour the empty-cycle latch: after a pass that submitted nothing,
+    // do not restart on the same stale probe. `runProbe` clears the latch when
+    // it confirms positive stock, so a genuine refill still resumes the drain.
+    if (isPayGoStockActive && poolCount > 0 && !this.isPayGoActive
+        && this._lastEmptyHour !== hourKey) {
       console.log(`[PayGo-Auto] ⚡ PayGo stock is active (${this.lastProbe.stock != null ? this.lastProbe.stock : 'available'}) & ${poolCount} account(s) ready in pool. Starting drain...`);
       await this.preemptAndStartPayGo();
       this.broadcastStatus();
@@ -348,6 +458,19 @@ class PayGoOrchestrator {
     // 1. Mandatory top-of-hour preemption:
     // Window: 25 seconds before :00 (waitSec <= 25) OR within the first 60 seconds of the hour (:00)
     const isTopOfHour = (waitSec <= 25) || (min === 0 && sec <= 60);
+    // Refinement: do NOT spend the pre-:00 slot when this hour is already
+    // confirmed sold out. PayGo's counter belongs to the OLD hour until the
+    // rollover, so preempting 25s early only leases an account to be told
+    // "0 available" — the wasted "starts before time and calls" cycle. The :00
+    // window below still fires normally after the counter resets.
+    const preBoundary = waitSec <= 25 && !(min === 0 && sec <= 60);
+    const soldOutThisHour = !!(this.lastProbe && this.lastProbe.stock === 0
+      && this.lastProbe.busy_skip !== true);
+    if (isTopOfHour && preBoundary && soldOutThisHour) {
+      console.log('[PayGo-Auto] Skipping the pre-:00 preempt — this hour is already sold out; waiting for the :00 rollover.');
+      this.broadcastStatus();
+      return;
+    }
     if (isTopOfHour && this._lastPreemptedHour !== hourKey) {
       this._lastPreemptedHour = hourKey;
       console.log(`[PayGo-Auto] Hourly refill window reached (:00)! ${isBotRunning ? 'Preempting active bot' : 'Starting'} for PayGo...`);
@@ -416,6 +539,11 @@ class PayGoOrchestrator {
     }
 
     this.lastProbe = res;
+    // A confirmed positive stock CLEARS the empty-cycle latch, so a genuine
+    // mid-hour refill resumes the drain instead of waiting for :00.
+    if (res && res.available && typeof res.stock === 'number' && res.stock > 0) {
+      this._lastEmptyHour = null;
+    }
     console.log(`[PayGo-Auto] Probe: available=${res.available}, stock=${res.stock}, wait_sec=${res.wait_seconds}`);
 
     if (res.available) {

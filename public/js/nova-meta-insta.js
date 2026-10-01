@@ -130,6 +130,13 @@ function miCreatorPanelHtml(def) {
           <input type="checkbox" data-role="twofa">
           <span class="slider"></span>
         </label>
+      </div>
+      <div class="creator-field creator-field--switch">
+        <label>Follow</label>
+        <label class="switch" title="Follow ~2 suggested profiles after creating the account. Off = the follow step is skipped entirely.">
+          <input type="checkbox" data-role="follow" checked>
+          <span class="slider"></span>
+        </label>
       </div>` : ''}
       <div class="creator-field creator-field--wide">
         <label>${def.usernameLabel}</label>
@@ -526,6 +533,7 @@ function createCreatorWorkspace(root, def, state, shared) {
     target: q('target'),
     headless: q('headless'),
     twofa: q('twofa'),
+    follow: q('follow'),
     username: q('username'),
     btnStart: q('start'),
     btnStop: q('stop'),
@@ -892,6 +900,9 @@ function createCreatorWorkspace(root, def, state, shared) {
         delay: 4,
         headless: Boolean(els.headless && els.headless.checked),
         twofa: Boolean(els.twofa && els.twofa.checked),
+        // Follow step toggle (IG workspace only). Absent element -> keep the
+        // default (enabled) so Meta-only workspaces are unaffected.
+        follow: els.follow ? Boolean(els.follow.checked) : true,
         new_username: (els.username.value || '').trim() || undefined,
         mail_provider: (mailRadio && mailRadio.value) || 'mailtd',
         captcha_mode: (captchaRadio && captchaRadio.value) || 'extension',

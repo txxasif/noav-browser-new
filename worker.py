@@ -911,6 +911,22 @@ def main():
                 tg_manager.reset_all()
             except Exception:
                 pass
+        # Sweep stale profile dirs on the way out. Pruning otherwise only runs
+        # at slot LAUNCH, so a run that ends (or is stopped) leaves its dead
+        # profile dirs behind until the next start -- and if the engine is not
+        # restarted they persist indefinitely (observed: 4 test_meta_* dirs,
+        # ~160 MB, three days old). Best-effort; never blocks shutdown.
+        try:
+            from engine.eng_mix_base import _PROFILE_PREFIXES as _pp  # noqa: F401
+            _base = os.path.join(os.getcwd(), "profiles")
+            if os.path.isdir(_base):
+                import engine.eng_mix_base as _emb
+                class _Sweeper(_emb.EngineBaseMixin):
+                    def __init__(self):
+                        pass  # prune is a pure directory operation
+                _Sweeper()._prune_profiles(_base)
+        except Exception:
+            pass
 
     emit_event({"type": "loop_stopped", "message": "All slots finished."})
     print("[*] Meta Account Creator stopped.")

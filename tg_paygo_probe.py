@@ -53,6 +53,20 @@ def probe_paygo(timeout: float = 0.0) -> dict:
         }
 
     tg_id = tg_acct["id"]
+    # Stamp OUR pid on the lease. The orchestrator caps this probe at 30s and
+    # SIGKILLs on timeout, which skips the release in `finally` — leaving the
+    # account "BUSY - PAYGO_PROBE" with no owner. Recording the pid lets
+    # tg_manager.reclaim_stale() settle such a lease IMMEDIATELY (owner gone)
+    # instead of waiting out a TTL, which is what wedged tg_2/tg_3.
+    try:
+        tg_manager._reload()
+        for _a in tg_manager.accounts:
+            if _a.get("id") == tg_id:
+                _a["probe_pid"] = os.getpid()
+                break
+        tg_manager.save()
+    except Exception:
+        pass
     bot = None
     stock = None
     max_stock = 5700

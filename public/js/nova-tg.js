@@ -435,7 +435,7 @@
         '<div class="creator-grid">' +
           '<div class="creator-field">' +
             '<label>Parallel</label>' +
-            '<input id="tg-conc" class="form-control" type="number" min="1" max="10" value="1">' +
+            '<input id="tg-conc" class="form-control" type="number" min="1" max="10" value="6" title="Parallel Telegram submissions. Default 6 = TG_MAX_PARALLEL and matches the number of enabled accounts — running lower leaves accounts idle.">' +
           '</div>' +
           '<div class="creator-field">' +
             '<label>Target (0 = \u221e)</label>' +
@@ -620,7 +620,24 @@
         setStatus(state.running, state.igMode);
       });
     }
-    if ($('tg-conc')) $('tg-conc').addEventListener('input', function () { setStatus(state.running, state.igMode); });
+    if ($('tg-conc')) {
+      // Remember Parallel across reloads. It used to hard-default to 1 with no
+      // persistence, so every manual Start silently ran at 1/6th throughput and
+      // left 5 Telegram accounts idle. Seed from the saved value if present.
+      try {
+        var _savedConc = localStorage.getItem('nova_tg_parallel');
+        if (_savedConc) $('tg-conc').value = _savedConc;
+      } catch (e) { /* storage disabled -> keep the default */ }
+      var _concEl = $('tg-conc');
+      _concEl.addEventListener('input', function () {
+        try { localStorage.setItem('nova_tg_parallel', _concEl.value); } catch (e) {}
+        setStatus(state.running, state.igMode);
+      });
+      // Also persist on blur so typing 6 then clicking Start sticks immediately.
+      _concEl.addEventListener('change', function () {
+        try { localStorage.setItem('nova_tg_parallel', _concEl.value); } catch (e) {}
+      });
+    }
     if ($('tg-headless-sw')) $('tg-headless-sw').addEventListener('change', function () { setWindow($('tg-headless-sw').checked); });
     if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; });
     if ($('tg-refresh')) $('tg-refresh').addEventListener('click', refresh);
@@ -1273,11 +1290,20 @@
     var msg = d.message || (d.type === 'slot_event' && d.detail ? ('[Slot ' + (d.slot_id || '?') + '] ' + d.detail) : null);
     if (msg) {
       append(String(msg), targetBot);
-      var m = String(msg);
-      if (/not a member|join the bot|start the bot|has not joined|no such bot|BOT not|chat not found/i.test(m))
-        toast('A pooled account has not joined the selected bot — open that Telegram account and press /start on the bot, then retry.', 'warn', 15000);
-      else if (/not logged in|session.*revoked|AUTH_KEY_UNREGISTERED/i.test(m))
-        toast('A Telegram session is dead — disable that profile or log in again.', 'error', 15000);
+      // Replayed history (SSE backlog on connect/refresh) is shown for
+      // continuity but must NOT re-raise alerts: the server replays the last
+      // ~150 events on every reconnect, and running the toast rules over them
+      // re-fired stale "Telegram session is dead" banners long after the
+      // condition cleared — restarting the server appeared to change nothing.
+      if (!d.replay) {
+        var m = String(msg);
+        if (/not a member|join the bot|start the bot|has not joined|no such bot|BOT not|chat not found/i.test(m))
+          toast('A pooled account has not joined the selected bot — open that Telegram account and press /start on the bot, then retry.', 'warn', 15000);
+        else if (/not logged in|session.*revoked|AUTH_KEY_UNREGISTERED/i.test(m))
+          toast('A Telegram session is dead — disable that profile or log in again.', 'error', 15000);
+        else if (/lock released|database is locked/i.test(m))
+          toast('A Telegram session file was locked (two clients on one account). The handle was released and the account returned to the pool — it will be retried automatically.', 'warn', 12000);
+      }
     }
     else if (d.type === 'loop_stopped') {
       append('[engine] loop stopped' + (d.exit_code != null ? ' (code ' + d.exit_code + ')' : ''), targetBot);

@@ -28,6 +28,100 @@ try:
 except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from resource_runtime import active_profiles, should_prune  # type: ignore  # noqa: E402
 
+# Auto-generated profile directory prefixes. ONLY these are eligible for
+# pruning; anything else in profiles/ is left strictly alone.
+#   insta_      -> engine/eng_mix_launch._launch ("insta_<slot>_<time_ns>")
+#   test_meta_  -> test harness profiles
+# The old filter matched "insta_" alone, so test-harness profiles were
+# invisible to pruning and accumulated forever (observed 2026-10-01: 4
+# test_meta_* dirs, ~160 MB, three days old, never reclaimed).
+_PROFILE_PREFIXES = ("insta_", "test_meta_")
+
+# ── Identity pools ───────────────────────────────────────────────────────
+# The launcher used to read FIRST_NAMES/LAST_NAMES off `instaauto_core` with a
+# ONE-ELEMENT fallback (["Alex"] / ["Smith"]). That module is not importable in
+# this build, so the fallback ALWAYS won: every account ever created was named
+# "Alex Smith" with a username of "alex.smith<1234>" — 1570/1570 identical
+# (verified 2026-10-01). That is a textbook automation signature and is very
+# likely feeding IG's checkpoint_required bans.
+#
+# These pools are deliberately broad and multi-origin so accounts do not
+# cluster, and stay ASCII (IG usernames allow only [A-Za-z0-9._]).
+_FIRST_NAMES = (
+    "Liam", "Noah", "Ethan", "Mason", "Logan", "Lucas", "Aiden", "Owen",
+    "Dylan", "Wyatt", "Carter", "Julian", "Levi", "Miles", "Ezra", "Nolan",
+    "Emma", "Olivia", "Ava", "Sophia", "Isabella", "Mia", "Charlotte", "Amelia",
+    "Harper", "Evelyn", "Abigail", "Ella", "Scarlett", "Grace", "Chloe",
+    "Zoe", "Nora", "Lily", "Hazel", "Aurora", "Willow", "Ivy", "Ruby",
+    "Mateo", "Diego", "Santiago", "Alejandro", "Adrian", "Rafael", "Emilio",
+    "Camila", "Valentina", "Sofia", "Lucia", "Elena", "Mariana", "Daniela",
+    "Carlos", "Andres", "Javier", "Miguel", "Tomas", "Bruno", "Nicolas",
+    "Aisha", "Fatima", "Zara", "Yusuf", "Omar", "Amir", "Layla", "Noor",
+    "Aditi", "Ananya", "Priya", "Rohan", "Arjun", "Vikram", "Neha", "Kavya",
+    "Hana", "Yuki", "Ren", "Sakura", "Mei", "Jin", "Sora", "Aiko",
+    "Nadia", "Ivana", "Marko", "Petra", "Lena", "Jonas", "Felix", "Greta",
+    "Amara", "Kwame", "Zainab", "Chidi", "Thabo", "Nia", "Sipho", "Ayanda",
+)
+
+_LAST_NAMES = (
+    "Anderson", "Bennett", "Carter", "Dawson", "Ellis", "Fletcher", "Greene",
+    "Harrington", "Ingram", "Jefferson", "Keller", "Lambert", "Marshall",
+    "Nelson", "Osborne", "Parker", "Quinn", "Reeves", "Sullivan", "Turner",
+    "Underwood", "Vaughn", "Wallace", "Whitaker", "Yates", "Zimmerman",
+    "Alvarez", "Bautista", "Castillo", "Delgado", "Espinoza", "Fuentes",
+    "Gutierrez", "Herrera", "Ibarra", "Jimenez", "Lozano", "Mendoza",
+    "Navarro", "Ochoa", "Paredes", "Quintero", "Ramirez", "Salazar",
+    "Trejo", "Uribe", "Valencia", "Zamora", "Rosales", "Cordero",
+    "Khan", "Ahmed", "Hassan", "Rahman", "Farooq", "Ansari", "Qureshi",
+    "Sharma", "Patel", "Reddy", "Iyer", "Nair", "Chowdhury", "Bhatt",
+    "Novak", "Petrov", "Kovac", "Sokolov", "Ivanov", "Marchetti", "Rossi",
+    "Dubois", "Laurent", "Moreau", "Schmidt", "Fischer", "Weber", "Hoffmann",
+    "Okafor", "Mensah", "Abebe", "Nkosi", "Diallo", "Mwangi", "Boateng",
+    "Tanaka", "Nakamura", "Sato", "Kim", "Park", "Nguyen", "Tran", "Chen",
+)
+
+_ALNUM = re.compile(r"[^a-z0-9]")
+
+
+def _slug(s: str, limit: int = 14) -> str:
+    """Lowercase, ASCII-only, alnum — safe for an IG username component."""
+    return _ALNUM.sub("", str(s or "").lower())[:limit]
+
+
+def _make_username(first: str, last: str) -> str:
+    """Build an IG-valid username from a real name, in one of several shapes.
+
+    Validated against ``tg_support._is_valid_ig_username``:
+    ``^(?!.*\\.\\.)(?!^\\.)(?!.*\\.$)[a-zA-Z0-9._]{1,30}$`` — 1-30 chars, only
+    letters/digits/./_, no leading/trailing dot, no doubled dot.
+
+    The old single format (``first.last<1234>``) is what made 1570 accounts
+    share one shape; mixing shapes removes that constant.
+    """
+    f, l = _slug(first), _slug(last)
+    if not f:
+        f, l = "user", (l or "ig")
+    n = random.randint(1, 9999)
+    shapes = (
+        f"{f}.{l}{n}",
+        f"{f}_{l}{n}",
+        f"{f}{l}{n}",
+        f"{f}{n}{l[:3]}",
+        f"{l}.{f}{n}",
+        f"{f}{l[:1]}{n}",
+        f"{f[:9]}{l[:9]}{random.randint(10, 99)}",
+    )
+    u = random.choice(shapes)
+    # Belt-and-braces against the documented regex.
+    u = u.strip("._")
+    while ".." in u:
+        u = u.replace("..", ".")
+    if len(u) > 30:
+        u = u[:30].strip("._")
+    if not u:
+        u = f"user{random.randint(10000, 99999)}"
+    return u
+
 _CHROME_VERSION_CACHE: dict[str, str] = {}
 _CHROME_VERSION_LOCK = threading.Lock()
 
@@ -40,11 +134,17 @@ class EngineBaseMixin:
         self.mail = None
         self.email = None
         self.password = worker.password or ("Pass#" + str(random.randint(100000, 999999)))
-        self.first = random.choice(getattr(self.core, "FIRST_NAMES", ["Alex"]))
-        self.last = random.choice(getattr(self.core, "LAST_NAMES", ["Smith"]))
+        # Real pools with a real fallback. The old code read these off
+        # `instaauto_core` (never importable here) and fell back to a SINGLE
+        # name each, so every account was "Alex Smith" / "alex.smith<1234>".
+        # Prefer the core's pools when they genuinely exist and are non-empty.
+        _fn = getattr(self.core, "FIRST_NAMES", None) or _FIRST_NAMES
+        _ln = getattr(self.core, "LAST_NAMES", None) or _LAST_NAMES
+        self.first = random.choice(_fn)
+        self.last = random.choice(_ln)
         self.name = f"{self.first} {self.last}"
         self.meta_name = self.name
-        self.username = f"{self.first.lower()}.{self.last.lower()}{random.randint(100, 9999)}"
+        self.username = _make_username(self.first, self.last)
         self.dob_month = random.choice(_MONTHS)
         self.dob_day = str(random.randint(1, 28))
         self.dob_year = str(random.randint(1985, 1999))
@@ -307,7 +407,14 @@ class EngineBaseMixin:
 
             candidates = []
             for name in os.listdir(base):
-                if not name.startswith("insta_"):
+                # Auto-generated profile dirs ONLY: `insta_<slot>_<ns>` from the
+                # launcher and `test_meta_*` from the test harness. The old
+                # filter matched `insta_` alone, so every test-harness profile
+                # was invisible to pruning and accumulated FOREVER (observed
+                # 2026-10-01: 4 test_meta_* dirs, ~160 MB, three days old, still
+                # present). Anything not matching one of these prefixes is left
+                # strictly alone -- pruning must never touch a user-named dir.
+                if not name.startswith(_PROFILE_PREFIXES):
                     continue
                 path = os.path.join(base, name)
                 if not os.path.isdir(path):

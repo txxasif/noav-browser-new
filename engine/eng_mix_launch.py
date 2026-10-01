@@ -123,6 +123,76 @@ def _pc_mode_enabled() -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on", "pc", "pc-mobile")
 
 
+_QUIET_ASYNCIO_INSTALLED = False
+
+
+def _install_quiet_asyncio_handler() -> None:
+    """Silence Playwright's benign driver-teardown traceback.
+
+    Stopping an engine while a slot is still launching kills the Playwright
+    driver mid-handshake. The driver connection then raises inside an asyncio
+    task nobody awaits, so CPython prints:
+
+        Task exception was never retrieved
+        ... Connection.init: Connection closed while reading from the driver
+
+    That is expected noise on a deliberate STOP (the process exits cleanly with
+    code 0), but it dumps a multi-frame traceback into the dashboard log where
+    it looks like a crash and can bury the real error above it — the teardown
+    race already listed as a known issue. Drop ONLY this specific benign case;
+    every other asyncio error still goes to the default handler.
+    """
+    global _QUIET_ASYNCIO_INSTALLED
+    if _QUIET_ASYNCIO_INSTALLED:
+        return
+    try:
+        import asyncio
+
+        _BENIGN = (
+            "Connection closed while reading from the driver",
+            "Connection.init",
+            "Connection closed",
+            "Target page, context or browser has been closed",
+        )
+
+        def _handler(loop, context):  # noqa: ANN001
+            try:
+                exc = context.get("exception")
+                text = str(exc) if exc is not None else str(context.get("message") or "")
+                if any(b in text for b in _BENIGN):
+                    return
+            except Exception:
+                pass
+            try:
+                loop.default_exception_handler(context)
+            except Exception:
+                pass
+
+        # Current loop (if any).
+        try:
+            asyncio.get_event_loop().set_exception_handler(_handler)
+        except Exception:
+            pass
+
+        # Loops created later (Playwright starts its driver on its own thread).
+        class _QuietPolicy(asyncio.DefaultEventLoopPolicy):  # type: ignore[misc]
+            def new_event_loop(self):  # noqa: D102
+                loop = super().new_event_loop()
+                try:
+                    loop.set_exception_handler(_handler)
+                except Exception:
+                    pass
+                return loop
+
+        try:
+            asyncio.set_event_loop_policy(_QuietPolicy())
+        except Exception:
+            pass
+        _QUIET_ASYNCIO_INSTALLED = True
+    except Exception:
+        pass
+
+
 class EngineLaunchMixin:
     def _launch(self):
         w = self.w
@@ -209,6 +279,9 @@ class EngineLaunchMixin:
         _mark_profile_clean()
 
         proxy = w._get_proxy_config()
+        # Install BEFORE the driver starts so its event loop inherits the
+        # handler (Playwright runs the driver on its own loop/thread).
+        _install_quiet_asyncio_handler()
         if self.core and hasattr(self.core, "sync_playwright"):
             w.playwright = self.core.sync_playwright().start()
         else:
@@ -468,13 +541,15 @@ class EngineLaunchMixin:
         # Resilient multi-engine launch: bundled Chromium is standard and has 100% unpacked extension support.
         # Fall back to Chrome/Edge if bundled Chromium is missing or fails.
         launched = False
-        try:
-            _mark_profile_clean()
-            w.context = w.playwright.chromium.launch_persistent_context(**launch_kwargs)
-            self.log('[🌐] Engine: bundled Chromium (anti-detect enabled)')
-            launched = True
-        except Exception as exc:
-            self.log(f'[⚠️] Bundled Chromium launch failed ({exc}), trying fallbacks…')
+
+        if not launched:
+            try:
+                _mark_profile_clean()
+                w.context = w.playwright.chromium.launch_persistent_context(**launch_kwargs)
+                self.log('[🌐] Engine: bundled Chromium (anti-detect enabled)')
+                launched = True
+            except Exception as exc:
+                self.log(f'[⚠️] Bundled Chromium launch failed ({exc}), trying fallbacks…')
 
         if not launched:
             candidates = [
