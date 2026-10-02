@@ -14,15 +14,19 @@ function handleDiagRoutes(req, res, urlObj, pathname, ctx) {
   const { sendJson } = ctx;
 
   if (pathname === '/api/diag/reasons' && req.method === 'GET') {
-    sendJson(req, res, diag.snapshot());
+    // Optional ?route=taskly2fa|fastpay2fa|paygo|taskly|fastpay|meta|ig → that route's
+    // histogram only. No route → global totals + a per-route breakdown.
+    sendJson(req, res, diag.snapshot(urlObj.searchParams.get('route') || null));
     return true;
   }
   if (pathname === '/api/logs' && req.method === 'GET') {
-    sendJson(req, res, { dir: runlog.LOG_DIR, logs: runlog.list() });
+    const route = urlObj.searchParams.get('route') || null;
+    sendJson(req, res, { dir: runlog.LOG_DIR, route, logs: runlog.list(route) });
     return true;
   }
   if (pathname === '/api/logs/latest' && req.method === 'GET') {
-    sendJson(req, res, { latest: runlog.latest(urlObj.searchParams.get('pipeline') || null) });
+    sendJson(req, res, { latest: runlog.latest(urlObj.searchParams.get('pipeline') || null,
+                                               urlObj.searchParams.get('route') || null) });
     return true;
   }
   if (pathname === '/api/logs/file' && req.method === 'GET') {

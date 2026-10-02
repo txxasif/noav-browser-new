@@ -64,10 +64,14 @@ Source: "..\tg_flows.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedo
 Source: "..\tg_steps.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\run_cookie_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\run_native_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\run_pool_2fa_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\run_fastpay_pool_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_fastpay.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_join_bot.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_manager_cli.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_stats.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_paygo_probe.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_withdraw.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\selfie.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\requirements.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\package.json"; DestDir: "{app}"; Flags: ignoreversion

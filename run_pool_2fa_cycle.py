@@ -46,6 +46,8 @@ from run_cookie_cycle import (  # noqa: E402
     _is_account_dead_error,
     _all_flooded_until,
     _sleep_until,
+    _ig_spam_streak,
+    _IG_SPAM_STOP,
 )
 from pipelines.telegram.tg_support import (  # noqa: E402
     _boot_bot,
@@ -437,17 +439,25 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                     cand["cookies"], login, ua=cand.get("device_ua"))
                 if ok_name:
                     pool_acc = cand
+                    _ig_spam_streak[0] = 0
                     log(slot_id, f"✅ [api] IG username updated to '{login}' in ~0.4s ({name_msg})")
                     clog(f"⚡ [username] Updated Instagram username: '{cand_user}' -> '{login}' (in 0.4s)")
                     break
                 if _is_account_dead_error(name_msg):
                     _purge_pool_account(store, cand, log, slot_id, emit_event, f"dead/banned ({name_msg})")
                     continue
-                # Rename rate-limit / transient: restore this account and move on.
-                log(slot_id, f"[⚠️] Rename rejected ({name_msg}) — restoring and trying another account.")
-                store.restore_ig_creator_account(cand_id)
+                # FAILED means FAILED: a rejected rename removes the account from
+                # the pool — never retried / re-logged-in. Safety: if MANY fail in
+                # a ROW the IP is flagged, so STOP instead of emptying the pool.
+                _ig_spam_streak[0] += 1
+                if _ig_spam_streak[0] >= _IG_SPAM_STOP:
+                    raise RuntimeError(
+                        f"IG rename failed on {_ig_spam_streak[0]} consecutive accounts "
+                        f"(last: {name_msg[:60]}) — IP-level rate-limit; pausing the drain.")
+                _purge_pool_account(store, cand, log, slot_id, emit_event,
+                                    f"rename FAILED ({name_msg[:60]}) [{_ig_spam_streak[0]}/{_IG_SPAM_STOP}]")
                 pool_acc = None
-                break
+                continue
             if not pool_acc:
                 raise RuntimeError("Failed to obtain a valid working IG Creator account from pool")
 
@@ -571,7 +581,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                     _purge_pool_account(store, pool_acc, log, slot_id, emit_event, "logged out during 2FA")
                     pool_acc = None
                     raise RuntimeError("Pooled IG session logged out during 2FA — purged")
-                store.restore_ig_creator_account(acc_id)
+                store.restore_ig_creator_account(acc_id, rotate=True)
                 pool_acc = None
                 raise RuntimeError("Could not retrieve 2FA secret key from Instagram (Accounts Center)")
             break
@@ -599,7 +609,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
         if not submitted:
             # Account is now 2FA-enabled but not paid — restore it so it is not
             # silently lost, and let the slot retry.
-            store.restore_ig_creator_account(acc_id)
+            store.restore_ig_creator_account(acc_id, rotate=True)
             pool_acc = None
             raise RuntimeError("Taskly registration not confirmed — not recording Submitted")
 
@@ -666,7 +676,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                     pass
             if pool_acc is not None:
                 try:
-                    store.restore_ig_creator_account(pool_acc["id"])
+                    store.restore_ig_creator_account(pool_acc["id"], rotate=True)
                 except Exception:
                     pass
             return False, "session_lost"
@@ -681,7 +691,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             pool_acc = None
         if pool_acc is not None:
             try:
-                store.restore_ig_creator_account(pool_acc["id"])
+                store.restore_ig_creator_account(pool_acc["id"], rotate=True)
             except Exception:
                 pass
         if bot is not None:

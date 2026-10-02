@@ -63,6 +63,17 @@ FLOWS = {
         "needs_email": True,
         "needs_2fa": True,
     },
+    # FastPay2025_bot "Instagram 2FA" run as a POOL DRAIN (no Meta, no signup):
+    # reuse a pre-created IG account — rename to the bot login, capture the 2FA
+    # key -> submit to FastPay -> enter the returned CODE on IG, set the IG
+    # password to the bot password, then Confirm in FastPay. Own runner.
+    "fastpay_pool_2fa": {
+        "label": "Instagram 2FA — FastPay pooled account drain (no Meta)",
+        "runner": "run_fastpay_pool_cycle",
+        "steps": ["ig_rename", "2fa", "password", "register"],
+        "needs_email": False,
+        "needs_2fa": True,
+    },
     # Taskly "🔥 Create Inst (No mail)" (Meta-coupled; the 2FA task moved to
     # the "native" flow above).
     "2fa": {

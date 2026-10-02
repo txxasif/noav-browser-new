@@ -86,11 +86,13 @@ SYNC_ROOT_FILES = [
     "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
     "run_native_cycle.py",  # one-shot Taskly 2FA native cycle (lease -> bot email+code -> IG signup -> register)
     "run_pool_2fa_cycle.py",  # one-shot Taskly 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + register)
+    "run_fastpay_pool_cycle.py",  # one-shot FastPay 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + password + Confirm)
     "tg_fastpay.py",        # FastPay2025 IG-2FA payout runner (key -> code -> Confirm)
     "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
     "tg_manager_cli.py",    # dashboard <-> tg.manager bridge (summary/balance/bots)
     "tg_stats.py",          # Telegram submission statistics counter
     "tg_paygo_probe.py",    # fast non-blocking PayGo stock probe & countdown
+    "tg_withdraw.py",       # USDT (BEP-20) withdrawal (Taskly/PayGo) + TG freeze
 ]
 
 ANTI_AI_JS = """/**
@@ -501,11 +503,15 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/tg_flows.py",
             "MetaCreator/tg_steps.py",
             "MetaCreator/tg_paygo_probe.py",
+            "MetaCreator/tg_withdraw.py",
             "MetaCreator/run_cookie_cycle.py",
             "MetaCreator/run_native_cycle.py",
             "MetaCreator/run_pool_2fa_cycle.py",
+            "MetaCreator/run_fastpay_pool_cycle.py",
             "MetaCreator/tg_fastpay.py",
             "MetaCreator/tg_manager_cli.py",
+            "MetaCreator/tg_join_bot.py",
+            "MetaCreator/tg_stats.py",
             "MetaCreator/instagram/__init__.py",
             "MetaCreator/instagram/helpers.py",
             "MetaCreator/public/index.html",
@@ -514,6 +520,8 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/public/js/nova-meta-insta.js",
             "MetaCreator/public/js/nova-tg.js",
             "MetaCreator/public/js/nova-taskly2fa.js",
+            "MetaCreator/public/js/nova-fastpay2fa.js",
+            "MetaCreator/public/js/nova-paygopool.js",
             "MetaCreator/bin/node.exe",
             "MetaCreator/_internal/python.exe",
             "MetaCreator/extensions/Captcha/manifest.json",

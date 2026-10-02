@@ -1,12 +1,15 @@
 const paygoOrchestrator = require('./paygo-orchestrator');
 let _orchestratorInit = false;
+// One withdrawal at a time: two concurrent runs would each freeze/unfreeze the
+// same file flag and could unfreeze while the other is still touching sessions.
+let _withdrawing = false;
 
 module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
   if (!_orchestratorInit) {
     _orchestratorInit = true;
     paygoOrchestrator.init(ctx);
   }
-  const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, getAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove } = ctx;
+  const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, getAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove, readSettings, writeSettings } = ctx;
 
   // ---- TG balance: single-flight + short TTL cache ------------------------
   // A .session file serves ONE Telethon client at a time. Two concurrent
@@ -429,11 +432,168 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     return { total: 0, submitted: 0, taskly: 0, paygo: 0, fastpay: 0 };
   }
 
+  // ---- TG FREEZE + WITHDRAW (USDT BEP-20) --------------------------------
+  // Withdraw is a sensitive op: it takes EXCLUSIVE ownership of TG. The freeze
+  // is a file flag (data/tg_freeze.json) every Python worker reads, so acquire()
+  // refuses to lease while it is set. tg_withdraw.py sets/clears it too.
+  const FREEZE_FILE = path.join(ROOT_DIR, 'data', 'tg_freeze.json');
+  function readFreeze() {
+    try { return JSON.parse(fs.readFileSync(FREEZE_FILE, 'utf-8')); }
+    catch (e) { return { frozen: false, reason: '', at: null }; }
+  }
+  function writeFreeze(on, reason) {
+    try {
+      if (on) {
+        fs.mkdirSync(path.dirname(FREEZE_FILE), { recursive: true });
+        fs.writeFileSync(FREEZE_FILE, JSON.stringify({ frozen: true, reason: reason || 'dashboard', at: Date.now() / 1000 }));
+      } else if (fs.existsSync(FREEZE_FILE)) {
+        fs.unlinkSync(FREEZE_FILE);
+      }
+    } catch (e) {}
+    return readFreeze();
+  }
+
+  if (pathname === '/api/tg/freeze' && req.method === 'GET') {
+    sendJson(req, res, Object.assign({ status: 'SUCCESS' }, readFreeze()));
+    return true;
+  }
+  if (pathname === '/api/tg/freeze' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const on = b.frozen === true || b.frozen === 'true';
+      // Freezing must ALSO stop the engine so any in-flight lease releases.
+      if (on && slot().proc) {
+        try {
+          fs.mkdirSync(path.join(ROOT_DIR, 'data'), { recursive: true });
+          fs.writeFileSync(path.join(ROOT_DIR, 'data', 'stop_tg.flag'), '1', 'utf8');
+        } catch (e) {}
+        const proc = slot().proc;
+        const isWinStop = process.platform === 'win32';
+        if (!isWinStop) { try { process.kill(-proc.pid, 'SIGTERM'); } catch (e) { try { proc.kill('SIGTERM'); } catch (e2) {} } }
+        setTimeout(() => {
+          if (slot().proc === proc) {
+            try { if (!isWinStop) { try { process.kill(-proc.pid, 'SIGKILL'); } catch (e) {} } else { try { proc.kill(); } catch (e) {} } } catch (e) {}
+            slot().proc = null;
+          }
+        }, 5000);
+        slot().config = null;
+        try { paygoOrchestrator.notifyUserStopped(); } catch (e) {}
+        broadcastEvent({ type: 'log', pipeline: 'telegram',
+          message: '[tg] Freeze: stopping the running TG engine so its leases release…' });
+      }
+      const st = writeFreeze(on, b.reason || (on ? 'dashboard freeze' : ''));
+      broadcastEvent({ type: 'log', pipeline: 'telegram',
+        message: `[tg] TG ${on ? 'FROZEN — exclusive (no worker can lease)' : 'unfrozen'}.` });
+      sendJson(req, res, Object.assign({ status: 'SUCCESS' }, st));
+    });
+    return true;
+  }
+
+  if (pathname === '/api/tg/wallet' && req.method === 'GET') {
+    let w = ''; try { w = String(readSettings().bep20Wallet || ''); } catch (e) {}
+    sendJson(req, res, { status: 'SUCCESS', wallet: w });
+    return true;
+  }
+  if (pathname === '/api/tg/wallet' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const w = String(b.wallet || '').trim();
+      if (w && !/^0x[a-fA-F0-9]{40}$/.test(w)) {
+        sendJson(req, res, { status: 'ERROR', error: 'Invalid BEP-20 address (expect 0x + 40 hex).' });
+        return;
+      }
+      try { writeSettings({ bep20Wallet: w }); } catch (e) {}
+      sendJson(req, res, { status: 'SUCCESS', wallet: w });
+    });
+    return true;
+  }
+
+  if (pathname === '/api/tg/withdraw' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const bot = (b.bot === 'taskly' || b.bot === 'fastpay') ? b.bot : 'paygo';
+      const amount = Math.max(0.01, parseFloat(b.amount || 0.20) || 0.20);
+      const cur = (bot === 'fastpay') ? '\u09f3' : '$';
+      const wallet = String(b.wallet || '').trim();
+      if (wallet) { try { writeSettings({ bep20Wallet: wallet }); } catch (e) {} }
+      if (_withdrawing) {
+        sendJson(req, res, { status: 'ERROR', error: 'A withdrawal is already in progress — wait for it to finish.' });
+        return;
+      }
+      if (slot().proc) {
+        sendJson(req, res, { status: 'ERROR',
+          error: 'Stop the TG engine first (or press Freeze TG) before withdrawing.' });
+        return;
+      }
+      const args = [resolveScript('tg_withdraw.py'), '--bot', bot, '--amount', String(amount)];
+      if (b.tg_id) args.push('--tg-id', String(b.tg_id));
+      if (b.all) args.push('--all');
+      if (wallet) args.push('--wallet', wallet);
+      // Freeze BEFORE spawning (tg_withdraw.py also freezes itself).
+      writeFreeze(true, `withdraw ${bot} ${amount}`);
+      broadcastEvent({ type: 'log', pipeline: 'telegram',
+        message: `[tg] 💸 Withdrawal ${bot} ${cur}${amount} — TG FROZEN for exclusive access…` });
+      let proc;
+      try {
+        proc = spawn(PYTHON_BIN, args, { cwd: ROOT_DIR, windowsHide: true,
+          env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' }) });
+        _withdrawing = true;
+      } catch (e) {
+        writeFreeze(false);
+        sendJson(req, res, { status: 'ERROR', error: 'spawn failed: ' + e.message });
+        return;
+      }
+      let out = '';
+      proc.stdout.on('data', d => {
+        out += d.toString();
+        for (const line of feedWorkerStdout(d)) consumeWorkerLine(line, 'tg');
+      });
+      proc.stderr.on('data', d => {
+        const t = d.toString().trim();
+        if (t) broadcastEvent({ type: 'log', pipeline: 'telegram', message: '[withdraw] ' + t });
+      });
+      // Respond ONLY when the withdrawal FINISHES, so the dialog can show the
+      // real result (success / min-limit / balance / session error) instead of
+      // a meaningless "started".
+      proc.on('close', code => {
+        _withdrawing = false;
+        flushWorkerBuffer('tg');
+        writeFreeze(false);
+        broadcastEvent({ type: 'log', pipeline: 'telegram',
+          message: `[tg] Withdrawal finished (code ${code}). TG unfrozen.` });
+        let result = null;
+        try {
+          const ls = String(out).trim().split('\n');
+          result = JSON.parse(ls[ls.length - 1]);
+        } catch (e) { result = null; }
+        broadcastEvent({ type: 'withdraw_result', pipeline: 'telegram', exit_code: code, result: result });
+        if (res.headersSent || res.writableEnded) return;
+        const okAll = !!(result && result.ok);
+        sendJson(req, res, {
+          status: okAll ? 'SUCCESS' : 'ERROR',
+          message: okAll ? 'Withdrawal successful.' : ((result && result.error) || `withdrawal failed (exit ${code})`),
+          exit_code: code,
+          result: result,
+          output: String(out).slice(-4000),
+        });
+      });
+    });
+    return true;
+  }
+
   if (pathname === '/api/tg/status' && req.method === 'GET') {
     (async () => {
       const stats = readTgStats();
       const subTaskly = stats.taskly || 0;
       const subTaskly2fa = stats.taskly2fa || 0;
+      const subFastpay2fa = stats.fastpay2fa || 0;
+      const subPaygoPool = stats.paygo_pool || 0;
       const subPaygo = stats.paygo || 0;
       const subFastpay = stats.fastpay || 0;
       const submitted = stats.submitted != null ? stats.submitted : (subTaskly + subPaygo + subFastpay);
@@ -466,6 +626,8 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         // Per-bot breakdown (independent counters)
         tg_submitted_taskly: subTaskly,
         tg_submitted_taskly2fa: subTaskly2fa,
+        tg_submitted_fastpay2fa: subFastpay2fa,
+        tg_submitted_paygo_pool: subPaygoPool,
         tg_submitted_paygo: subPaygo,
         tg_submitted_fastpay: subFastpay,
         tg_total_taskly: subTaskly,
@@ -601,7 +763,11 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         return;
       }
 
-      const rlHandle = ctx.runlog ? ctx.runlog.start('telegram', { argv: args }) : null;
+      const runRoute = (tgBot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(tgTask)) ? 'taskly2fa'
+        : (tgBot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(tgTask)) ? 'fastpay2fa'
+        : (tgBot === 'paygo' && useIgPool) ? 'paygo_pool'
+        : tgBot;
+      const rlHandle = ctx.runlog ? ctx.runlog.start('telegram', { argv: args, route: runRoute }) : null;
       slot().runlog = rlHandle;
 
       // Stream the worker's output. WITHOUT this the child's stdout/stderr is

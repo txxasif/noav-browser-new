@@ -32,12 +32,57 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_config import (  # noqa: E402
+    DATA_DIR,
     LEGACY_TELEGRAM_PROFILE,
     TELEGRAM_PROFILES_DIR,
     TG_ACCOUNTS_JSON,
     TG_DEFAULT_MODE,
     TG_MAX_ACCOUNTS,
 )
+
+
+# --------------------------------------------------------------------------- #
+# TG FREEZE — exclusive access for sensitive ops (WITHDRAW).
+# A file flag every Python process reads, so NO worker can lease a Telegram
+# profile while a withdrawal is in flight. Set/cleared by tg_withdraw.py and
+# the dashboard's "Freeze TG" button.
+# --------------------------------------------------------------------------- #
+FREEZE_FILE = os.path.join(DATA_DIR, "tg_freeze.json")
+
+
+def is_frozen() -> bool:
+    """True while TG is frozen for an exclusive operation (e.g. withdraw)."""
+    try:
+        with open(FREEZE_FILE, encoding="utf-8") as f:
+            return bool(json.load(f).get("frozen"))
+    except Exception:
+        return False
+
+
+def freeze_info() -> dict:
+    try:
+        with open(FREEZE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+            return {"frozen": bool(d.get("frozen")), "reason": d.get("reason") or "", "at": d.get("at")}
+    except Exception:
+        return {"frozen": False, "reason": "", "at": None}
+
+
+def set_frozen(on: bool, reason: str = "") -> dict:
+    """Freeze/unfreeze TG access. Frozen blocks acquire()/usable() pool-wide."""
+    try:
+        if on:
+            os.makedirs(os.path.dirname(FREEZE_FILE), exist_ok=True)
+            tmp = FREEZE_FILE + f".tmp.{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"frozen": True, "reason": reason, "at": time.time()}, f)
+            os.replace(tmp, FREEZE_FILE)
+        else:
+            if os.path.exists(FREEZE_FILE):
+                os.remove(FREEZE_FILE)
+    except Exception:
+        pass
+    return freeze_info()
 
 
 def profile_dir(tg_id: str) -> str:
@@ -288,6 +333,8 @@ class TGAccountManager:
         """
         with self._cv:
             self._reload()
+            if is_frozen():
+                return False
             return any(a.get("enabled") is not False
                        and session_ok(a)
                        for a in self.accounts)
@@ -358,7 +405,7 @@ class TGAccountManager:
             self.save()
             return dict(rec)
 
-    def acquire(self, timeout=None, bot=None):
+    def acquire(self, timeout=None, bot=None, only_id=None):
         """Lease an idle, logged-in account (marks it busy). Waits if needed.
 
         Reclaims ``busy`` leases older than ``LEASE_TTL`` (dead-worker safety);
@@ -371,6 +418,10 @@ class TGAccountManager:
             end = None if timeout is None else time.time() + timeout
             while True:
                 self._reload()
+                # FROZEN: a sensitive op (withdraw) owns TG exclusively — refuse
+                # to lease anything until it clears the freeze.
+                if is_frozen():
+                    return None
                 # Pass 1 — reclaim stale/expired ``busy`` leases (dead-worker
                 # safety) and never disturb a LIVE inspection hold.
                 for a in self.accounts:
@@ -438,6 +489,10 @@ class TGAccountManager:
                     # Per-profile enable switch (dashboard): a disabled profile
                     # is never leased for task completion. Missing = enabled.
                     if a.get("enabled") is False:
+                        continue
+                    # Optional HARD PIN (manual ops / one-shot tests): restrict the
+                    # lease to a single profile id. None = normal fair-share LRU.
+                    if only_id is not None and str(a.get("id")) != str(only_id):
                         continue
                     # FLOOD-LIMITED accounts are not leasable. Telegram returns an
                     # absolute retry time, so a request inside that window cannot

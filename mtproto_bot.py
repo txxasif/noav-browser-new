@@ -1327,6 +1327,38 @@ class MtprotoTasklyBot:
         self.log("[tg] ❌ bot sent no email code in time")
         return ""
 
+    def _wait_for_cookie_prompt(self, timeout: float = 60.0) -> bool:
+        """Wait until the bot explicitly asks for the account cookie.
+
+        PayGo's "📱 Create Inst (Cookies)" flow says
+        "🍪 Please send the account Cookie:" only AFTER the account is ready.
+        Sending the cookie before that prompt lands out of order (the bot
+        replies with a stale/placeholder verdict or ignores it), so the send is
+        gated on the prompt.
+        """
+        deadline = time.time() + max(5.0, timeout)
+        while time.time() < deadline:
+            for m in self._messages(limit=4):
+                if getattr(m, "out", False):
+                    continue
+                t = (getattr(m, "text", "") or "").lower()
+                if ("send the account cookie" in t
+                        or "please send the cookie" in t
+                        or "please send your cookie" in t
+                        or "please send cookies" in t):
+                    return True
+            # A "send … cookie" reply key also means the prompt is up. Require
+            # BOTH words so the task menu button "📱 Create Inst (Cookies)"
+            # (has "cookie" but not "send") never counts as the prompt.
+            try:
+                btns, _ = self._buttons(limit=3)
+                if any(("send" in (b or "").lower() and "cookie" in (b or "").lower()) for b in btns):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
     def submit_cookie(self, cookie: str, timeout: float = 20.0):
         """Send the IG cookie header string for a PayGo Cookies task.
 
@@ -1346,6 +1378,13 @@ class MtprotoTasklyBot:
         clean = str(cookie or "").strip()
         if len(clean) < 100:
             return False, "cookie too short (<100 chars) — not sent"
+        # Do NOT send until the bot asks for the cookie (see
+        # _wait_for_cookie_prompt). Sending before the prompt lands out of
+        # order — this is what the pool path hit (rename is ~0.4s, the prompt
+        # had not arrived yet).
+        if not self._wait_for_cookie_prompt(timeout=max(60.0, timeout)):
+            self.log("[tg] 'Please send the account Cookie' prompt not seen — NOT sending.")
+            return False, "cookie prompt never appeared — not sent"
         before_id = self._last_id()
         self._send(clean)
         self.log(f"[tg] Cookie submitted to {self.bot_name} ({len(clean)} chars); waiting for verdict…")

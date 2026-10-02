@@ -154,11 +154,14 @@
     var swAdde = $('tg-adde-sw');
     var fieldAdde = $('tg-adde-field') || (swAdde ? swAdde.closest('.creator-field') : null);
 
-    if (radarBar) radarBar.style.display = isPayGo ? 'flex' : 'none';
-    if (modeSwitcher) modeSwitcher.style.display = isPayGo ? 'grid' : 'none';
+    // PayGo's pool drain now lives on its own "PayGo Pool" page (nova-paygopool.js).
+    // The PayGo Bot page is a NORMAL bot panel (browser cookie creator), so the
+    // pool radar / mode switcher / auto-mine are never shown here.
+    if (radarBar) radarBar.style.display = 'none';
+    if (modeSwitcher) modeSwitcher.style.display = 'none';
 
     if (isPayGo) {
-      state.paygoMode = state.paygoMode || 'pool';
+      state.paygoMode = 'browser';
       var tabPool = $('paygo-tab-pool');
       var tabBrowser = $('paygo-tab-browser');
       if (tabPool) tabPool.classList.toggle('is-active', state.paygoMode === 'pool');
@@ -251,6 +254,7 @@
     applyFlowGuards();
     state.log = (botLogs[bot] || []).slice();
     paintLog();
+    if (window.NovaDiag && NovaDiag.setRoute) NovaDiag.setRoute('tg', bot);  // scope diag to this bot route
     refresh();  // re-scope the per-bot KPIs immediately (don't wait 5s)
   };
 
@@ -499,7 +503,7 @@
       '</div>' +
 
       /* ---- failure reasons & session logs (meta_auto_ai parity) ---- */
-      (window.NovaDiag ? NovaDiag.renderHtml('tg') : '');
+      (window.NovaDiag ? NovaDiag.renderHtml('tg', state.bot) : '');
 
     wire();
     if (window.NovaDiag) {
@@ -598,7 +602,11 @@
 
   function wire() {
     if ($('tg-start')) $('tg-start').addEventListener('click', startEngine);
-    if ($('tg-stop')) $('tg-stop').addEventListener('click', function () { post('/api/tg/stop', {}); });
+    if ($('tg-stop')) $('tg-stop').addEventListener('click', function () {
+      // Stop is PER-TASK: only this page's own engine. Never stop another task.
+      if (!state.currentBotRunning) { toast('Another task is running — stop it from its own page.', 'warn', 10000); return; }
+      post('/api/tg/stop', {});
+    });
     window.__setTgBot(state.bot);
     if ($('tg-task')) $('tg-task').addEventListener('change', applyFlowGuards);
     if ($('tg-igpool-sw')) $('tg-igpool-sw').addEventListener('change', applyFlowGuards);
@@ -641,7 +649,14 @@
     if ($('tg-headless-sw')) $('tg-headless-sw').addEventListener('change', function () { setWindow($('tg-headless-sw').checked); });
     if ($('tg-adde-sw')) $('tg-adde-sw').addEventListener('change', function () { addEmail = !!$('tg-adde-sw').checked; });
     if ($('tg-refresh')) $('tg-refresh').addEventListener('click', refresh);
-    if ($('tg-clear')) $('tg-clear').addEventListener('click', function () { state.log = []; paintLog(); });
+    if ($('tg-clear')) $('tg-clear').addEventListener('click', function () {
+      // Clear the PER-BOT buffer too: paintLog() repaints from botLogs[state.bot],
+      // so clearing only state.log made the button look like a no-op.
+      var b = state.bot || 'taskly';
+      botLogs[b] = [];
+      state.log = botLogs[b];
+      paintLog();
+    });
     if ($('tg-copy')) $('tg-copy').addEventListener('click', function () {
       var txt = state.log.join('\n');
       try {
@@ -886,10 +901,20 @@
     state.running = running; state.igMode = igMode || null;
     var badge = $('tg-badge'), title = $('tg-title'), sub = $('tg-sub'), start = $('tg-start');
     var bot = state.bot || 'taskly';
-    var isCurrentBotRunning = running && (activeBot === bot);
-    var isOtherBotRunning = running && activeBot && (activeBot !== bot);
+    // A POOL-drain run shares tg_bot with its normal bot (or sets use_ig_pool),
+    // but it is a DIFFERENT engine than this page — never claim it as "running"
+    // here. Pool runs are identified by task / use_ig_pool.
+    var _task = String((engineCfg && engineCfg.tg_task) || '');
+    var _isPoolRun = !!(engineCfg && engineCfg.use_ig_pool)
+      || /taskly\s*2fa|pool\s*2fa/i.test(_task)
+      || /fastpay\s*2fa|fastpay_pool/i.test(_task);
+    var isCurrentBotRunning = running && (activeBot === bot) && !_isPoolRun;
+    var isOtherBotRunning = running && activeBot && !isCurrentBotRunning;
+    state.currentBotRunning = !!isCurrentBotRunning;
     var botName = bot === 'paygo' ? 'PayGo' : bot === 'fastpay' ? 'FastPay' : 'Taskly';
-    var activeBotName = activeBot === 'paygo' ? 'PayGo' : activeBot === 'fastpay' ? 'FastPay' : (activeBot ? 'Taskly' : '');
+    var activeBotName = activeBot === 'paygo' ? (engineCfg && engineCfg.use_ig_pool ? 'PayGo Pool' : 'PayGo')
+      : activeBot === 'fastpay' ? (/fastpay\s*2fa|fastpay_pool/i.test(_task) ? 'FastPay 2FA' : 'FastPay')
+      : (activeBot ? (/taskly\s*2fa|pool\s*2fa/i.test(_task) ? 'Taskly 2FA' : 'Taskly') : '');
     var isIgPool = (bot === 'paygo') && !!($('tg-igpool-sw') && $('tg-igpool-sw').checked);
     var effConc = parseInt(($('tg-conc') || {}).value || 1, 10);
     var runningConc = (engineCfg && engineCfg.concurrency) || effConc;
@@ -961,9 +986,10 @@
         start.style.display = 'none';
         start.disabled = true;
       } else if (isOtherBotRunning) {
-        start.style.display = '';
+        // Another task owns the shared engine — hide Start (same as the pool
+        // pages). Only Auto-Mine preempts another task; manual Stop never does.
+        start.style.display = 'none';
         start.disabled = true;
-        start.innerHTML = '<i class="fa-solid fa-lock"></i> Start Blocked (' + activeBotName + ' Active)';
       } else {
         start.style.display = '';
         start.disabled = false;
@@ -1282,6 +1308,9 @@
     if (!d) return;
     if (d && (d.pipeline === 'meta' || d.engine === 'metainsta' || d.engine === 'meta' || d.engine === 'ig')) return;
     if (d && d.pipeline && d.pipeline !== 'telegram') return;
+    // Pool-drain routes have their OWN panels (Taskly 2FA / PayGo Pool /
+    // FastPay 2FA). Never let their lines bleed into the regular bot log.
+    if (d.route && (d.route === 'taskly2fa' || d.route === 'fastpay2fa' || d.route === 'paygo_pool')) return;
     if (d && d.type === 'throttle') {
       hideThrottleBanner();
       return;

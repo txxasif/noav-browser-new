@@ -526,7 +526,7 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         mode
       });
 
-      const rlHandle = ctx.runlog ? ctx.runlog.start(mode === 'meta' ? 'metainsta' : 'instagram', { argv: args }) : null;
+      const rlHandle = ctx.runlog ? ctx.runlog.start(mode === 'meta' ? 'metainsta' : 'instagram', { argv: args, route: mode === 'meta' ? 'meta' : 'ig' }) : null;
       currentSlot.runlog = rlHandle;
 
       currentSlot.proc.stdout.on('data', data => {

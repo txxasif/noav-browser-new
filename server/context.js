@@ -362,25 +362,44 @@ function broadcastEvent(data) {
   writeSse(`data: ${JSON.stringify(data)}\n\n`);
 }
 
+/** Stable route id for an engine slot: meta|ig|taskly|paygo|fastpay|taskly2fa. */
+function routeOf(eng, cfg) {
+  if (eng === 'tg') {
+    const bot = (cfg && cfg.tg_bot) || 'taskly';
+    const task = String((cfg && cfg.tg_task) || '');
+    if (bot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(task)) return 'taskly2fa';
+    if (bot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(task)) return 'fastpay2fa';
+    if (bot === 'paygo' && cfg && cfg.use_ig_pool) return 'paygo_pool';
+    return bot || 'tg';
+  }
+  if (eng === 'ig') return 'ig';
+  return 'meta';
+}
+
 function consumeWorkerLine(line, engineName = null) {
   const trimmed = String(line || '').trim();
   if (!trimmed) return;
-  diag.observe(trimmed);
   const eng = engineName || activeEngine || 'metainsta';
+  const cfg = (eng === 'tg')
+    ? (engineSlots.tg && engineSlots.tg.config)
+    : (eng === 'ig' ? (engineSlots.ig && engineSlots.ig.config) : (engineSlots.meta && engineSlots.meta.config));
+  const route = routeOf(eng, cfg);
+  diag.observe(trimmed, route);
   const pipeline = (eng === 'tg') ? 'telegram' : 'meta';
   const currentBot = (eng === 'tg' && engineSlots.tg && engineSlots.tg.config) ? engineSlots.tg.config.tg_bot : null;
-  const tag = (eng === 'tg') ? `[TG:${currentBot || 'bot'}]` : (eng === 'ig' ? '[IG]' : '[Meta]');
+  const tag = (eng === 'tg') ? `[TG:${route}]` : (eng === 'ig' ? '[IG]' : '[Meta]');
   if (trimmed.startsWith('__EVENT__')) {
     try {
       const evt = JSON.parse(trimmed.slice(9));
       if (!evt.pipeline) evt.pipeline = pipeline;
       if (!evt.engine) evt.engine = eng;
       if (currentBot && !evt.tg_bot) evt.tg_bot = currentBot;
+      if (!evt.route) evt.route = route;
       broadcastEvent(evt);
     } catch (e) {}
   } else {
     console.log(`${tag} ${trimmed}`);
-    const evt = { type: 'log', message: trimmed, pipeline, engine: eng };
+    const evt = { type: 'log', message: trimmed, pipeline, engine: eng, route };
     if (currentBot) evt.tg_bot = currentBot;
     broadcastEvent(evt);
   }

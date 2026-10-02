@@ -268,7 +268,7 @@ function miCreatorPanelHtml(def) {
     </div>
     <div data-role="log" class="log-container" style="height: 220px; overflow-y: auto; background: #060910; border: 1px solid var(--border-color); border-radius: 8px; padding: 0.75rem; font-family: var(--font-mono); font-size: 0.78rem; white-space: pre-wrap;"></div>
   </div>
-  ${window.NovaDiag ? NovaDiag.renderHtml(def.kind) : ''}`;
+  ${window.NovaDiag ? NovaDiag.renderHtml(def.kind, def.kind) : ''}`;
 }
 
 // =============================================================================

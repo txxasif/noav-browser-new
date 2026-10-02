@@ -39,22 +39,27 @@ function start(pipeline, meta) {
     return null;
   }
   ensureDir();
-  const file = path.join(LOG_DIR, `${pipeline}_${_stamp()}.log`);
+  // Route-tagged filenames so each route (taskly2fa|fastpay2fa|paygo|taskly|fastpay|meta|ig)
+  // has its OWN run log: logs/<pipeline>_<route>_<stamp>.log
+  const route = (meta && meta.route) ? String(meta.route).replace(/[^A-Za-z0-9_-]/g, '') : '';
+  const stem = route ? `${pipeline}_${route}` : `${pipeline}`;
+  const file = path.join(LOG_DIR, `${stem}_${_stamp()}.log`);
   let stream = null;
   try { stream = fs.createWriteStream(file, { flags: 'a' }); } catch (e) { stream = null; }
-  const h = { pipeline, file, stream, bytes: 0, closed: false };
+  const h = { pipeline, route, file, stream, bytes: 0, closed: false };
   const header = [
     '# meta_creator run log',
     `# pipeline: ${pipeline}`,
+    route ? `# route:    ${route}` : null,
     `# started:  ${new Date().toISOString()}`,
     `# argv:     ${JSON.stringify((meta && meta.argv) || [])}`,
     `# cwd:      ${process.cwd()}`,
     '# ----',
     '',
-  ].join('\n');
+  ].filter((x) => x !== null).join('\n');
   try {
     if (stream) stream.write(header);
-    fs.writeFileSync(path.join(LOG_DIR, `latest_${pipeline}.log`), header + `# see: ${file}\n`);
+    fs.writeFileSync(path.join(LOG_DIR, `latest_${stem}.log`), header + `# see: ${file}\n`);
     fs.writeFileSync(path.join(LOG_DIR, 'latest.txt'), file + '\n');
   } catch (e) { /* ignore */ }
   prune();
@@ -100,12 +105,15 @@ function prune() {
   } catch (e) { /* ignore */ }
 }
 
-/** Newest-first list of run logs (excludes the latest_* pointers). */
-function list() {
+/** Newest-first list of run logs (excludes the latest_* pointers).
+ *  Optional `route` filters to that route's logs (name contains _<route>_). */
+function list(route) {
   ensureDir();
+  const want = route ? String(route).replace(/[^A-Za-z0-9_-]/g, '') : '';
   try {
     return fs.readdirSync(LOG_DIR)
       .filter((f) => /\.log$/.test(f) && !f.startsWith('latest'))
+      .filter((f) => !want || f.includes('_' + want + '_'))
       .map((f) => {
         const st = fs.statSync(path.join(LOG_DIR, f));
         return { name: f, size: st.size, mtime: st.mtimeMs };
@@ -116,8 +124,8 @@ function list() {
   }
 }
 
-function latest(pipeline) {
-  const l = list().filter((x) => !pipeline || x.name.startsWith(pipeline + '_'));
+function latest(pipeline, route) {
+  const l = list(route).filter((x) => !pipeline || x.name.startsWith(pipeline + '_'));
   return l.length ? l[0] : null;
 }
 

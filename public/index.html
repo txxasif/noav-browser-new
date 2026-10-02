@@ -85,18 +85,13 @@
         <button class="nav-item nav-parent" id="nav-tg-toggle" type="button" aria-expanded="true" title="Telegram bots — pick a submenu item">
           <i class="fa-brands fa-telegram" style="color: #229ED9;"></i>
           <span>TG Classic</span>
-          <span id="metainsta-badge-tg" class="nav-pill nav-pill--tool">0</span>
           <i class="fa-solid fa-chevron-down nav-caret"></i>
         </button>
         <div class="nav-submenu" id="tg-submenu">
+          <div class="nav-section-title">BOTS</div>
           <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="taskly" title="Meta → Instagram → Taskly submit (2FA / No mail)">
             <i class="fa-solid fa-bolt" style="color: #229ED9;"></i>
             <span>Taksly Bot</span>
-          </button>
-          <button class="nav-item nav-sub" data-view="view-tg-taskly2fa" title="Taskly Create Inst (2FA) — pooled IG drain (no Meta, reuses an existing IG account)">
-            <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
-            <span>Taskly 2FA</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
           </button>
           <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="paygo" title="Meta → Instagram → PayGo cookie submit">
             <i class="fa-solid fa-cookie-bite" style="color: #f59e0b;"></i>
@@ -105,6 +100,22 @@
           <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="fastpay" title="Meta → Instagram → FastPay 2FA create + payout">
             <i class="fa-solid fa-sack-dollar" style="color: #22c55e;"></i>
             <span>FastPay Bot</span>
+          </button>
+          <div class="nav-section-title">POOL</div>
+          <button class="nav-item nav-sub" data-view="view-tg-taskly2fa" title="Taskly Create Inst (2FA) — pooled IG drain (no Meta, reuses an existing IG account)">
+            <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
+            <span>Taskly 2FA</span>
+            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+          </button>
+          <button class="nav-item nav-sub" data-view="view-tg-paygopool" title="PayGo Create Inst (Cookies) — pooled IG drain (no Meta, reuses an existing IG account)">
+            <i class="fa-solid fa-cookie-bite" style="color: #4ade80;"></i>
+            <span>PayGo Pool</span>
+            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+          </button>
+          <button class="nav-item nav-sub" data-view="view-tg-fastpay2fa" title="FastPay Instagram 2FA — pooled IG drain (no Meta, reuses an existing IG account)">
+            <i class="fa-solid fa-sack-dollar" style="color: #4ade80;"></i>
+            <span>FastPay 2FA</span>
+            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
           </button>
         </div>
         <button class="nav-item" data-view="view-tg-manager" title="Connect & manage Telegram accounts — lease, enable/disable, balances">
@@ -167,6 +178,16 @@
         <!-- ================= VIEW: TASKLY 2FA (POOL DRAIN) ================= -->
         <section id="view-tg-taskly2fa" class="view-panel" aria-label="Taskly 2FA pool drain">
           <div id="tg-taskly2fa-root"></div>
+        </section>
+
+        <!-- ================= VIEW: FASTPAY 2FA (POOL DRAIN) ================= -->
+        <section id="view-tg-fastpay2fa" class="view-panel" aria-label="FastPay 2FA pool drain">
+          <div id="tg-fastpay2fa-root"></div>
+        </section>
+
+        <!-- ================= VIEW: PAYGO POOL (POOL DRAIN) ================= -->
+        <section id="view-tg-paygopool" class="view-panel" aria-label="PayGo Pool drain">
+          <div id="tg-paygopool-root"></div>
         </section>
 
         <!-- ================= VIEW: TG MANAGER ================= -->
@@ -503,17 +524,19 @@
   </div>
 
 
-  <script src="js/nova-core.js?v=2" defer></script>
-  <script src="js/nova-license.js?v=1" defer></script>
-  <script src="js/nova-diag.js?v=1" defer></script>
-  <script src="js/nova-meta-insta.js?v=2" defer></script>
+  <script src="js/nova-core.js?v=3" defer></script>
+  <script src="js/nova-license.js?v=2" defer></script>
+  <script src="js/nova-diag.js?v=3" defer></script>
+  <script src="js/nova-meta-insta.js?v=4" defer></script>
   <!-- ?v=N cache-busts the dashboard scripts. Without a changing query, a
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
        disagreed with the pool card). Bump these when shipping JS changes. -->
-  <script src="js/nova-tg.js?v=10" defer></script>
-  <script src="js/nova-taskly2fa.js?v=2" defer></script>
+  <script src="js/nova-tg.js?v=14" defer></script>
+  <script src="js/nova-taskly2fa.js?v=6" defer></script>
+  <script src="js/nova-fastpay2fa.js?v=3" defer></script>
+  <script src="js/nova-paygopool.js?v=4" defer></script>
   <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:
        FastPay is a TG Classic create bot now. The file is kept on disk. -->
-  <script src="js/nova-manager.js?v=1" defer></script>
+  <script src="js/nova-manager.js?v=12" defer></script>
 </body>
 </html>

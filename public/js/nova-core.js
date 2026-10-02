@@ -91,6 +91,8 @@ function initThemeNav() {
     'view-tg-manager': '#/manager',
     'view-guide': '#/guide',
     'view-tg-taskly2fa': '#/taskly2fa',
+    'view-tg-fastpay2fa': '#/fastpay2fa',
+    'view-tg-paygopool': '#/paygopool',
   };
 
   function routeForItem(item) {

@@ -54,6 +54,16 @@ TASK_WINDOW = 420  # bot ~8-min TTL; fail fast past it
 _profile_pacing_lock = threading.Lock()
 _profile_last_start: dict[str, float] = {}
 
+# IG anti-spam ({"spam":true}) on the rename endpoint. A single hit marks the
+# ACCOUNT as blocked (remove it); a long CONSECUTIVE streak means the IP is
+# flagged, so STOP the drain instead of emptying the whole pool.
+_ig_spam_streak = [0]
+_IG_SPAM_STOP = int(os.environ.get("INSTA_IG_SPAM_STOP", "20") or 20)
+
+
+def _ig_spam_blocked(msg: str) -> bool:
+    return "spam" in str(msg or "").lower()
+
 
 def log(slot_id, m):
     print(f"[cookie:{slot_id}] {m}", flush=True)
@@ -388,6 +398,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             )
             if ok_name:
                 pool_acc = cand
+                _ig_spam_streak[0] = 0
                 log(slot_id, f"✅ [api] IG username updated successfully to '{login}' in ~0.4s ({name_msg})")
                 clog(f"⚡ [username] Updated Instagram username: '{cand_user}' -> '{login}' (in 0.4s)")
                 break
@@ -404,10 +415,26 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 emit_event({"type": "accounts_updated"})
                 continue
             else:
-                # Proposed username was rejected by IG (e.g. taken/invalid) but account itself may be fine
-                log(slot_id, f"[pool] Target username '{login}' rejected by IG ({name_msg}) — restoring account {cand_id} to pool.")
-                store.restore_ig_creator_account(cand_id)
-                raise RuntimeError(f"Direct IG username change failed: {name_msg}")
+                # FAILED means FAILED: a rejected rename (spam / taken / invalid)
+                # removes the account from the pool — never retried / re-logged-in.
+                # Safety: if MANY fail in a ROW the IP itself is flagged, so STOP
+                # the drain instead of emptying the whole pool.
+                _ig_spam_streak[0] += 1
+                if _ig_spam_streak[0] >= _IG_SPAM_STOP:
+                    raise RuntimeError(
+                        f"IG rename failed on {_ig_spam_streak[0]} consecutive accounts "
+                        f"(last: {name_msg[:60]}) — IP-level rate-limit; pausing the drain.")
+                log(slot_id, f"[pool] Rename '{login}' FAILED for {cand_id} ({name_msg[:80]}) — "
+                             f"removing from pool ({_ig_spam_streak[0]}/{_IG_SPAM_STOP}).")
+                store.delete_record(cand_id)
+                if cand.get("session_file") and os.path.exists(cand["session_file"]):
+                    try:
+                        os.remove(cand["session_file"])
+                    except Exception:
+                        pass
+                emit_event({"type": "account_deleted", "account_id": cand_id})
+                emit_event({"type": "accounts_updated"})
+                continue
 
         if not pool_acc:
             raise RuntimeError("Failed to obtain a valid working IG Creator account from pool")
@@ -431,7 +458,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 emit_event({"type": "account_deleted", "account_id": acc_id})
                 emit_event({"type": "accounts_updated"})
             else:
-                store.restore_ig_creator_account(acc_id)
+                store.restore_ig_creator_account(acc_id, rotate=True)
             pool_acc = None
             raise RuntimeError(f"PayGo rejected cookie: {reply[:200]}")
 
@@ -446,7 +473,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             log(slot_id, f"register receipt not seen (attempt {_rc+1}/3) — retrying confirm tap…")
             time.sleep(1.2)
         if not submitted:
-            store.restore_ig_creator_account(acc_id)
+            store.restore_ig_creator_account(acc_id, rotate=True)
             pool_acc = None
             raise RuntimeError("PayGo registration not confirmed — not recording Submitted")
 
@@ -462,7 +489,9 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         from tg_stats import record_submission
         rec_id = f"tg_{int(time.time()*1000)}"
-        record_submission(bot_id or "paygo")
+        # POOL DRAIN gets its OWN counter so it never inflates the normal
+        # `paygo` (browser-creator) number — mirrors taskly2fa / fastpay2fa.
+        record_submission("paygo_pool" if (bot_id or "paygo").lower() == "paygo" else (bot_id or "paygo"))
         emit_event({"type": "account_submitted", "pipeline": "telegram",
                     "tg_account": tg_acct["id"], "tg_bot": bot_id or "paygo",
                     "account_id": rec_id})
@@ -530,7 +559,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                     pass
             if pool_acc is not None:
                 try:
-                    store.restore_ig_creator_account(pool_acc["id"])
+                    store.restore_ig_creator_account(pool_acc["id"], rotate=True)
                 except Exception:
                     pass
             return False, "session_lost"
@@ -556,7 +585,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             pool_acc = None
         if pool_acc is not None:
             try:
-                store.restore_ig_creator_account(pool_acc["id"])
+                store.restore_ig_creator_account(pool_acc["id"], rotate=True)
             except Exception:
                 pass
         if bot is not None:

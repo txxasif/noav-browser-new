@@ -1,33 +1,58 @@
 // ============================================================================
-// NOVA DIAG & RUN LOGS — Live Failure Reasons & Persistent Session Logs
+// NOVA DIAG & RUN LOGS — route-scoped Live Failure Reasons & Session Logs
 // ----------------------------------------------------------------------------
-// Sibling parity with meta_auto_ai:
-// 1. Polls /api/diag/reasons (every 10s) and renders normalized failure
-//    histogram + reason=<code> tags.
-// 2. Polls /api/logs (every 15s) and renders downloadable run logs from logs/.
-// 3. Updates all mounted panels across all views (TG Classic, Meta, IG).
+// Each mounted panel registers a ROUTE (meta|ig|taskly|paygo|fastpay|taskly2fa|fastpay2fa):
+//   1. Polls /api/diag/reasons?route=<route> and renders ONLY that route's
+//      failure histogram (no cross-route mixing).
+//   2. Polls /api/logs?route=<route> and lists ONLY that route's run logs.
+//   3. renderHtml(prefix, route) mounts a panel; setRoute() retargets it.
 // ============================================================================
 
 (function () {
   'use strict';
 
   function esc(s) {
-    return String(s || '').replace(/[&<>"]/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '(': '&lt;', '>': '&gt;', '"': '&quot;' }[c] || c;
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
 
+  var mounts = []; // [{ prefix, route }]
+
+  function _mount(prefix, route) {
+    var p = prefix ? String(prefix) : '';
+    var m = null;
+    for (var i = 0; i < mounts.length; i++) if (mounts[i].prefix === p) { m = mounts[i]; break; }
+    if (!m) { m = { prefix: p, route: route || '' }; mounts.push(m); }
+    else if (route !== undefined) { m.route = route || ''; }
+    return m;
+  }
+
+  function _routes() {
+    var seen = {};
+    mounts.forEach(function (m) { seen[m.route || ''] = 1; });
+    var keys = Object.keys(seen);
+    return keys.length ? keys : [''];
+  }
+
+  function _q(route) {
+    return route ? ('?route=' + encodeURIComponent(route)) : '';
+  }
+
   var NovaDiag = {
-    renderHtml: function (prefix) {
+    renderHtml: function (prefix, route) {
+      _mount(prefix, route);
       var p = prefix ? String(prefix) + '-' : '';
+      var dr = ' data-diag-route="' + esc(route || '') + '"';
       return '' +
         '<!-- Failure Reasons (live diag) -->' +
-        '<div class="card-panel diag-card" style="margin-top:1rem;padding:0;overflow:hidden;">' +
+        '<div class="card-panel diag-card"' + dr + ' style="margin-top:1rem;padding:0;overflow:hidden;">' +
           '<details class="diag-details" id="' + p + 'diag-details">' +
             '<summary style="padding:0.75rem 1rem;display:flex;align-items:center;justify-content:space-between;cursor:pointer;list-style:none;user-select:none;">' +
               '<div style="display:flex;align-items:center;gap:0.5rem;">' +
                 '<i class="fa-solid fa-triangle-exclamation" style="color:#fb7185;font-size:0.9rem;"></i>' +
                 '<span style="font-size:0.88rem;font-weight:600;color:var(--text-main);">Failure Reasons (live)</span>' +
+                (route ? '<span style="margin-left:4px;padding:2px 8px;border-radius:4px;font-size:0.66rem;font-weight:700;background:rgba(56,189,248,0.12);color:#7dd3fc;border:1px solid rgba(56,189,248,0.3);">' + esc(route) + '</span>' : '') +
                 '<span style="margin-left:4px;padding:2px 8px;border-radius:4px;font-size:0.68rem;font-weight:700;background:rgba(244,63,94,0.15);color:#fda4af;border:1px solid rgba(244,63,94,0.3);">' +
                   'total <span data-role="diag-total">0</span>' +
                 '</span>' +
@@ -54,12 +79,13 @@
         '</div>' +
 
         '<!-- Session Logs (persistent run logs) -->' +
-        '<div class="card-panel diag-card" style="margin-top:0.75rem;padding:0;overflow:hidden;">' +
+        '<div class="card-panel diag-card"' + dr + ' style="margin-top:0.75rem;padding:0;overflow:hidden;">' +
           '<details class="diag-details" id="' + p + 'logs-details" open>' +
             '<summary style="padding:0.75rem 1rem;display:flex;align-items:center;justify-content:space-between;cursor:pointer;list-style:none;user-select:none;">' +
               '<div style="display:flex;align-items:center;gap:0.5rem;">' +
                 '<i class="fa-solid fa-file-lines" style="color:#38bdf8;font-size:0.9rem;"></i>' +
                 '<span style="font-size:0.88rem;font-weight:600;color:var(--text-main);">Session Logs</span>' +
+                (route ? '<span style="margin-left:4px;padding:2px 8px;border-radius:4px;font-size:0.66rem;font-weight:700;background:rgba(56,189,248,0.12);color:#7dd3fc;border:1px solid rgba(56,189,248,0.3);">' + esc(route) + '</span>' : '') +
                 '<span style="margin-left:4px;padding:2px 8px;border-radius:4px;font-size:0.68rem;font-weight:700;background:rgba(56,189,248,0.15);color:#7dd3fc;border:1px solid rgba(56,189,248,0.3);">' +
                   'last <span data-role="log-count">0</span>' +
                 '</span>' +
@@ -83,46 +109,40 @@
         '</div>';
     },
 
-    refreshReasons: function () {
-      fetch('/api/diag/reasons')
-        .then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        })
-        .then(function (data) {
-          NovaDiag.renderReasons(data || {});
-        })
-        .catch(function () {});
+    /** Retarget an already-mounted panel to another route (e.g. TG bot switch). */
+    setRoute: function (prefix, route) {
+      _mount(prefix, route);
     },
 
-    renderReasons: function (s) {
+    refreshReasons: function () {
+      _routes().forEach(function (route) {
+        fetch('/api/diag/reasons' + _q(route))
+          .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
+          .then(function (data) { NovaDiag.renderReasons(data || {}, route); })
+          .catch(function () {});
+      });
+    },
+
+    renderReasons: function (s, route) {
+      var scope = '[data-diag-route="' + (route || '') + '"] ';
       var reasons = s.reasons || {};
       var pass = s.password_reasons || {};
 
-      var updatedText = s.updated
-        ? ('updated ' + new Date(s.updated).toLocaleTimeString())
-        : 'no data yet';
-      document.querySelectorAll('[data-role="diag-updated"]').forEach(function (el) {
-        el.textContent = updatedText;
-      });
-
-      var totalText = String(s.total || 0);
-      document.querySelectorAll('[data-role="diag-total"]').forEach(function (el) {
-        el.textContent = totalText;
-      });
+      var updatedText = s.updated ? ('updated ' + new Date(s.updated).toLocaleTimeString()) : 'no data yet';
+      document.querySelectorAll(scope + '[data-role="diag-updated"]').forEach(function (el) { el.textContent = updatedText; });
+      document.querySelectorAll(scope + '[data-role="diag-total"]').forEach(function (el) { el.textContent = String(s.total || 0); });
 
       var entries = Object.keys(reasons)
         .map(function (k) { return [k, reasons[k]]; })
         .sort(function (a, b) { return b[1] - a[1]; });
       var max = entries.length ? entries[0][1] : 0;
 
-      var reasonsHtml = '';
+      var reasonsHtml;
       if (!entries.length) {
         reasonsHtml = '<div style="font-size:0.75rem;color:var(--text-muted);font-style:italic;padding:4px 0;">No failures recorded yet.</div>';
       } else {
         reasonsHtml = entries.map(function (item) {
-          var k = item[0];
-          var v = item[1];
+          var k = item[0], v = item[1];
           var pct = max ? Math.max(4, Math.round((v / max) * 100)) : 0;
           return '<div style="display:flex;align-items:center;gap:8px;padding:2px 0;">' +
             '<div style="width:210px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.75rem;color:var(--text-main);" title="' + esc(k) + '">' + esc(k) + '</div>' +
@@ -133,68 +153,51 @@
           '</div>';
         }).join('');
       }
-      document.querySelectorAll('[data-role="diag-reasons"]').forEach(function (el) {
-        el.innerHTML = reasonsHtml;
-      });
+      document.querySelectorAll(scope + '[data-role="diag-reasons"]').forEach(function (el) { el.innerHTML = reasonsHtml; });
 
       var passEntries = Object.keys(pass)
         .map(function (k) { return [k, pass[k]]; })
         .sort(function (a, b) { return b[1] - a[1]; });
-
-      var passHtml = '';
+      var passHtml;
       if (!passEntries.length) {
         passHtml = '<span style="font-size:0.75rem;color:var(--text-muted);font-style:italic;">none</span>';
       } else {
         passHtml = passEntries.map(function (item) {
-          var k = item[0];
-          var v = item[1];
           return '<span style="display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:4px;border:1px solid var(--border-color);background:rgba(255,255,255,0.03);font-size:0.68rem;font-family:var(--font-mono);color:var(--text-dim);margin:0 4px 4px 0;">' +
-            '<span style="color:var(--text-main);">' + esc(k) + '</span>' +
-            '<b style="color:var(--accent-amber);">' + v + '</b>' +
+            '<span style="color:var(--text-main);">' + esc(item[0]) + '</span>' +
+            '<b style="color:var(--accent-amber);">' + item[1] + '</b>' +
           '</span>';
         }).join('');
       }
-      document.querySelectorAll('[data-role="diag-pass"]').forEach(function (el) {
-        el.innerHTML = passHtml;
-      });
+      document.querySelectorAll(scope + '[data-role="diag-pass"]').forEach(function (el) { el.innerHTML = passHtml; });
     },
 
     refreshLogs: function () {
-      fetch('/api/logs')
-        .then(function (res) {
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          return res.json();
-        })
-        .then(function (data) {
-          NovaDiag.renderLogs(data || {});
-        })
-        .catch(function () {});
+      _routes().forEach(function (route) {
+        fetch('/api/logs' + _q(route))
+          .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
+          .then(function (data) { NovaDiag.renderLogs(data || {}, route); })
+          .catch(function () {});
+      });
     },
 
-    renderLogs: function (s) {
+    renderLogs: function (s, route) {
+      var scope = '[data-diag-route="' + (route || '') + '"] ';
       var dirName = (s.dir || 'logs') + '/';
-      document.querySelectorAll('[data-role="log-dir"]').forEach(function (el) {
-        el.textContent = dirName;
-      });
+      document.querySelectorAll(scope + '[data-role="log-dir"]').forEach(function (el) { el.textContent = dirName; });
 
       var logs = s.logs || [];
-      document.querySelectorAll('[data-role="log-count"]').forEach(function (el) {
-        el.textContent = String(logs.length);
-      });
+      document.querySelectorAll(scope + '[data-role="log-count"]').forEach(function (el) { el.textContent = String(logs.length); });
 
       var latestUrl = logs.length ? ('/api/logs/file?name=' + encodeURIComponent(logs[0].name)) : '#';
-      document.querySelectorAll('[data-role="log-latest"]').forEach(function (el) {
-        if (logs.length) {
-          el.href = latestUrl;
-          el.style.display = 'inline-block';
-        } else {
-          el.style.display = 'none';
-        }
+      document.querySelectorAll(scope + '[data-role="log-latest"]').forEach(function (el) {
+        if (logs.length) { el.href = latestUrl; el.style.display = 'inline-block'; }
+        else { el.style.display = 'none'; }
       });
 
-      var listHtml = '';
+      var listHtml;
       if (!logs.length) {
-        listHtml = '<div style="font-size:0.75rem;color:var(--text-muted);font-style:italic;padding:4px 0;">No run logs yet.</div>';
+        listHtml = '<div style="font-size:0.75rem;color:var(--text-muted);font-style:italic;padding:4px 0;">No run logs yet for this route.</div>';
       } else {
         listHtml = logs.map(function (l) {
           var kb = Math.max(1, Math.round((l.size || 0) / 1024));
@@ -209,23 +212,17 @@
           '</div>';
         }).join('');
       }
-      document.querySelectorAll('[data-role="log-list"]').forEach(function (el) {
-        el.innerHTML = listHtml;
-      });
+      document.querySelectorAll(scope + '[data-role="log-list"]').forEach(function (el) { el.innerHTML = listHtml; });
     },
 
     init: function () {
       this.refreshReasons();
       this.refreshLogs();
       setInterval(function () {
-        if (document.querySelector('.diag-details[open]')) {
-          NovaDiag.refreshReasons();
-        }
+        if (document.querySelector('.diag-details[open]')) NovaDiag.refreshReasons();
       }, 15000);
       setInterval(function () {
-        if (document.querySelector('.diag-details[open]')) {
-          NovaDiag.refreshLogs();
-        }
+        if (document.querySelector('.diag-details[open]')) NovaDiag.refreshLogs();
       }, 30000);
     }
   };
@@ -233,9 +230,7 @@
   window.NovaDiag = NovaDiag;
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function () {
-      NovaDiag.init();
-    });
+    document.addEventListener('DOMContentLoaded', function () { NovaDiag.init(); });
   } else {
     NovaDiag.init();
   }

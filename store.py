@@ -285,7 +285,11 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
                 WHERE platform = 'Meta+Instagram'
                   AND cookies IS NOT NULL AND cookies != ''
                   AND (status = 'Created' OR status IS NULL)
-                ORDER BY created_at DESC, rowid DESC LIMIT 1
+                -- ROTATION: never-claimed accounts first (claimed_at NULL), then
+                -- previously-claimed/failed ones. Without this a failed account
+                -- (restored with its claimed_at kept) stays the newest and is
+                -- re-popped in a tight loop, which IG flags as spam.
+                ORDER BY (claimed_at IS NULL) DESC, created_at DESC, rowid DESC LIMIT 1
                 """
             )
             row = cur.fetchone()
@@ -302,15 +306,27 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
             return res
 
 
-def restore_ig_creator_account(rec_id: str) -> None:
-    """Restore an account's status to 'Created' if drain cycle was aborted."""
+def restore_ig_creator_account(rec_id: str, rotate: bool = False) -> None:
+    """Restore an account's status to 'Created' if drain cycle was aborted.
+
+    ``rotate=True`` KEEPS the account's ``claimed_at`` stamp so it sorts to the
+    BACK of the pop queue. Use it when the account failed a rename/submit so the
+    next pop picks a DIFFERENT account (a tight re-pick loop is what made IG
+    return ``{"spam":true}`` on every username change).
+    """
     conn = db.get_connection()
     with _lock:
         with conn:
-            conn.execute(
-                "UPDATE accounts SET status = 'Created', claimed_at = NULL WHERE id = ?",
-                (rec_id,)
-            )
+            if rotate:
+                conn.execute(
+                    "UPDATE accounts SET status = 'Created' WHERE id = ?",
+                    (rec_id,)
+                )
+            else:
+                conn.execute(
+                    "UPDATE accounts SET status = 'Created', claimed_at = NULL WHERE id = ?",
+                    (rec_id,)
+                )
         sync_files()
 
 

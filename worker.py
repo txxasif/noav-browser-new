@@ -633,6 +633,17 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     mail_provider=mail_provider, stop_event=_stop,
                     add_email=add_email, tg_task=task, tg_bot=tg_bot,
                     use_ig_pool=True)
+            elif str(_runner) == "run_fastpay_pool_cycle":
+                # FastPay "Instagram 2FA" POOL DRAIN (new "FastPay 2FA" panel):
+                # reuse a pre-created IG account — rename + 2FA + password +
+                # Confirm in FastPay — no Meta, no signup.
+                from run_fastpay_pool_cycle import run_fastpay_pool_cycle_once
+                ok, detail = run_fastpay_pool_cycle_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
+                    use_ig_pool=True)
             else:
                 ok, detail = tg_worker.run_tg_coupled_cycle(
                     AISlotWorker, slot_id=slot_id, is_headless=is_headless,

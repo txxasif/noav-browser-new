@@ -61,6 +61,9 @@ INST_2FA_POOL = "inst_2fa_pool"
 COOKIES_NOMAIL = "cookies_nomail"  # Taskly: Cookies → Create Inst (No mail) (2FA + cookie)
 COOKIES = "cookies"      # Create Inst (Cookies) — PayGo only
 FASTPAY_2FA = "fastpay_ig_2fa"  # Instagram 2FA payout — FastPay bot (key -> code)
+# FastPay "Instagram 2FA" run as a POOL DRAIN: reuse a pre-created IG account
+# (rename via Web API + 2FA + password) instead of creating Meta→IG.
+FASTPAY_2FA_POOL = "fastpay_2fa_pool"
 
 # Canonical display label per task — mirrors the bot button text EXACTLY
 # (same words + same emoji/logo), minus the volatile price suffix.
@@ -74,6 +77,7 @@ LABELS = {
     COOKIES_NOMAIL: "🍪 Create Inst (No mail)",
     COOKIES: "📱 Create Inst (Cookies)",
     FASTPAY_2FA: "Instagram 2FA",
+    FASTPAY_2FA_POOL: "Instagram 2FA",
 }
 
 # User-facing strings (dashboard dropdown, --tg-task, legacy callers) ->
@@ -105,6 +109,9 @@ ALIASES = {
     "Instagram 2FA": FASTPAY_2FA,
     "instagram 2fa": FASTPAY_2FA,
     "IG 2FA": FASTPAY_2FA,
+    # Dashboard-only alias for the NEW "FastPay 2FA" panel (pooled drain).
+    "FastPay 2FA": FASTPAY_2FA_POOL,
+    "FastPay Instagram 2FA": FASTPAY_2FA_POOL,
 }
 
 # Per-bot catalog. ``path`` is ordered button levels from the MAIN menu.
@@ -196,6 +203,19 @@ TASKS = {
                 {"all": ["instagram", "2fa"], "none": ["facebook"]},  # Instagram 2FA task
             ],
             "steps": ["2fa", "password", "register"],
+        },
+        # SAME bot button as above, run as a POOL DRAIN (no Meta, no signup):
+        # pop a pre-created IG account, rename it to the FastPay username,
+        # enable 2FA, set the password, and Confirm the submission.
+        FASTPAY_2FA_POOL: {
+            "label": LABELS[FASTPAY_2FA_POOL],
+            "flow": "fastpay_pool_2fa",
+            "price": 0.024,
+            "path": [
+                {"all": ["task"], "none": []},
+                {"all": ["instagram"], "none": ["facebook"]},
+                {"all": ["instagram", "2fa"], "none": ["facebook"]},
+            ],
         },
     },
 }
