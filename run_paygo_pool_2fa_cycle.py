@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""One-shot Taskly "📱 Create Inst (2FA)" POOL-DRAIN cycle (no Meta, no signup).
+"""One-shot PayGo "📱 Create Inst (2FA)" POOL-DRAIN cycle (no Meta, no signup).
 
 Reuses a PRE-CREATED Instagram account from the IG Creator pool instead of
 creating Meta → Instagram from scratch:
 
-    lease TG -> Taskly "Create Inst (2FA)" -> bot creds (login/password)
+    lease TG -> PayGo "Create Inst (2FA)" -> bot creds (login/password)
     -> pop ONE pooled IG account (data/store.db)
     -> rename it to the bot login        (direct IG Web API, ~0.4s)
     -> launch browser, inject the account's IG cookies
     -> 2FA in Accounts Center (the stored mail.td inbox solves the email re-auth)
-    -> submit the 2FA key to Taskly -> enter the returned code -> register
+    -> submit the 2FA key to PayGo -> enter the returned code -> register
     -> consume (delete) the pooled account
 
-The runner is selected from the registry: ``tg_tasks.INST_2FA_POOL`` →
-flow ``pool_2fa`` → ``tg_flows.runner_of`` == ``run_pool_2fa_cycle``. The
+The runner is selected from the registry: ``tg_tasks.PAYGO_2FA_POOL`` →
+flow ``paygo_pool_2fa`` → ``tg_flows.runner_of`` == ``run_paygo_pool_2fa_cycle``. The
 existing ``native``/``2fa``/``cookie`` flows are untouched (invariant 24).
 
 Import-safe for ``worker.py`` (lazy ``AISlotWorker`` import — no cycle).
@@ -59,13 +59,13 @@ from pipelines.telegram.tg_support import (  # noqa: E402
     IGDeadEnd,
 )
 
-POOL_TASK = "Taskly 2FA"          # alias → tg_tasks.INST_2FA_POOL (pool_2fa flow)
-POOL_FLOW = "pool_2fa"
+POOL_TASK = "PayGo 2FA"          # alias → tg_tasks.PAYGO_2FA_POOL (paygo_pool_2fa flow)
+POOL_FLOW = "paygo_pool_2fa"
 TASK_WINDOW = 420                 # bot ~8-min TTL; fail fast past it
 
 
 def log(slot_id, m):
-    print(f"[pool2fa:{slot_id}] {m}", flush=True)
+    print(f"[paygo2fa:{slot_id}] {m}", flush=True)
 
 
 def _cookies_for_playwright(cookie_str: str) -> list:
@@ -369,15 +369,15 @@ def _browser_logged_in(page) -> bool:
     return True
 
 
-def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
+def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=False,
                             captcha_mode="extension", mail_provider="mailtd",
                             stop_event=None, add_email=False,
-                            tg_task=None, tg_bot="taskly", use_ig_pool=True):
-    """Run ONE pooled Taskly-2FA cycle. Returns ``(ok, detail)``."""
+                            tg_task=None, tg_bot="paygo", use_ig_pool=True):
+    """Run ONE pooled PayGo-2FA cycle. Returns ``(ok, detail)``."""
     import store
 
     task = tg_task or POOL_TASK
-    bot_id = str(tg_bot or "taskly")
+    bot_id = str(tg_bot or "paygo")
 
     if worker_factory is None:
         from worker import AISlotWorker as _W
@@ -459,13 +459,15 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
         threading.Thread(target=_beat, daemon=True).start()
 
         # Clear a possible orphan ACTIVE task (killed run) so choose_task starts
-        # from a clean menu instead of talking into a dead task.
+        # from a clean menu instead of talking into a dead task. Orphan-clear
+        # Cancels once (no live owner exists after a preempt); mid-cycle paths
+        # below keep refusing via cancel_task.
         try:
-            bot.reset_to_main_menu()
-        except Exception:
-            pass
-        try:
-            bot.cancel_task()
+            _clear = getattr(bot, "clear_orphan_task", None)
+            if callable(_clear):
+                _clear()
+            else:
+                bot.reset_to_main_menu()
         except Exception:
             pass
 
@@ -481,7 +483,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")
         cname = _sanitize_name(creds.get("first_name") or "")
         clog(f"creds: name='{creds.get('first_name')}' login='{login}'")
-        log(slot_id, f"[creds] Taskly issued target username: '{login}'")
+        log(slot_id, f"[creds] PayGo issued target username: '{login}'")
 
         # -- Browser (launch ONCE; reused across pool-account retries) --------
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
@@ -632,8 +634,27 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             runner.email = pool_acc.get("email")
             runner.new_password = creds.get("password")
 
+            # Early dead-session purge (2026-10-04: the pool holds corpses
+            # whose cookies pass the claim check but whose browser session is
+            # already dropped — each burned 2 password tries + a 2FA attempt
+            # before dying, all logged as reason=unknown). Fail fast here:
+            # purge + cancel the unused TG task instead.
+            try:
+                _pw_alive = _browser_logged_in(runner._ig_tab())
+            except Exception:
+                _pw_alive = True
+            if not _pw_alive:
+                _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                    "browser session dead before password change")
+                pool_acc = None
+                try:
+                    bot.cancel_task()
+                except Exception:
+                    pass
+                raise RuntimeError("Pooled IG session dead before password change — purged, retrying with next account")
+
             # (1) PASSWORD FIRST — authenticate Accounts Center via the account's
-            #     stored mail.td email OTP. This changes the password to Taskly's
+            #     stored mail.td email OTP. This changes the password to PayGo's
             #     task password AND elevates the session trust so subsequent
             #     email linking and 2FA open cleanly without challenge.
             cur_pw = pool_acc.get("password") or runner.password
@@ -705,7 +726,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                 # Genuine dead end (login wall / logged-out / checkpoint): REMOVE
                 # it from the pool so it is never re-claimed. The bot username is
                 # now taken by this account, so fail this cycle — the slot retries
-                # with a fresh Taskly task/login.
+                # with a fresh PayGo task/login.
                 _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
                 pool_acc = None
                 raise RuntimeError(f"IG dead end after rename ({exc})")
@@ -760,7 +781,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
         # -- Step: register confirm ------------------------------------------
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
-                    "detail": "Confirming Account Registered with TasklyBot…"})
+                    "detail": "Confirming Account Registered with PayGoBot…"})
         submitted = bot.mark_registered()
         if not submitted:
             log(slot_id, "register receipt not seen — one more tap…")
@@ -770,7 +791,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             # silently lost, and let the slot retry.
             store.restore_ig_creator_account(acc_id, rotate=True)
             pool_acc = None
-            raise RuntimeError("Taskly registration not confirmed — not recording Submitted")
+            raise RuntimeError("PayGo registration not confirmed — not recording Submitted")
 
         # Consume the account (do not double-spend).
         store.delete_record(acc_id)
@@ -784,15 +805,15 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
         from tg_stats import record_submission
         rec_id = f"tg_{int(time.time() * 1000)}"
-        # SEPARATE counter from the regular Taskly bot — the pool-2FA drain has
-        # its own number (tg_stats["taskly2fa"]) so it never inflates "taskly".
-        record_submission("taskly2fa")
+        # SEPARATE counter from the regular PayGo bot — the pool-2FA drain has
+        # its own number (tg_stats["paygo2fa"]) so it never inflates "paygo".
+        record_submission("paygo2fa")
         emit_event({"type": "account_submitted", "pipeline": "telegram",
                     "tg_account": tg_acct["id"], "tg_bot": bot_id,
                     "account_id": rec_id})
         emit_event({"type": "account_deleted", "account_id": acc_id})
         emit_event({"type": "accounts_updated"})
-        log(slot_id, f"🎉 [SUBMITTED] Registration confirmed (+ $0.018) -> record {rec_id} for user '{login}'")
+        log(slot_id, f"🎉 [SUBMITTED] Registration confirmed (+ $0.022) -> record {rec_id} for user '{login}'")
         ok = True
         return True, rec_id
 
@@ -890,14 +911,14 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="One-shot Taskly 2FA pool-drain cycle")
-    ap.add_argument("--slot", type=int, default=93)
+    ap = argparse.ArgumentParser(description="One-shot PayGo 2FA pool-drain cycle")
+    ap.add_argument("--slot", type=int, default=95)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--captcha", default="extension", choices=("extension", "audio"))
-    ap.add_argument("--task", default=POOL_TASK, help='task alias (default "Taskly 2FA")')
-    ap.add_argument("--bot", default="taskly", help="bot id (taskly)")
+    ap.add_argument("--task", default=POOL_TASK, help='task alias (default "PayGo 2FA")')
+    ap.add_argument("--bot", default="paygo", help="bot id (paygo)")
     args = ap.parse_args()
-    ok, detail = run_pool_2fa_cycle_once(
+    ok, detail = run_paygo_pool_2fa_cycle_once(
         slot_id=args.slot, is_headless=args.headless,
         captcha_mode=args.captcha, tg_task=args.task, tg_bot=args.bot)
     print("RESULT:", ok, detail)

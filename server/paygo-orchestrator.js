@@ -244,8 +244,7 @@ class PayGoOrchestrator {
     }
 
     // Either tasks were drained (> 0), OR grace window has expired (min >= 5).
-    this._lastPreemptedHour = hourKey;
-    // A cycle that submits NOTHING outside the grace window means PayGo had no
+    this._lastPreemptedHour = hourKey;    // A cycle that submits NOTHING outside the grace window means PayGo had no
     // task to give. The probe's "stock" reading is then either STALE or wrong,
     // and must be INVALIDATED — otherwise the drain gate in tick() keeps seeing
     // the old positive value, restarts PayGo ~5s later, and loops forever
@@ -273,7 +272,11 @@ class PayGoOrchestrator {
     }
     this.state = 'restoring';
 
-    const hasJobToRestore = !!(this.savedJob && this.savedJob.tg_bot && this.savedJob.tg_bot !== 'paygo');
+    // A saved "PayGo 2FA" pool (same bot id, different task) restores like any
+    // other bot; only the cookie drain itself has nothing to restore.
+    const hasJobToRestore = !!(this.savedJob && this.savedJob.tg_bot
+      && (this.savedJob.tg_bot !== 'paygo'
+        || /paygo\s*2fa/i.test(this.savedJob.tg_task || '')));
 
     if (hasJobToRestore && this.enabled) {
       const jobToRestore = this.savedJob;
@@ -410,7 +413,9 @@ class PayGoOrchestrator {
 
     // If grace window expired (min >= 5) and we were holding savedJob waiting for a delayed refill:
     if (!inGraceWindow && this.savedJob && !isBotRunning) {
-      if (this.savedJob.tg_bot && this.savedJob.tg_bot !== 'paygo') {
+      const _st = String(this.savedJob.tg_task || '');
+      if (this.savedJob.tg_bot
+          && (this.savedJob.tg_bot !== 'paygo' || /paygo\s*2fa/i.test(_st))) {
         console.log(`[PayGo-Auto] Grace window expired (:05) with no stock refill. Restoring previous bot: ${this.savedJob.tg_bot}`);
         const jobToRestore = this.savedJob;
         this.savedJob = null;
@@ -605,8 +610,12 @@ class PayGoOrchestrator {
     // If PayGo is ALREADY draining, do NOT touch savedJob. A re-trigger here
     // (rapid probe / tick) used to reset it to null, so the previous bot
     // (Taskly / Taskly 2FA pool / FastPay) was never restored after PayGo.
+    // NOTE: only the COOKIE drain counts — the "PayGo 2FA" pool shares
+    // tg_bot='paygo' but is a different task and must be preempted/saved like
+    // any other bot.
     if (runningProc && runningConfig
-        && runningConfig.tg_bot === 'paygo' && runningConfig.use_ig_pool) {
+        && runningConfig.tg_bot === 'paygo' && runningConfig.use_ig_pool
+        && !/paygo\s*2fa/i.test(runningConfig.tg_task || '')) {
       this.isPayGoActive = true;
       this.state = 'paygo_running';
       return;
@@ -618,8 +627,11 @@ class PayGoOrchestrator {
 
     if (runningProc && runningConfig) {
       // Only save if it was genuinely a DIFFERENT bot (e.g. Taskly or FastPay).
-      // Never save PayGo to restore itself!
-      if (runningConfig.tg_bot && runningConfig.tg_bot !== 'paygo') {
+      // Never save the PayGo COOKIE drain to restore itself — but DO save the
+      // "PayGo 2FA" pool (same bot id, different task) so it resumes after.
+      const _rt = String(runningConfig.tg_task || '');
+      if (runningConfig.tg_bot
+          && (runningConfig.tg_bot !== 'paygo' || /paygo\s*2fa/i.test(_rt))) {
         this.savedJob = Object.assign({}, runningConfig);
         console.log(`[PayGo-Auto] Preempting ${runningConfig.tg_bot} (${runningConfig.tg_task}) for PayGo refill.`);
         if (this.ctx.broadcastEvent) {

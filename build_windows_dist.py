@@ -38,9 +38,31 @@ SYNC_DIRS = [
 # tg/bots/<other>.py and writes tg/enabled_bots.json so the dashboard hides the
 # rest). Default = all.
 ALL_BOTS = ["taskly", "paygo", "fastpay"]
+ALL_MODULES = ["meta", "ig", "tg"]
+
+
+def selected_modules():
+    if "--meta-only" in sys.argv:
+        return ["meta"]
+    for i, a in enumerate(sys.argv):
+        if a == "--modules" and i + 1 < len(sys.argv):
+            want = [m.strip().lower() for m in sys.argv[i + 1].split(",") if m.strip()]
+            return [m for m in ALL_MODULES if m in want] or list(ALL_MODULES)
+        if a.startswith("--modules="):
+            want = [m.strip().lower() for m in a.split("=", 1)[1].split(",") if m.strip()]
+            return [m for m in ALL_MODULES if m in want] or list(ALL_MODULES)
+    return list(ALL_MODULES)
+
+
+def is_meta_only():
+    mods = selected_modules()
+    return mods == ["meta"]
 
 
 def selected_bots():
+    mods = selected_modules()
+    if "tg" not in mods:
+        return []
     for i, a in enumerate(sys.argv):
         if a == "--bots" and i + 1 < len(sys.argv):
             want = [b.strip().lower() for b in sys.argv[i + 1].split(",") if b.strip()]
@@ -52,10 +74,21 @@ def selected_bots():
 
 
 def get_dist_tag():
-    bots = selected_bots()
-    if set(bots) == set(ALL_BOTS):
-        return "Full"
-    return "-".join(b.capitalize() for b in bots)
+    mods = selected_modules()
+    if set(mods) == set(ALL_MODULES):
+        bots = selected_bots()
+        if set(bots) == set(ALL_BOTS):
+            return "Full"
+        return "-".join(b.capitalize() for b in bots)
+    if mods == ["meta"]:
+        return "MetaOnly"
+    tag_parts = [m.capitalize() for m in mods]
+    if "tg" in mods:
+        bots = selected_bots()
+        if set(bots) != set(ALL_BOTS):
+            tag_parts.append("-".join(b.capitalize() for b in bots))
+    return "-".join(tag_parts)
+
 
 # Root files to synchronize
 SYNC_ROOT_FILES = [
@@ -86,12 +119,15 @@ SYNC_ROOT_FILES = [
     "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
     "run_native_cycle.py",  # one-shot Taskly 2FA native cycle (lease -> bot email+code -> IG signup -> register)
     "run_pool_2fa_cycle.py",  # one-shot Taskly 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + register)
+    "run_paygo_pool_2fa_cycle.py",  # one-shot PayGo 2FA POOL DRAIN (same-to-same as Taskly pool, bot paygo)
+    "run_paygo_pool_2fa_opt_cycle.py",  # EXPERIMENTAL PayGo 2FA Optimized POOL DRAIN (no email_link; own counter)
     "run_fastpay_pool_cycle.py",  # one-shot FastPay 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + password + Confirm)
     "tg_fastpay.py",        # FastPay2025 IG-2FA payout runner (key -> code -> Confirm)
     "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
     "tg_manager_cli.py",    # dashboard <-> tg.manager bridge (summary/balance/bots)
     "tg_stats.py",          # Telegram submission statistics counter
     "tg_paygo_probe.py",    # fast non-blocking PayGo stock probe & countdown
+    "tg_task_probe.py",     # single-lease task-availability probe (all bots)
     "tg_withdraw.py",       # USDT (BEP-20) withdrawal (Taskly/PayGo) + TG freeze
 ]
 
@@ -252,6 +288,17 @@ def sync_sources():
             json.dump({"bots": selected_bots()}, fh, indent=2)
     except Exception as exc:
         log("WARN", f"could not write tg/enabled_bots.json: {exc}")
+
+    # Build-mode manifest: modules and bots for dashboard UI adaptation
+    try:
+        with open(os.path.join(ROOT_WIN, "build_mode.json"), "w", encoding="utf-8") as fh:
+            json.dump({
+                "meta_only": is_meta_only(),
+                "modules": selected_modules(),
+                "bots": selected_bots()
+            }, fh, indent=2)
+    except Exception as exc:
+        log("WARN", f"could not write build_mode.json: {exc}")
 
     log("SYNC", f"Successfully synced {synced_count} files to Windows distribution.")
     strip_all_markdown()
@@ -503,10 +550,13 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/tg_flows.py",
             "MetaCreator/tg_steps.py",
             "MetaCreator/tg_paygo_probe.py",
+            "MetaCreator/tg_task_probe.py",
             "MetaCreator/tg_withdraw.py",
             "MetaCreator/run_cookie_cycle.py",
             "MetaCreator/run_native_cycle.py",
             "MetaCreator/run_pool_2fa_cycle.py",
+            "MetaCreator/run_paygo_pool_2fa_cycle.py",
+            "MetaCreator/run_paygo_pool_2fa_opt_cycle.py",
             "MetaCreator/run_fastpay_pool_cycle.py",
             "MetaCreator/tg_fastpay.py",
             "MetaCreator/tg_manager_cli.py",
@@ -522,6 +572,8 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/public/js/nova-taskly2fa.js",
             "MetaCreator/public/js/nova-fastpay2fa.js",
             "MetaCreator/public/js/nova-paygopool.js",
+            "MetaCreator/public/js/nova-paygo2fa.js",
+            "MetaCreator/public/js/nova-paygo2faopt.js",
             "MetaCreator/bin/node.exe",
             "MetaCreator/_internal/python.exe",
             "MetaCreator/extensions/Captcha/manifest.json",
@@ -529,6 +581,31 @@ def build_portable_zip(protect_mode: bool = True):
             "MetaCreator/extensions/Captcha/dist/ort-wasm-simd.wasm",
             "MetaCreator/extensions/Captcha/models/yolov5-seg.ort",
         ]
+        mods = selected_modules()
+        if "tg" not in mods:
+            # If TG module is not included, exclude TG runner files from zip requirements
+            tg_patterns = (
+                "server/paygo-orchestrator.js", "tg_tasks.py", "tg_flows.py",
+                "tg_steps.py", "tg_paygo_probe.py", "tg_task_probe.py",
+                "tg_withdraw.py", "run_cookie_cycle.py", "run_native_cycle.py",
+                "run_pool_2fa_cycle.py", "run_paygo_pool_2fa_cycle.py",
+                "run_paygo_pool_2fa_opt_cycle.py", "run_fastpay_pool_cycle.py",
+                "tg_fastpay.py", "tg_manager_cli.py", "tg_join_bot.py", "tg_stats.py",
+                "public/js/nova-tg.js", "public/js/nova-taskly2fa.js",
+                "public/js/nova-fastpay2fa.js", "public/js/nova-paygopool.js",
+                "public/js/nova-paygo2fa.js", "public/js/nova-paygo2faopt.js",
+            )
+            required_in_zip = [f for f in required_in_zip if not any(p in f for p in tg_patterns)]
+        else:
+            # If only specific bots are selected, remove runners of excluded bots
+            bots = selected_bots()
+            if "taskly" not in bots:
+                required_in_zip = [f for f in required_in_zip if "run_pool_2fa_cycle.py" not in f and "nova-taskly2fa.js" not in f]
+            if "paygo" not in bots:
+                required_in_zip = [f for f in required_in_zip if "paygo" not in f]
+            if "fastpay" not in bots:
+                required_in_zip = [f for f in required_in_zip if "fastpay" not in f]
+
         if protect_mode:
             # Protected build ships sourceless bytecode, not .py.
             required_in_zip = [n[:-3] + ".pyc" if n.endswith(".py") else n
@@ -646,14 +723,10 @@ def build_patch_zip():
 
 
 def ensure_python_deps():
-    """Install runtime Python deps into the shipped Windows interpreter.
-
-    The build syncs SOURCE but never installed packages, so a fresh Windows tree
-    had no telethon -> `import telethon` failed on the target machine and every
-    MTProto login (the whole TG Classic tab) was dead. telethon and its deps
-    (pyaes, rsa) are PURE PYTHON (no compiled extensions), so they install from
-    Linux straight into _internal/Lib/site-packages and work on Windows.
-    """
+    """Install runtime Python deps into the shipped Windows interpreter."""
+    if "tg" not in selected_modules():
+        log("OK", "Telegram/Telethon deps not needed (tg module not selected).")
+        return
     sp = os.path.join(ROOT_WIN, "_internal", "Lib", "site-packages")
     if not os.path.isdir(sp):
         log("WARN", f"_internal site-packages not found at {sp} — skipping dep install")
@@ -726,7 +799,9 @@ def main():
     print("=" * 70)
 
     sync_sources()
-    print(f"[BUILD] Bots in this build: {', '.join(selected_bots())}")
+    print(f"[BUILD] Modules in this build: {', '.join(selected_modules())}")
+    if "tg" in selected_modules():
+        print(f"[BUILD] Bots in this build: {', '.join(selected_bots())}")
     ensure_python_deps()   # telethon/pyaes/rsa into the SHIPPED runtime
     validate_installer_sources()
     validate_runtimes()

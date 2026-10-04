@@ -136,11 +136,14 @@ def _install_quiet_asyncio_handler() -> None:
         Task exception was never retrieved
         ... Connection.init: Connection closed while reading from the driver
 
-    That is expected noise on a deliberate STOP (the process exits cleanly with
-    code 0), but it dumps a multi-frame traceback into the dashboard log where
-    it looks like a crash and can bury the real error above it — the teardown
-    race already listed as a known issue. Drop ONLY this specific benign case;
-    every other asyncio error still goes to the default handler.
+    A second teardown shape lands on deliberate STOP too: the loop is torn
+    down while Playwright route/dispatch callbacks are still in flight, so
+    its own ``_done_callback``/``_on_route`` raises a bare CancelledError
+    into "Exception in callback ..." (empty message, observed 2026-10-04).
+    Both are expected noise on STOP (the process exits cleanly), but they
+    dump multi-frame tracebacks into the dashboard log where they look like
+    a crash — drop ONLY these specific benign shapes; every other asyncio
+    error still goes to the default handler.
     """
     global _QUIET_ASYNCIO_INSTALLED
     if _QUIET_ASYNCIO_INSTALLED:
@@ -160,6 +163,23 @@ def _install_quiet_asyncio_handler() -> None:
                 exc = context.get("exception")
                 text = str(exc) if exc is not None else str(context.get("message") or "")
                 if any(b in text for b in _BENIGN):
+                    return
+                # STOP-teardown CancelledError from Playwright's own dispatch:
+                # "Exception in callback Connection.dispatch.<locals>._done_callback()"
+                # with an empty CancelledError. Match narrowly (type + callback
+                # shape) so real cancellation bugs still surface.
+                msg = str(context.get("message") or "")
+                try:
+                    import asyncio as _aio
+                    _cancelled = isinstance(exc, _aio.CancelledError)
+                except Exception:
+                    _cancelled = ("cancelled" in type(exc).__name__.lower()) if exc is not None else False
+                if _cancelled and "exception in callback" in msg.lower() and any(
+                    k in msg.lower() for k in (
+                        "playwright", "connection.dispatch",
+                        "_done_callback", "_on_route",
+                    )
+                ):
                     return
             except Exception:
                 pass
@@ -389,6 +409,53 @@ class EngineLaunchMixin:
                 "--disable-logging",
                 "--disable-crash-reporter",
             ]
+            # INSTA_INPROCESS_AUDIO=1: run Chromium's audio service inside the
+            # browser process instead of a dedicated audio process per slot
+            # (--disable-features=AudioServiceOutOfProcess; ~1 process and
+            # ~10MB PSS saved per browser). Safe for this engine: pages run
+            # muted (--mute-audio), the audio-captcha solver downloads the mp3
+            # via the request API and transcribes with in-process Whisper
+            # (eng_mix_audio.py) so it never touches the audio service, and
+            # WebAudio fingerprint surfaces render in the renderer regardless
+            # of where the audio service lives. Opt-in (default off) so stock
+            # behavior is byte-identical unless requested.
+            if os.environ.get("INSTA_INPROCESS_AUDIO", "0").strip().lower() in (
+                "1", "true", "yes", "on",
+            ):
+                # A second --disable-features occurrence merges with _NOVA_FLAGS'
+                # list (established Chromium/Playwright pattern).
+                args += ["--disable-features=AudioServiceOutOfProcess"]
+            # INSTA_DENSE_RENDER=1: cap compositor/raster parallelism per
+            # browser (all three are real cc/base switches, verified against
+            # Chromium source). 30 renderers x N raster threads oversubscribe
+            # 12 cores; 1 raster thread + main-threaded animation/scroll keeps
+            # output correct while cutting thread/context-switch churn.
+            # Automation-safe: scrolling/clicks/waits are DOM-driven and the
+            # YOLO captcha solver is ML-tolerant to sub-perceptual raster
+            # differences. Deliberately NOT included: any fingerprint-visible
+            # switch (e.g. force-prefers-reduced-motion is matchMedia-visible).
+            # Opt-in (default off); A/B on a few slots before fleet-wide use.
+            if os.environ.get("INSTA_DENSE_RENDER", "0").strip().lower() in (
+                "1", "true", "yes", "on",
+            ):
+                args += [
+                    "--num-raster-threads=1",
+                    "--disable-threaded-animation",
+                    "--disable-threaded-scrolling",
+                    "--disable-checker-imaging",
+                ]
+            # INSTA_MAX_IMAGE_MB=N: cap the per-image decoded-bitmap cache
+            # (real switch; Fuchsia production ships =10). IG pages are
+            # image-heavy and the default cap scales with box RAM (generous on
+            # 30GB). A 1080x1350 photo decodes to ~6MB, so anything >=32MB
+            # only touches abnormally large images. Unset = stock behavior.
+            _max_img = os.environ.get("INSTA_MAX_IMAGE_MB", "").strip()
+            if _max_img:
+                try:
+                    _max_img_mb = max(16, min(int(_max_img), 512))
+                    args += [f"--max-decoded-image-size-mb={_max_img_mb}"]
+                except (TypeError, ValueError):
+                    pass
         # Suppress the "Chrome for Testing v… is only for automated testing"
         # infobar (CfT's "user education UI"). CfT reads a JSON config via
         # --chrome-for-testing-config; keys are camelCase (verified against
@@ -480,6 +547,8 @@ class EngineLaunchMixin:
                 self.log(f'[🧩] Extension: {ext_name} (loaded & pinned) — headless via channel=chromium (new headless)')
             else:
                 self.log(f'[🧩] Extension: {ext_name} (loaded & pinned)')
+        elif captcha_mode == "none":
+            self.log('[⚡] Captcha solver: Disabled (pool session — no captcha required)')
         else:
             self.log('[🎙️] Captcha solver: Offline Audio STT (Whisper / Vosk)')
 

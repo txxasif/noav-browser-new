@@ -24,7 +24,7 @@ def get_stats() -> dict:
         except Exception:
             pass
     return {"total": 0, "submitted": 0, "taskly": 0, "paygo": 0, "fastpay": 0,
-            "taskly2fa": 0, "fastpay2fa": 0, "paygo_pool": 0}
+            "taskly2fa": 0, "fastpay2fa": 0, "paygo_pool": 0, "paygo2fa": 0}
 
 
 def record_submission(bot_name: str) -> dict:

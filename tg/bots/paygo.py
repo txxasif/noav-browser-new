@@ -8,10 +8,10 @@ register({
     "name": "PayGo Bot",
     "username": "PayGoeasy_bot",
     "kind": "mtproto+web",
-    "runner": "run_cookie_cycle",   # run_cookie_cycle.py
+    "runner": "run_cookie_cycle",   # cookies drain; 2FA pool drain: run_paygo_pool_2fa_cycle; optimized: run_paygo_pool_2fa_opt_cycle
     "gate": "none",
-    "flows": ["cookie"],
-    "tasks": ["📱 Create Inst (Cookies)"],
+    "flows": ["cookie", "paygo_pool_2fa", "paygo_pool_2fa_opt"],
+    "tasks": ["📱 Create Inst (Cookies)", "📱 Create Inst (2FA)"],
     "creates_accounts": True,
     "balance": True,
 })

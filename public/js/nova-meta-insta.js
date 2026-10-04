@@ -1310,24 +1310,35 @@ function initMetaInsta() {
   }
 
   function connectSse() {
-    try { if (es) es.close(); } catch (e) {}
-    es = new EventSource('/api/meta-insta/events');
-    es.onmessage = (e) => {
-      try {
-        const d = JSON.parse(e.data);
-        if (d && d.type === 'batch' && Array.isArray(d.items)) {
-          for (const item of d.items) {
-            try { handleSseEvent(item); } catch (err) {}
-          }
-          return;
-        }
-        handleSseEvent(d);
-      } catch (err) {
-        const ws = activeWorkspace();
-        if (ws) ws.appendLog(e.data);
+    // Shared SSE hub (nova-core.js): one stream per page. Falls back to a
+    // private stream only if the hub is unavailable (stale cached core).
+    try {
+      if (!window.__miEsShared && typeof window.__novaEsSubscribe === 'function') {
+        window.__miEsShared = true;
+        window.__novaEsSubscribe(handleSseEvent);
+        return;
       }
-    };
-    es.onerror = () => {};
+      if (typeof window.__novaEsSubscribe !== 'function') {
+        try { if (es) es.close(); } catch (e) {}
+        es = new EventSource('/api/meta-insta/events');
+        es.onmessage = (e) => {
+          try {
+            const d = JSON.parse(e.data);
+            if (d && d.type === 'batch' && Array.isArray(d.items)) {
+              for (const item of d.items) {
+                try { handleSseEvent(item); } catch (err) {}
+              }
+              return;
+            }
+            handleSseEvent(d);
+          } catch (err) {
+            const ws = activeWorkspace();
+            if (ws) ws.appendLog(e.data);
+          }
+        };
+        es.onerror = () => {};
+      }
+    } catch (e) {}
   }
 
   refreshShared();

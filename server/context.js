@@ -125,6 +125,47 @@ function storedGlobalPassword() {
 
 const PORT = parseInt(process.env.PORT || '3070', 10);
 const ROOT_DIR = path.join(__dirname, '..');  // server/ module: project root is one up
+
+// Per-machine engine tuning without terminal exports. Loads KEY=VALUE lines
+// from <ROOT>/.env.local (gitignored, never shipped) into process.env — but
+// never overrides a real environment variable, so an explicit export always
+// wins. Workers inherit process.env at spawn, so everything set here reaches
+// every engine (Meta/IG/TG) with no dashboard or code changes.
+// Example .env.local:
+//   INSTA_V8_HEAP_MB=128
+//   INSTA_INPROCESS_AUDIO=1
+//   INSTA_DENSE_RENDER=1
+//   INSTA_MAX_IMAGE_MB=64
+function loadLocalEnv() {
+  try {
+    const f = path.join(ROOT_DIR, '.env.local');
+    if (!fs.existsSync(f)) return false;
+    const raw = fs.readFileSync(f, 'utf8');
+    let applied = 0;
+    for (let line of raw.split('\n')) {
+      line = line.trim();
+      if (!line || line.startsWith('#')) continue;
+      if (line.startsWith('export ')) line = line.slice(7).trim();
+      const eq = line.indexOf('=');
+      if (eq < 1) continue;
+      const k = line.slice(0, eq).trim();
+      let v = line.slice(eq + 1).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+      if ((v.startsWith('"') && v.endsWith('"') && v.length >= 2) ||
+          (v.startsWith("'") && v.endsWith("'") && v.length >= 2)) {
+        v = v.slice(1, -1);
+      }
+      if (!(k in process.env)) {
+        process.env[k] = v;
+        applied++;
+      }
+    }
+    if (applied) console.log(`[MetaCreator] Loaded ${applied} var(s) from .env.local`);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 // Cookie exports written by the Python engine: <ROOT>/cookies/cookies_<id>.txt
 // (JSON array, Nova parity: served per-account with count, like /api/export-cookies).
 function cookieFileFor(id) {
@@ -224,6 +265,19 @@ function reapDeadEngine(name) {
       console.log('[MetaCreator] Reaping stale engine handle (' + (name || activeEngine) + ', exitCode=' + target.proc.exitCode + ')');
       target.proc = null;
       target.config = null;
+    }
+    // Orphan-heal: Stop cleared the config but the process never died
+    // (SIGTERM swallowed by a worker stuck in a blocking call). Without this
+    // the panel reports RUNNING forever with no Start button. 25s grace covers
+    // a normal SIGTERM exit; the stop route's own escalation fires first.
+    if (target.proc && !target.config && target.stoppedAt && (Date.now() - target.stoppedAt > 25000)) {
+      try {
+        if (target.proc.exitCode === null) {
+          console.log('[MetaCreator] Reaping orphaned engine (config cleared, still alive) — SIGKILL.');
+          killProcessGroup(target.proc, 'SIGKILL');
+        }
+      } catch (e) {}
+      target.proc = null;
     }
   } catch (e) {}
   return !!target.proc;
@@ -369,6 +423,8 @@ function routeOf(eng, cfg) {
     const task = String((cfg && cfg.tg_task) || '');
     if (bot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(task)) return 'taskly2fa';
     if (bot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(task)) return 'fastpay2fa';
+    if (bot === 'paygo' && /optim/i.test(task)) return 'paygo2faopt';
+    if (bot === 'paygo' && /paygo\s*2fa/i.test(task)) return 'paygo2fa';
     if (bot === 'paygo' && cfg && cfg.use_ig_pool) return 'paygo_pool';
     return bot || 'tg';
   }
@@ -555,6 +611,7 @@ module.exports = {
   fs, path, zlib, spawn, execSync,
   ROOT_DIR, PUBLIC_DIR, DATA_DIR, ACCOUNTS_JSON, ACCOUNTS_CSV, ACCOUNTS_TXT, PORT,
   PYTHON_BIN, ALL_BOTS,
+  loadLocalEnv,
   readEnabledBots, defaultBot, readTgPool, tgPoolUsable, storedGlobalPassword,
   backupUserData, readSettings, writeSettings, cookieFileFor,
   runPythonJson, resolveScript, reapDeadEngine, sendJson,

@@ -60,6 +60,15 @@ INST_2FA = "inst_2fa"    # Create Inst (2FA) — Taskly only (PayGo button gone)
 INST_2FA_POOL = "inst_2fa_pool"
 COOKIES_NOMAIL = "cookies_nomail"  # Taskly: Cookies → Create Inst (No mail) (2FA + cookie)
 COOKIES = "cookies"      # Create Inst (Cookies) — PayGo only
+# PayGo "📱 Create Inst (2FA)" run as a POOL DRAIN: same-to-same as Taskly's
+# INST_2FA_POOL (rename via direct Web API + 2FA from the stored inbox).
+# Verified live 2026-10-02 over MTProto: identical preview text, identical
+# creds (First name/Login/Password/Email via 📥 Get code), identical
+# "Account Registered" confirm — only the bot + price ($0.0220) differ.
+PAYGO_2FA_POOL = "paygo_2fa_pool"
+# EXPERIMENTAL "PayGo 2FA Optimized" panel — same bot button as PAYGO_2FA_POOL
+# but the email_link step is dropped (own flow/runner/counter). Additive only.
+PAYGO_2FA_OPT = "paygo_2fa_opt"
 FASTPAY_2FA = "fastpay_ig_2fa"  # Instagram 2FA payout — FastPay bot (key -> code)
 # FastPay "Instagram 2FA" run as a POOL DRAIN: reuse a pre-created IG account
 # (rename via Web API + 2FA + password) instead of creating Meta→IG.
@@ -76,6 +85,8 @@ LABELS = {
     INST_2FA_POOL: "📱 Create Inst (2FA)",
     COOKIES_NOMAIL: "🍪 Create Inst (No mail)",
     COOKIES: "📱 Create Inst (Cookies)",
+    PAYGO_2FA_POOL: "📱 Create Inst (2FA)",
+    PAYGO_2FA_OPT: "PayGo 2FA Optimized",
     FASTPAY_2FA: "Instagram 2FA",
     FASTPAY_2FA_POOL: "Instagram 2FA",
 }
@@ -112,6 +123,17 @@ ALIASES = {
     # Dashboard-only alias for the NEW "FastPay 2FA" panel (pooled drain).
     "FastPay 2FA": FASTPAY_2FA_POOL,
     "FastPay Instagram 2FA": FASTPAY_2FA_POOL,
+    # Dashboard-only alias for the NEW "PayGo 2FA" panel (pooled drain mode).
+    # Same bot button/path as Taskly's "📱 Create Inst (2FA)" but on PayGo.
+    # NOTE: the raw "📱 Create Inst (2FA)" label still resolves to Taskly's
+    # INST_2FA (global alias) — the pool panel must send "PayGo 2FA".
+    "PayGo 2FA": PAYGO_2FA_POOL,
+    "PayGo 2FA (Pool)": PAYGO_2FA_POOL,
+    "Paygo 2FA": PAYGO_2FA_POOL,
+    # EXPERIMENTAL optimized panel (same bot button, no email_link step).
+    "PayGo 2FA Optimized": PAYGO_2FA_OPT,
+    "PayGo 2FA Opt": PAYGO_2FA_OPT,
+    "Paygo 2FA Optimized": PAYGO_2FA_OPT,
 }
 
 # Per-bot catalog. ``path`` is ordered button levels from the MAIN menu.
@@ -177,6 +199,34 @@ TASKS = {
                 {"all": ["cookie"], "none": ["create inst"]},           # 🍪 Cookies category
                 {"all": ["create inst", "cookie"], "none": []},         # 📱 Create Inst (Cookies)
             ],
+        },
+        # SAME bot button as Taskly's "📱 Create Inst (2FA)", but on PayGo
+        # ($0.0220, verified live 2026-10-02): Tasks → Create Inst (2FA)
+        # DIRECTLY (no Cookies category — the L2 menu holds both
+        # "📱 Create Inst (2FA)" and "🍪 Cookies" side by side). Same step
+        # order as the Taskly pool drain: password -> email_link (bot email
+        # via 📥 Get code) -> 2fa -> register.
+        PAYGO_2FA_POOL: {
+            "label": LABELS[PAYGO_2FA_POOL],
+            "flow": "paygo_pool_2fa",
+            "price": 0.022,
+            "path": [
+                {"all": ["task"], "none": []},                          # 📋 Tasks
+                {"all": ["create inst", "2fa"], "none": ["no mail"]},   # 📱 Create Inst (2FA)
+            ],
+            "steps": ["password", "email_link", "2fa", "register"],
+        },
+        # EXPERIMENTAL "PayGo 2FA Optimized" panel — SAME bot button/path as
+        # PAYGO_2FA_POOL, optimized flow without email_link. Additive only.
+        PAYGO_2FA_OPT: {
+            "label": LABELS[PAYGO_2FA_OPT],
+            "flow": "paygo_pool_2fa_opt",
+            "price": 0.022,
+            "path": [
+                {"all": ["task"], "none": []},                          # 📋 Tasks
+                {"all": ["create inst", "2fa"], "none": ["no mail"]},   # 📱 Create Inst (2FA)
+            ],
+            "steps": ["password", "2fa", "register"],
         },
     },
     # FastPay2025_bot — Instagram 2FA CREATE task (reverse-engineered live

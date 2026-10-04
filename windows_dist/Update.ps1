@@ -64,12 +64,22 @@ function Backup-UserData {
 }
 
 function Find-UpdatePackage {
-    foreach ($name in @('update.zip', 'MetaCreator-Windows-Patch.zip', 'MetaCreator-Windows-Full-Patch.zip', 'MetaCreator-Windows-Portable.zip', 'MetaCreator-Windows-Full-Portable.zip')) {
+    # A stale update.zip (e.g. a previous release left in the install root)
+    # used to shadow the fresh patch forever because of a fixed name order.
+    # Pick the NEWEST archive by mtime so the latest downloaded build wins.
+    $candidates = @('update.zip', 'MetaCreator-Windows-Patch.zip', 'MetaCreator-Windows-Full-Patch.zip', 'MetaCreator-Windows-Portable.zip', 'MetaCreator-Windows-Full-Portable.zip')
+    $best = $null
+    foreach ($name in $candidates) {
         $candidate = Join-Path $root $name
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $item = Get-Item -LiteralPath $candidate
+            if (-not $best -or $item.LastWriteTime -gt $best.LastWriteTime) { $best = $item }
+        }
     }
+    if ($best) { return $best.FullName }
     $any = Get-ChildItem -LiteralPath $root -Filter '*.zip' -File -ErrorAction SilentlyContinue |
-           Where-Object { $_.Name -match '(?i)(patch|update)' } | Select-Object -First 1
+           Where-Object { $_.Name -match '(?i)(patch|update)' } |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($any) { return $any.FullName }
     return $null
 }

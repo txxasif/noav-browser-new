@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""One-shot Taskly "📱 Create Inst (2FA)" POOL-DRAIN cycle (no Meta, no signup).
+"""One-shot PayGo "PayGo 2FA Optimized" POOL-DRAIN cycle (no Meta, no signup).
 
-Reuses a PRE-CREATED Instagram account from the IG Creator pool instead of
-creating Meta → Instagram from scratch:
+EXPERIMENTAL variant of ``run_paygo_pool_2fa_cycle`` — the original module is
+untouched. Difference: the ``email_link`` step is SKIPPED. Live evidence
+(2026-10-03, 2x Submitted with ``Bot email linkage result: False``) shows
+PayGo accepts the registration without the bot email linked, while the email
+step burns ~60s (AC contact-points nav + a 45s ``Get code`` wait for a code
+that never arrives). The bot-state advance (``Get code`` tap) is preserved:
+``bot.submit_2fa_key`` clicks a lingering ``Get code`` key before submitting
+the 2FA key.
 
-    lease TG -> Taskly "Create Inst (2FA)" -> bot creds (login/password)
-    -> pop ONE pooled IG account (data/store.db)
-    -> rename it to the bot login        (direct IG Web API, ~0.4s)
-    -> launch browser, inject the account's IG cookies
-    -> 2FA in Accounts Center (the stored mail.td inbox solves the email re-auth)
-    -> submit the 2FA key to Taskly -> enter the returned code -> register
-    -> consume (delete) the pooled account
+Steps: rename (Web API) -> password (AC UI) -> 2fa (AC UI) -> register.
+Own ``paygo2faopt`` stats counter so A/B numbers never mix with ``paygo2fa``.
 
-The runner is selected from the registry: ``tg_tasks.INST_2FA_POOL`` →
-flow ``pool_2fa`` → ``tg_flows.runner_of`` == ``run_pool_2fa_cycle``. The
-existing ``native``/``2fa``/``cookie`` flows are untouched (invariant 24).
-
-Import-safe for ``worker.py`` (lazy ``AISlotWorker`` import — no cycle).
+Registry: ``tg_tasks.PAYGO_2FA_OPT`` -> flow ``paygo_pool_2fa_opt`` ->
+``tg_flows.runner_of`` == ``run_paygo_pool_2fa_opt_cycle``.
 """
 from __future__ import annotations
 
@@ -59,13 +57,13 @@ from pipelines.telegram.tg_support import (  # noqa: E402
     IGDeadEnd,
 )
 
-POOL_TASK = "Taskly 2FA"          # alias → tg_tasks.INST_2FA_POOL (pool_2fa flow)
-POOL_FLOW = "pool_2fa"
+POOL_TASK = "PayGo 2FA Optimized"  # alias → tg_tasks.PAYGO_2FA_OPT (paygo_pool_2fa_opt flow)
+POOL_FLOW = "paygo_pool_2fa_opt"
 TASK_WINDOW = 420                 # bot ~8-min TTL; fail fast past it
 
 
 def log(slot_id, m):
-    print(f"[pool2fa:{slot_id}] {m}", flush=True)
+    print(f"[paygo2faopt:{slot_id}] {m}", flush=True)
 
 
 def _cookies_for_playwright(cookie_str: str) -> list:
@@ -369,15 +367,15 @@ def _browser_logged_in(page) -> bool:
     return True
 
 
-def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
+def run_paygo_pool_2fa_opt_cycle_once(slot_id=95, worker_factory=None, is_headless=False,
                             captcha_mode="extension", mail_provider="mailtd",
                             stop_event=None, add_email=False,
-                            tg_task=None, tg_bot="taskly", use_ig_pool=True):
-    """Run ONE pooled Taskly-2FA cycle. Returns ``(ok, detail)``."""
+                            tg_task=None, tg_bot="paygo", use_ig_pool=True):
+    """Run ONE pooled PayGo-2FA cycle. Returns ``(ok, detail)``."""
     import store
 
     task = tg_task or POOL_TASK
-    bot_id = str(tg_bot or "taskly")
+    bot_id = str(tg_bot or "paygo")
 
     if worker_factory is None:
         from worker import AISlotWorker as _W
@@ -459,13 +457,15 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
         threading.Thread(target=_beat, daemon=True).start()
 
         # Clear a possible orphan ACTIVE task (killed run) so choose_task starts
-        # from a clean menu instead of talking into a dead task.
+        # from a clean menu instead of talking into a dead task. Orphan-clear
+        # Cancels once (no live owner exists after a preempt); mid-cycle paths
+        # below keep refusing via cancel_task.
         try:
-            bot.reset_to_main_menu()
-        except Exception:
-            pass
-        try:
-            bot.cancel_task()
+            _clear = getattr(bot, "clear_orphan_task", None)
+            if callable(_clear):
+                _clear()
+            else:
+                bot.reset_to_main_menu()
         except Exception:
             pass
 
@@ -481,7 +481,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")
         cname = _sanitize_name(creds.get("first_name") or "")
         clog(f"creds: name='{creds.get('first_name')}' login='{login}'")
-        log(slot_id, f"[creds] Taskly issued target username: '{login}'")
+        log(slot_id, f"[creds] PayGo issued target username: '{login}'")
 
         # -- Browser (launch ONCE; reused across pool-account retries) --------
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
@@ -632,8 +632,27 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             runner.email = pool_acc.get("email")
             runner.new_password = creds.get("password")
 
+            # Early dead-session purge (2026-10-04: the pool holds corpses
+            # whose cookies pass the claim check but whose browser session is
+            # already dropped — each burned 2 password tries + a 2FA attempt
+            # before dying, all logged as reason=unknown). Fail fast here:
+            # purge + cancel the unused TG task instead.
+            try:
+                _pw_alive = _browser_logged_in(runner._ig_tab())
+            except Exception:
+                _pw_alive = True
+            if not _pw_alive:
+                _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                    "browser session dead before password change")
+                pool_acc = None
+                try:
+                    bot.cancel_task()
+                except Exception:
+                    pass
+                raise RuntimeError("Pooled IG session dead before password change — purged, retrying with next account")
+
             # (1) PASSWORD FIRST — authenticate Accounts Center via the account's
-            #     stored mail.td email OTP. This changes the password to Taskly's
+            #     stored mail.td email OTP. This changes the password to PayGo's
             #     task password AND elevates the session trust so subsequent
             #     email linking and 2FA open cleanly without challenge.
             cur_pw = pool_acc.get("password") or runner.password
@@ -662,40 +681,26 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                     emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                                 "detail": f"Password change failed (reason={why}) — continuing"})
 
-            # (2) EMAIL LINK SECOND — the bot issues the account email and its
-            #     confirmation code (the "📥 Get code" key). The email MUST be
-            #     linked before the 2FA step: without the bot's email code the
-            #     2FA submit cannot be issued. This is the bot's own process.
-            bot_em = (runner.tg_creds or {}).get("email")
-            if bot_em:
-                log(slot_id, f"[✉️] Linking bot-issued email {bot_em} via 📥 Get code…")
-                try:
-                    linked = runner.ig_link_email_to_instagram(
-                        bot_em, code_fetcher=lambda: bot.request_email_code(timeout=45))
-                except IGDeadEnd as exc:
-                    linked = False
-                    log(slot_id, f"[⚠️] Bot email rejected ({exc}) — continuing to 2FA.")
-                except Exception as exc:
-                    _em = str(exc)
-                    # "This email is already linked" (or any already-linked /
-                    # confirmed message) is NOT fatal: once the bot's OTP has been
-                    # used to confirm the email, just move on to 2FA.
-                    if "already" in _em.lower() or "linked" in _em.lower():
-                        log(slot_id, f"[✉️] Email already linked ({_em[:80]}) — ignoring, continuing to 2FA.")
-                    else:
-                        log(slot_id, f"[⚠️] Bot email linkage error ({_em[:120]}) — continuing.")
-                    linked = False
-                log(slot_id, f"[✉️] Bot email linkage result: {linked} (continuing to 2FA)")
+            # (2) EMAIL LINK SKIPPED (OPT variant) — PayGo accepted the
+            #     registration with linkage False (2x live Submitted), while
+            #     this step burns ~60s on an "already in use" modal + a 45s
+            #     Get-code wait for a code that never arrives. The bot-state
+            #     advance is NOT lost: submit_2fa_key clicks a lingering
+            #     Get-code key before submitting the 2FA key (see its log).
+            log(slot_id, "[✉️] OPT: email_link skipped (bot accepts without it) — continuing to 2FA")
 
-            # (3) 2FA THIRD — setup + submit the key so the bot issues the one-time
-            #     code, then confirm it on IG. The bot is directly waiting for the
-            #     2FA key since Get code was consumed in step 2.
+            # (2) 2FA SECOND — setup + submit the key so the bot issues the one-time
+            #     code, then confirm it on IG. submit_2fa_key clicks a lingering
+            #     Get-code key first, so the bot is directly waiting for the key.
             if mail_tokens:
                 try:
                     preexisting_mail_ids.update(str(m.get("id")) for m in _mailtd_http_list(mail_tokens))
                 except Exception:
                     pass
-            runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids, bot=bot)
+            # OPT: email part is skipped, so no bot fallback — the bot email
+            # was never linked. Stored inbox + browser tab only (same as the
+            # password phase above).
+            runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
 
             emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                         "detail": f"2FA setup on pooled IG account ({login})…"})
@@ -705,7 +710,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                 # Genuine dead end (login wall / logged-out / checkpoint): REMOVE
                 # it from the pool so it is never re-claimed. The bot username is
                 # now taken by this account, so fail this cycle — the slot retries
-                # with a fresh Taskly task/login.
+                # with a fresh PayGo task/login.
                 _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
                 pool_acc = None
                 raise RuntimeError(f"IG dead end after rename ({exc})")
@@ -760,7 +765,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
         # -- Step: register confirm ------------------------------------------
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
-                    "detail": "Confirming Account Registered with TasklyBot…"})
+                    "detail": "Confirming Account Registered with PayGoBot…"})
         submitted = bot.mark_registered()
         if not submitted:
             log(slot_id, "register receipt not seen — one more tap…")
@@ -770,7 +775,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             # silently lost, and let the slot retry.
             store.restore_ig_creator_account(acc_id, rotate=True)
             pool_acc = None
-            raise RuntimeError("Taskly registration not confirmed — not recording Submitted")
+            raise RuntimeError("PayGo registration not confirmed — not recording Submitted")
 
         # Consume the account (do not double-spend).
         store.delete_record(acc_id)
@@ -784,15 +789,15 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
         from tg_stats import record_submission
         rec_id = f"tg_{int(time.time() * 1000)}"
-        # SEPARATE counter from the regular Taskly bot — the pool-2FA drain has
-        # its own number (tg_stats["taskly2fa"]) so it never inflates "taskly".
-        record_submission("taskly2fa")
+        # SEPARATE counter from the regular PayGo bot — the pool-2FA drain has
+        # its own number (tg_stats["paygo2faopt"]) so it never mixes with "paygo2fa".
+        record_submission("paygo2faopt")
         emit_event({"type": "account_submitted", "pipeline": "telegram",
                     "tg_account": tg_acct["id"], "tg_bot": bot_id,
                     "account_id": rec_id})
         emit_event({"type": "account_deleted", "account_id": acc_id})
         emit_event({"type": "accounts_updated"})
-        log(slot_id, f"🎉 [SUBMITTED] Registration confirmed (+ $0.018) -> record {rec_id} for user '{login}'")
+        log(slot_id, f"🎉 [SUBMITTED] Registration confirmed (+ $0.022) -> record {rec_id} for user '{login}'")
         ok = True
         return True, rec_id
 
@@ -890,14 +895,14 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser(description="One-shot Taskly 2FA pool-drain cycle")
-    ap.add_argument("--slot", type=int, default=93)
+    ap = argparse.ArgumentParser(description="One-shot PayGo 2FA pool-drain cycle")
+    ap.add_argument("--slot", type=int, default=95)
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--captcha", default="extension", choices=("extension", "audio"))
-    ap.add_argument("--task", default=POOL_TASK, help='task alias (default "Taskly 2FA")')
-    ap.add_argument("--bot", default="taskly", help="bot id (taskly)")
+    ap.add_argument("--task", default=POOL_TASK, help='task alias (default "PayGo 2FA Optimized")')
+    ap.add_argument("--bot", default="paygo", help="bot id (paygo)")
     args = ap.parse_args()
-    ok, detail = run_pool_2fa_cycle_once(
+    ok, detail = run_paygo_pool_2fa_opt_cycle_once(
         slot_id=args.slot, is_headless=args.headless,
         captcha_mode=args.captcha, tg_task=args.task, tg_bot=args.bot)
     print("RESULT:", ok, detail)

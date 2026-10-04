@@ -160,7 +160,8 @@ def run_native_cycle_once(slot_id=92, worker_factory=None, is_headless=False,
         except Exception:
             pass
         if not bot.choose_task(task):
-            raise RuntimeError(f"Could not select {task} in {bot_id}")
+            _v = getattr(bot, "last_task_verdict", None) or "hidden"
+            raise RuntimeError(f"Could not select {task} in {bot_id} [task_unavailable:{_v}]")
         creds = bot.start_task() or {}
         t0 = time.monotonic()  # bot TTL anchor: counts from task Start
         login = _clean_username(creds.get("login") or "")

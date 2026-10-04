@@ -1,4 +1,4 @@
-/* nova-paygopool.js — "PayGo Pool" panel (POOL DRAIN mode).
+/* nova-paygopool.js — "PayGo Cookie" panel (POOL DRAIN mode).
  *
  * A NEW, self-contained page that runs PayGoBot's "📱 Create Inst (Cookies)"
  * task the POOL-DRAIN way: it reuses a PRE-CREATED Instagram account from the
@@ -71,7 +71,7 @@
         '<div class="page-title-row" style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">' +
           '<div>' +
             '<h2 style="margin:0;display:flex;align-items:center;gap:.5rem;">' +
-              '<img src="img/bot_logo/paygo.png" width="28" height="28" alt="PayGo" style="border-radius:8px;object-fit:cover;box-shadow:0 0 0 1px rgba(255,255,255,.1);"> PayGo Pool' +
+              '<img src="img/bot_logo/paygo.png" width="28" height="28" alt="PayGo" style="border-radius:8px;object-fit:cover;box-shadow:0 0 0 1px rgba(255,255,255,.1);"> PayGo Cookie' +
               '<span class="nav-pill nav-pill--tool" style="background:rgba(245,158,11,.15);color:#fbbf24;">POOL DRAIN</span>' +
             '</h2>' +
             '<p style="margin:.35rem 0 0;">Runs PayGo <strong>📱 Create Inst (Cookies)</strong> from the ' +
@@ -88,7 +88,7 @@
       /* ---- KPIs ---- */
       '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">' +
         statCard('IG CREATOR POOL', 'pgp-kpi-pool', 'available accounts ready to drain', '#a5b4fc') +
-        statCard('SUBMITTED (PayGo Pool)', 'pgp-kpi-submitted', 'cookie task accepted', '#4ade80') +
+        statCard('SUBMITTED (PayGo Cookie)', 'pgp-kpi-submitted', 'cookie task accepted', '#4ade80') +
         statCard('PARALLEL SLOTS', 'pgp-kpi-conc', 'concurrent creators', '#38bdf8') +
         statCard('ENGINE', 'pgp-kpi-status', 'idle', '#f59e0b') +
       '</div>' +
@@ -264,7 +264,7 @@
         append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
                ', ' + (state.headless ? 'headless' : 'visible') + ')');
-        post('/api/tg/start', {
+        var _doPost = function () { post('/api/tg/start', {
           concurrency: conc,
           target: target,
           headless: state.headless,
@@ -273,7 +273,12 @@
           tg_bot: BOT_ID,
           add_email: false,
           use_ig_pool: true
-        });
+        }); };
+        if (typeof window.__tgTaskCheck === 'function') {
+          window.__tgTaskCheck(BOT_ID, TASK, append).then(function (pre) {
+            if (pre.proceed) _doPost(); else if (btn) btn.disabled = false;
+          });
+        } else _doPost();
       })
       .catch(function (e) { if (btn) btn.disabled = false; toast('Could not verify the pool: ' + e, 'error', 12000); });
   }
@@ -292,9 +297,14 @@
 
     cfg = cfg || {};
     var activeBot = cfg.tg_bot ? String(cfg.tg_bot).toLowerCase() : null;
-    var isMine = !!(running && activeBot === BOT_ID && cfg.use_ig_pool);
+    var cfgTask = String(cfg.tg_task || '');
+    // The NEW "PayGo 2FA" pool shares tg_bot='paygo' + use_ig_pool — it is a
+    // DIFFERENT task, so it must not light this page up (and vice versa).
+    var isMine = !!(running && activeBot === BOT_ID && cfg.use_ig_pool
+                    && !/paygo\s*2fa/i.test(cfgTask));
     var isOther = !!(running && activeBot && !isMine);
-    var otherName = activeBot === 'fastpay' ? 'FastPay' : activeBot === 'taskly' ? 'Taskly' : (activeBot || '');
+    var otherName = activeBot === 'fastpay' ? 'FastPay' : activeBot === 'taskly' ? 'Taskly'
+      : activeBot === 'paygo' ? (/paygo\s*2fa/i.test(cfgTask) ? 'PayGo 2FA' : 'PayGo') : (activeBot || '');
 
     var badge = $('pgp-badge'), title = $('pgp-title'), sub = $('pgp-sub');
     var startBtn = $('pgp-start'), stopBtn = $('pgp-stop');
@@ -311,7 +321,7 @@
     }
     if (sub) {
       sub.textContent = isMine
-        ? ('PayGo Pool · parallel ' + (cfg.concurrency || '-') + ' · ' + (cfg.headless ? 'headless' : 'visible'))
+        ? ('PayGo Cookie · parallel ' + (cfg.concurrency || '-') + ' · ' + (cfg.headless ? 'headless' : 'visible'))
         : isOther
           ? ('⚡ ' + otherName + ' is running (one engine at a time). Stop it from its own page.')
           : 'Ready. Reuses pooled IG accounts — no Meta.';
@@ -471,7 +481,11 @@
     if (tick) clearInterval(tick);
     tick = setInterval(tickTimer, 1000);
     try {
-      if (!window.__pgpEs) {
+      // Shared SSE hub (nova-core.js): one stream per page.
+      if (!window.__pgpEsShared && typeof window.__novaEsSubscribe === 'function') {
+        window.__pgpEsShared = true;
+        window.__novaEsSubscribe(handleEvent);
+      } else if (!window.__pgpEs && typeof window.__novaEsSubscribe !== 'function') {
         window.__pgpEs = new EventSource('/api/meta-insta/events');
         window.__pgpEs.onmessage = function (ev) {
           try {

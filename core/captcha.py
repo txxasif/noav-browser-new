@@ -329,9 +329,9 @@ class CaptchaMixin:
                     if not self._extension_available():
                         continue
                     try:
-                        _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "20") or 20)
+                        _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "60") or 60)
                     except Exception:
-                        _vt = 20.0
+                        _vt = 60.0
                     if self._wait_for_extension_solve(page, timeout=_vt):
                         return True
                     if "audio" in self._captcha_order():
@@ -356,9 +356,15 @@ class CaptchaMixin:
     def _solve_image_captcha(self, page, max_attempts: int = 3) -> bool:
         """OCR Instagram/Meta 'enter the code from the image' captcha with RapidOCR."""
         try:
+            if not page.get_by_text("Enter the code from the image", exact=False).is_visible():
+                return False
+        except Exception:
+            return False
+        try:
             ocr_engine = self._ensure_ocr()
         except Exception as exc:
-            self.log(f'[⚠️] OCR engine unavailable: {exc}')
+            if os.environ.get("META_DEBUG"):
+                self.log(f'[debug] OCR engine unavailable: {exc}')
             return False
 
         for attempt in range(max_attempts):

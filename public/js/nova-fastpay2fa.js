@@ -227,7 +227,7 @@
         append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
                ', ' + (state.headless ? 'headless' : 'visible') + ')');
-        post('/api/tg/start', {
+        var _doPost = function () { post('/api/tg/start', {
           concurrency: conc,
           target: target,
           headless: state.headless,
@@ -236,7 +236,12 @@
           tg_bot: 'fastpay',
           add_email: false,
           use_ig_pool: true
-        });
+        }); };
+        if (typeof window.__tgTaskCheck === 'function') {
+          window.__tgTaskCheck('fastpay', 'FastPay 2FA', append).then(function (pre) {
+            if (pre.proceed) _doPost(); else if (btn) btn.disabled = false;
+          });
+        } else _doPost();
       })
       .catch(function (e) { if (btn) btn.disabled = false; toast('Could not verify the pool: ' + e, 'error', 12000); });
   }
@@ -367,7 +372,11 @@
     if (tick) clearInterval(tick);
     tick = setInterval(tickTimer, 1000);
     try {
-      if (!window.__fp2faEs) {
+      // Shared SSE hub (nova-core.js): one stream per page.
+      if (!window.__fp2faEsShared && typeof window.__novaEsSubscribe === 'function') {
+        window.__fp2faEsShared = true;
+        window.__novaEsSubscribe(handleEvent);
+      } else if (!window.__fp2faEs && typeof window.__novaEsSubscribe !== 'function') {
         window.__fp2faEs = new EventSource('/api/meta-insta/events');
         window.__fp2faEs.onmessage = function (ev) {
           try {

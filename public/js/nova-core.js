@@ -93,6 +93,8 @@ function initThemeNav() {
     'view-tg-taskly2fa': '#/taskly2fa',
     'view-tg-fastpay2fa': '#/fastpay2fa',
     'view-tg-paygopool': '#/paygopool',
+    'view-tg-paygo2fa': '#/paygo2fa',
+    'view-tg-paygo2faopt': '#/paygo2faopt',
   };
 
   function routeForItem(item) {
@@ -210,6 +212,34 @@ document.addEventListener('DOMContentLoaded', () => {
   initThemeNav();
   initModalDismiss();
 
+  fetch('/api/build-mode')
+    .then(r => r.json())
+    .then(data => {
+      if (data && data.meta_only) {
+        document.body.classList.add('meta-only-mode');
+        if (window.location.hash !== '#/meta') {
+          window.location.replace('#/meta');
+        }
+      } else if (data && Array.isArray(data.modules)) {
+        const mods = data.modules;
+        if (!mods.includes('ig')) {
+          const igTab = document.querySelector('button[data-view="view-ig-creator"]');
+          if (igTab) igTab.style.display = 'none';
+        }
+        if (!mods.includes('tg')) {
+          const tgToggle = document.getElementById('nav-tg-toggle');
+          const tgSub = document.getElementById('tg-submenu');
+          const tgmTab = document.querySelector('button[data-view="view-tg-manager"]');
+          const guideTab = document.querySelector('button[data-view="view-guide"]');
+          if (tgToggle) tgToggle.style.display = 'none';
+          if (tgSub) tgSub.style.display = 'none';
+          if (tgmTab) tgmTab.style.display = 'none';
+          if (guideTab) guideTab.style.display = 'none';
+        }
+      }
+    })
+    .catch(() => {});
+
   if (typeof initMetaInsta === 'function') {
     try {
       initMetaInsta();
@@ -218,3 +248,77 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 });
+
+/* Shared TG task-availability preflight: asks GET /api/tg/task-availability
+   (single-lease probe, never presses Start). Resolves {proceed, probe}.
+   Fail-OPEN: hidden/busy/error probes proceed — a single-account "hidden"
+   is flaky (slow menu, stale lease) and the server gate + the mid-run
+   all-slots gate still decide. Only soldout/unoffered/flood refuse here.
+   `say` logs lines into the panel log. */
+window.__tgTaskCheck = function (bot, task, say) {
+  say = (typeof say === 'function') ? say : function () {};
+  var ctrl = null, timer = null;
+  try {
+    if (typeof AbortController !== 'undefined') {
+      ctrl = new AbortController();
+      timer = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, 85000);
+    }
+  } catch (e) {}
+  var opts = { cache: 'no-store' };
+  if (ctrl) opts.signal = ctrl.signal;
+  say('> availability probe: ' + bot + ' / ' + task + ' ...');
+  return fetch('/api/tg/task-availability?bot=' + encodeURIComponent(bot || '') + '&task=' + encodeURIComponent(task || ''), opts)
+    .then(function (r) { return r.json(); })
+    .then(function (j) {
+      if (timer) clearTimeout(timer);
+      if (j && j.ok && j.available === false && (j.reason || 'hidden') !== 'hidden') {
+        say('! task unavailable (' + (j.reason || 'hidden') + ') — start refused');
+        return { proceed: false, probe: j };
+      }
+      if (j && j.ok && j.available === false) say('< probe says hidden on one account — proceeding (fleet gate decides)');
+      else if (j && j.ok) say('< task available (' + (j.reason || 'ok') + ')');
+      else say('< probe inconclusive — proceeding (server gate decides)');
+      return { proceed: true, probe: j };
+    })
+    .catch(function (e) {
+      if (timer) clearTimeout(timer);
+      say('< probe inconclusive (' + e + ') — proceeding');
+      return { proceed: true, probe: null };
+    });
+};
+
+/* Shared SSE hub: exactly ONE EventSource per page. Each panel script used to
+   open its own stream (7 total), exceeding Chrome's 6-connections-per-host
+   limit and starving every fetch/XHR — all status/reasons/logs/activate calls
+   sat at "(pending)" with 0 bytes. Panels subscribe their single-event
+   handler here; batch envelopes are unwrapped centrally. */
+(function () {
+  var subs = [];
+  var es = null;
+  function ensure() {
+    if (es && es.readyState !== 2) return es; // 2 = CLOSED; otherwise reuse
+    try { if (es) es.close(); } catch (e) {}
+    es = new EventSource('/api/meta-insta/events');
+    es.onmessage = function (ev) {
+      var d = null;
+      try { d = JSON.parse(ev.data); } catch (e) { return; }
+      var items = (d && d.type === 'batch' && Array.isArray(d.items)) ? d.items : [d];
+      for (var i = 0; i < subs.length; i++) {
+        for (var j = 0; j < items.length; j++) {
+          try { subs[i](items[j]); } catch (e) {}
+        }
+      }
+    };
+    es.onerror = function () {}; // silent like the panels were; browser auto-retries
+    return es;
+  }
+  window.__novaEsSubscribe = function (fn) {
+    if (typeof fn !== 'function') return function () {};
+    subs.push(fn);
+    try { ensure(); } catch (e) {}
+    return function () {
+      var k = subs.indexOf(fn);
+      if (k !== -1) subs.splice(k, 1);
+    };
+  };
+})();

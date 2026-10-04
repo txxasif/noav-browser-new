@@ -65,7 +65,11 @@ class IgAcNavMixin:
                 if self._ac_in_section(cur_path, clean_path):
                     return True
 
-            labels = [label]
+            try:
+                self._ac_leave_subpage(p)
+            except Exception:
+                pass
+
             if "password" in (section_path + label).lower():
                 # NEW AC home label is "Login and security" (the old "Password
                 # and security" only exists one level deeper). Try it FIRST so
@@ -81,6 +85,8 @@ class IgAcNavMixin:
                 # "Contact info" row then opens the contact_points dialog.
                 labels = ["Profiles and personal details", "Personal details",
                           "Contact info", "Contact details", "Profiles"]
+            else:
+                labels = [label]
             for lbl in labels:
                 for sel in (
                     f'a[href*="{clean_path}"]',
@@ -95,10 +101,14 @@ class IgAcNavMixin:
                         if el.count() > 0 and el.is_visible():
                             self._tap_or_click(p, el)
                             p.wait_for_timeout(1200)
-                            return True
+                            cur_path = (p.url or "").split("?")[0].rstrip("/")
+                            if self._ac_in_section(cur_path, clean_path):
+                                return True
                     except Exception:
                         pass
-            return True
+            cur_path = (p.url or "").split("?")[0].rstrip("/")
+            if self._ac_in_section(cur_path, clean_path):
+                return True
 
         self.log('[ac] Navigating to Accounts Center via in-app UI clicks (no URL jumps)…')
         self._dismiss_ig_sheets(p)
@@ -150,46 +160,92 @@ class IgAcNavMixin:
         # If not already on settings and not in Accounts Center:
         if "/accounts/settings" not in cur_url and "accountscenter.instagram.com" not in cur_url:
             user = getattr(self, "ig_username", None) or getattr(self, "username", None)
-            is_on_profile = bool(user and f"/{user}/" in cur_url)
+            # The stored username is often STALE (a pooled account is renamed by
+            # the drain; verified live via MCP 2026-10-03 the store said
+            # "santiago.weber1020" while IG served "monica5peseira4613"). Read the
+            # REAL username from the BOTTOM TAB BAR: the bar is the closest
+            # ancestor of the Explore tab that also holds the Messages tab, and its
+            # LAST link is the Profile tab. A generic `a[...*="profile picture"]`
+            # selector is WRONG — the feed renders dozens of them.
+            _prof_href = self._ig_profile_tab_href(p)
+            if not user and _prof_href:
+                user = _prof_href.strip('/')
+
+            def _profile_ready() -> bool:
+                """True when the PROFILE screen is up (Options gear / settings link).
+
+                Deliberately does NOT require ``self.ig_username``: a pooled
+                account's stored username goes stale the moment the drain renames
+                it (verified live 2026-10-03 — the store said ``santiago.weber1020``
+                while IG served a different username entirely), so a URL match on
+                the stored name NEVER succeeds and every tap looked like "did not
+                navigate" → the 3×5×1s retry grind that made AC entry ~24s.
+                """
+                try:
+                    if p.locator('a[href*="/accounts/settings/"], svg[aria-label="Options"], [aria-label="Options"]').count() > 0:
+                        return True
+                except Exception:
+                    pass
+                u = p.url or ""
+                if user and f"/{user}" in u:
+                    return True
+                try:
+                    import re as _re
+                    return bool(_re.match(r"^https?://www\.instagram\.com/[A-Za-z0-9._]+/?$", u))
+                except Exception:
+                    return False
+
+            is_on_profile = _profile_ready()
 
             # Step 1: Tap Profile icon in bottom navigation bar.
-            # The feed ("Suggested for you") has no gear/AC links, so a
-            # missed single tap strands the whole flow here. Retry the tap
-            # (fresh locators — SPA staleness) and VERIFY the URL moved to
-            # /{user}/ before continuing.
+            # The feed ("Suggested for you") has no gear/AC links, so a missed
+            # single tap strands the whole flow here. Dismiss any overlay FIRST
+            # (the cookie-injected "Save your login info" sheet sits exactly on the
+            # profile icon), then tap and verify with a FAST poll.
             if not is_on_profile:
                 self.log('[ac] Step 1: Tapping Profile icon in bottom navigation bar…')
                 self._human_pause()
                 prof_selectors = []
                 if user:
-                    prof_selectors.extend([f'a[href*="/{user}/"]', f'a[href="/{user}/"]'])
+                    # The EXACT bottom-nav profile link. Taken `.last` at click
+                    # time — the tab bar renders AFTER the feed, so the nav link is
+                    # the last element with this href; a `.first` match can land on
+                    # a FEED account and open a visitor view (the Block/Restrict
+                    # dead-end observed live via MCP 2026-10-03).
+                    prof_selectors.append(f'a[href="/{user}/"]')
                 prof_selectors.extend([
-                    '[aria-label="Profile"]',
-                    'a[role="link"]:has(img[alt*="profile picture" i])',
+                    '[aria-label="Profile"]',   # older/desktop layouts
                     'a:has([aria-label="Profile"])',
-                    'nav a:last-child',
-                    'footer a:last-child',
                 ])
                 navigated = False
                 for _tap in range(3):
+                    # Clear overlays BEFORE every tap — the save-login sheet is
+                    # the #1 cause of "profile tap did not navigate".
+                    try:
+                        self._dismiss_ig_sheets(p)
+                    except Exception:
+                        pass
                     for sel in prof_selectors:
                         try:
-                            el = p.locator(sel).first
+                            loc = p.locator(sel)
+                            # `.last` — the bottom tab bar renders after the feed,
+                            # so the nav profile link is the LAST match; `.first`
+                            # can hit a feed account → visitor view → dead end.
+                            el = loc.last if loc.count() > 1 else loc.first
                             if el.count() > 0 and el.is_visible():
                                 self._tap_or_click(p, el)
                                 break
                         except Exception:
                             pass
-                    for _ in range(5):
-                        p.wait_for_timeout(1000)
+                    for _ in range(8):
+                        p.wait_for_timeout(400)
                         cur_url = p.url or ""
                         # FAST bail: a login wall / chooser is terminal — quit
                         # now, do not grind the retries.
                         if self._walled_or_chooser(p):
                             raise IGDeadEnd(
                                 "IG login wall/chooser during AC nav (fast dead end)")
-                        if (user and f"/{user}" in cur_url) or p.locator(
-                                'a[href*="/accounts/settings/"], svg[aria-label="Options"], [aria-label="Options"]').count() > 0:
+                        if _profile_ready():
                             navigated = True
                             break
                     if navigated:
@@ -199,25 +255,61 @@ class IgAcNavMixin:
                         self._dismiss_ig_sheets(p)
                     except Exception:
                         pass
-                if not navigated and user:
-                    # Last resort: same-origin profile URL (low bot-score risk;
-                    # direct ACENTER jumps are the dangerous ones, not IG pages).
-                    self.log(f'[ac] Step 1: taps failed — last-resort goto profile /{user}/…')
-                    try:
-                        p.goto(f"https://www.instagram.com/{user}/", wait_until="domcontentloaded", timeout=30000)
-                        p.wait_for_timeout(3000)
-                    except Exception as exc:
-                        self.log(f'[ac] Step 1 fallback note: {exc}')
-                    # The fallback can land on a logged-out visitor view with a
-                    # stray action sheet open (observed 2026-09-19: Block /
-                    # Restrict / Cancel sheet) — clear it or bail immediately.
-                    if self._walled_or_chooser(p):
-                        raise IGDeadEnd(
-                            "IG visitor view on profile fallback — account is logged out (fast dead end)")
+                if not navigated:
+                    # NO arbitrary profile-URL jump. The old `goto(/{user}/)`
+                    # used the STORED username, so when the store was stale it
+                    # landed on a non-existent profile — "Sorry, this page isn't
+                    # available." (observed live 2026-10-03: /mateo…/). Click the
+                    # EXACT bottom-nav profile link instead; re-read its live href
+                    # (never the stored name) if it isn't already known.
+                    self.log('[ac] Step 1: taps failed — clicking the profile tab by its live href (no URL jump)…')
+                    live = _prof_href or self._ig_profile_tab_href(p)
+                    if live:
+                        try:
+                            loc = p.locator(f'a[href="{live}"]')
+                            el = loc.last if loc.count() > 1 else loc.first
+                            if el.count() > 0 and el.is_visible():
+                                self._tap_or_click(p, el)
+                                p.wait_for_timeout(2500)
+                        except Exception as exc:
+                            self.log(f'[ac] Step 1 profile-tab note: {exc}')
                     try:
                         self._dismiss_ig_sheets(p)
                     except Exception:
                         pass
+
+                # "Sorry, this page isn't available." / removed profile — click
+                # "Go back to Instagram." or Home, then the profile tab again.
+                try:
+                    _b = (p.inner_text("body") or "").lower()
+                    if ("page isn't available" in _b or "page may have been removed" in _b
+                            or "the link you followed may be broken" in _b):
+                        self.log('[ac] Step 1: landed on "Sorry, this page isn\'t available" — clicking "Go back to Instagram"…')
+                        for _hs in ('a:has-text("Go back to Instagram")',
+                                    'button:has-text("Go back to Instagram")',
+                                    'text="Go back to Instagram."',
+                                    'a[href="/"]',
+                                    'a[aria-label="Home"]',
+                                    'svg[aria-label="Home"]'):
+                            try:
+                                _h = p.locator(_hs).first
+                                if _h.count() > 0 and _h.is_visible():
+                                    self._tap_or_click(p, _h)
+                                    self.log(f'[ac] Clicked {_hs} to return to feed.')
+                                    break
+                            except Exception:
+                                continue
+                        p.wait_for_timeout(2500)
+                        self._dismiss_ig_sheets(p)
+                        _live2 = self._ig_profile_tab_href(p)
+                        if _live2:
+                            loc = p.locator(f'a[href="{_live2}"]')
+                            el = loc.last if loc.count() > 1 else loc.first
+                            if el.count() > 0 and el.is_visible():
+                                self._tap_or_click(p, el)
+                                p.wait_for_timeout(2500)
+                except Exception:
+                    pass
 
                 # Wait up to 10s for Profile page to load (recovering from "Something went wrong" if present)
                 for _ in range(10):
@@ -599,6 +691,10 @@ class IgAcNavMixin:
         cur = (p.url or "").split("?")[0].rstrip("/")
         if "contact_points" in cur:
             return True
+        if "accountscenter.instagram.com" not in (p.url or ""):
+            self._ac_navigate_in_app(p, section_path="/profiles/", label="Profiles and personal details")
+            p = self._ig_tab()
+            cur = (p.url or "").split("?")[0].rstrip("/")
         # 0. Return to the AC home list FIRST. After the password change the
         # page sits on /password_and_security/ (and 2FA on /two_factor/), which
         # has NO account_overview/profile-card link — clicking the card there
@@ -834,6 +930,94 @@ class IgAcNavMixin:
             return False
         return any(m in t for m in self._HUMAN_CONFIRM_MARKERS)
 
+    def _ig_profile_tab_href(self, p):
+        """The bottom tab bar's Profile link href (e.g. ``/monica…/``), or None.
+
+        The bar is the closest ancestor of the Explore tab that ALSO holds the
+        Messages tab; its LAST link is the Profile tab. This is the only reliable
+        way to find the profile icon: the feed renders dozens of
+        ``a[aria-label*="profile picture"]`` links, and the stored username can be
+        STALE (verified live via MCP 2026-10-03 — store said ``santiago.weber1020``
+        while IG served ``monica5peseira4613``). Returns None when the bar is not
+        on screen (e.g. we are already on a settings/AC page).
+        """
+        try:
+            return p.evaluate("""() => {
+                const ex = document.querySelector('a[href="/explore/"]');
+                if (!ex) return null;
+                let el = ex;
+                for (let i = 0; i < 9 && el; i++) {
+                    if (el.querySelector('a[href="/direct/inbox/"]') && el.querySelector('a[href="/reels/"]')) {
+                        const links = Array.from(el.querySelectorAll('a'));
+                        const last = links[links.length - 1];
+                        const href = last ? (last.getAttribute('href') || '') : '';
+                        return (/^\\/[A-Za-z0-9._]+\\/?$/.test(href) && href !== '/') ? href : null;
+                    }
+                    el = el.parentElement;
+                }
+                return null;
+            }""")
+        except Exception:
+            return None
+
+    def _ac_warm_entry(self, section_path: str = "/password_and_security/",
+                       label: str = "Password and security") -> bool:
+        """Human-like entry into Accounts Center — the SMOOTH path.
+
+        A direct navigation to ``accountscenter.instagram.com`` is the single
+        strongest automation tell on the IG side: it arrives with no referer
+        chain and no dwell, whereas a real user goes Feed → Profile → Options →
+        Settings → Accounts Center over several seconds. This walks that same
+        path (via ``_ac_navigate_in_app``) after a short, human feed dwell.
+
+        Returns True when an Accounts Center tab was actually reached, so the
+        caller can fall back to a direct URL navigation only when the click path
+        cannot get there (a cookie-injected session occasionally has the profile
+        tap blocked by the "Save your login info" sheet).
+        """
+        p = self._ig_tab()
+        try:
+            if "instagram.com" not in (p.url or ""):
+                p.goto("https://www.instagram.com/", wait_until="domcontentloaded",
+                       timeout=45000)
+                p.wait_for_timeout(2500)
+        except Exception:
+            pass
+        # Dwell + one small scroll on the feed: nobody jumps into settings the
+        # instant the page paints. Uses the same randomized pacing as the rest
+        # of the flow so the timing profile is consistent, not fixed.
+        try:
+            self._human_pause(0.6, 1.8)
+            p.mouse.wheel(0, 420)
+            self._human_pause(0.4, 1.2)
+        except Exception:
+            pass
+        try:
+            self._ac_navigate_in_app(p, section_path=section_path, label=label)
+        except IGDeadEnd as exc:
+            # A dead-end during the natural walk (a cookie-injected session can
+            # still hit the visitor wall on the way) is NOT fatal here: return
+            # False so the caller falls back to the direct AC navigation, which
+            # is known to work for these sessions.
+            try:
+                self.log(f"[ac] warm entry dead-end ({exc}) — falling back to direct AC.")
+            except Exception:
+                pass
+            return False
+        except Exception as exc:
+            try:
+                self.log(f"[ac] warm entry note: {exc}")
+            except Exception:
+                pass
+        try:
+            for page in self.w.context.pages:
+                if not page.is_closed() and "accountscenter.instagram.com" in (page.url or ""):
+                    self.insta_page = page
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _ac_section(self, section_path: str = "/password_and_security/", label: str = "Password and security"):
         """Open Accounts Center reliably and navigate to a target section strictly via in-app UI clicks (no jumping)."""
         p = self._ig_tab()
@@ -1017,16 +1201,17 @@ class IgAcNavMixin:
                             getattr(self, "_dismiss_contact_modal", lambda *a: None)(p)
                         except Exception:
                             pass
-                    labels = [label]
                     if "password" in (section_path + label).lower():
-                        labels.extend(["Login and security", "Password and security"])
+                        labels = ["Login and security", "Password and security"]
                     elif "two_factor" in section_path.lower():
-                        labels.extend(["Two-factor authentication", "Password and security", "Login and security"])
+                        labels = ["Two-factor authentication", "Login and security", "Password and security"]
                     elif "profiles" in section_path.lower():
-                        labels.extend(["Profiles"])
+                        labels = ["Profiles"]
                     elif "contact_points" in (section_path + label).lower() or "personal" in (section_path + label).lower():
-                        labels.extend(["Profiles and personal details", "Personal details",
-                                       "Contact info", "Contact details", "Profiles"])
+                        labels = ["Profiles and personal details", "Personal details",
+                                  "Contact info", "Contact details", "Profiles"]
+                    else:
+                        labels = [label]
                     for _nav in range(2):
                         for lbl in labels:
                             for sel in (
@@ -1059,17 +1244,16 @@ class IgAcNavMixin:
                                 break
                         if reached:
                             break
-                        self.log(f'[ac] Section tap {_nav + 1}/2 missed "{clean_path}" (still at {cur_path[:80]}) — attempting direct navigation…')
+                        self.log(f'[ac] Section tap {_nav + 1}/2 missed "{clean_path}" (still at {cur_path[:80]}) — recovering subpage/dialogs…')
                         try:
-                            # Direct URL navigation bypasses nested subpages / stalled root lists
-                            p.goto(f"https://accountscenter.instagram.com/{clean_path}/", wait_until="domcontentloaded", timeout=15000)
-                            p.wait_for_timeout(1500)
-                            cur_path = (p.url or "").split("?")[0].rstrip("/")
-                            if self._ac_in_section(cur_path, clean_path):
-                                reached = True
-                                break
+                            getattr(self, "_dismiss_contact_modal", lambda *a: None)(p)
                         except Exception:
                             pass
+                        try:
+                            self._ac_leave_subpage(p)
+                        except Exception:
+                            pass
+                        p.wait_for_timeout(1000)
                         # Live 2026-09-19: AC root can render "content no longer
                         # available" — re-tapping the same dead DOM never works.
                         # Recover the transient screen before the next tap.

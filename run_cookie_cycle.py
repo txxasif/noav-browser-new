@@ -248,6 +248,13 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
     bot_id = str(tg_bot or "paygo")
     task = tg_task or COOKIE_TASK
 
+    # Reclaim submittals abandoned by an abrupt stop BEFORE the pool-empty
+    # gate — otherwise stuck claims make the pool look empty and the drain
+    # stops for good.
+    try:
+        store.recover_stale_submitting()
+    except Exception:
+        pass
     avail = store.count_ig_creator_accounts()
     if avail <= 0:
         log(slot_id, "[pool] No available IG Creator accounts in pool to drain.")
@@ -312,6 +319,17 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         if not ok_boot:
             raise RuntimeError(f"bot boot: {msg_boot}")
 
+        # Fresh-lease orphan clear (preempt victim): the killed engine's task
+        # is still live on this chat — Cancel it ONCE so choose_task starts
+        # from a clean menu instead of spinning hidden (2026-10-04: 5/6 slots
+        # stuck while guards protected the corpses).
+        try:
+            _clear = getattr(bot, "clear_orphan_task", None)
+            if callable(_clear):
+                _clear()
+        except Exception:
+            pass
+
         lease_stop = threading.Event()
         lid = tg_acct["id"]
 
@@ -369,8 +387,9 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             except Exception:
                 pass
             if recent_err:
-                raise RuntimeError(f"PayGo hourly limit reached: {recent_err}")
-            raise RuntimeError(f"Could not select {task} in {bot_id}")
+                raise RuntimeError(f"PayGo hourly limit reached: {recent_err} [task_unavailable:soldout]")
+            _v = getattr(bot, "last_task_verdict", None) or "hidden"
+            raise RuntimeError(f"Could not select {task} in {bot_id} [task_unavailable:{_v}]")
 
         log(slot_id, f"[task] Selected '{task}' on {bot_id} (TG {tg_acct['id']})")
         creds = bot.start_task() or {}
@@ -737,10 +756,11 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
         threading.Thread(target=_beat, daemon=True).start()
 
         if not bot.choose_task(task):
-            raise RuntimeError(f"Could not select {task} in {bot_id}")
+            _v = getattr(bot, "last_task_verdict", None) or "hidden"
+            raise RuntimeError(f"Could not select {task} in {bot_id} [task_unavailable:{_v}]")
         creds = bot.start_task() or {}
         if creds.get("error") == "limit_reached":
-            raise RuntimeError(f"PayGo hourly limit reached: {creds.get('detail', '')}")
+            raise RuntimeError(f"PayGo hourly limit reached: {creds.get('detail', '')} [task_unavailable:soldout]")
         login = _clean_username(creds.get("login") or "")
         if not (login and _is_valid_ig_username(login) and creds.get("password")):
             raise RuntimeError(f"{bot_id} returned no usable credentials (got {creds})")

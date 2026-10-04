@@ -8,6 +8,7 @@
 
 const http = require('http');
 const ctx = require('./server/context');
+ctx.loadLocalEnv();
 const handleLicense = require('./server/routes-license');
 const handleUpdates = require('./server/routes-updates');
 const handleMeta = require('./server/routes-meta');

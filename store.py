@@ -275,6 +275,13 @@ def count_ig_creator_accounts() -> int:
 
 def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
     """Atomically claim the freshest IG creator account with valid cookies from the pool."""
+    # Self-heal FIRST: reclaim claims abandoned by an abruptly-killed cycle so an
+    # engine stop never permanently removes accounts from the pool. Cheap; the
+    # lock is taken inside recover_stale_submitting (not held here).
+    try:
+        recover_stale_submitting()
+    except Exception:
+        pass
     conn = db.get_connection()
     now = time.time()
     with _lock:
@@ -511,7 +518,17 @@ def is_account_unused(r: Dict[str, Any]) -> bool:
     return r.get("status") == "Created"
 
 def recover_stale_submitting(timeout: float = CLAIM_TIMEOUT) -> int:
-    """Reset records stuck in 'Submitting' back to 'Created'."""
+    """Reset records stuck in 'Submitting*' back to 'Created'.
+
+    Matches EVERY ``Submitting`` status prefix, not just the three hard-coded
+    ones. ``pop_ig_creator_account`` claims with ``Submitting_PayGo`` (and other
+    targets use their own suffixes); because that name was missing here, a pool
+    account whose cycle was killed abruptly (engine stop / crash — the handler
+    that would restore it never runs) stayed ``Submitting_PayGo`` FOREVER: not in
+    the pool, not consumed — a permanent leak (47 such records observed live
+    2026-10-03). A ``LIKE 'Submitting%'`` sweep cannot be forgotten again when a
+    new target is added.
+    """
     now = time.time()
     conn = db.get_connection()
     with _lock:
@@ -519,7 +536,7 @@ def recover_stale_submitting(timeout: float = CLAIM_TIMEOUT) -> int:
             cur = conn.execute(
                 """
                 SELECT id, attempts FROM accounts
-                WHERE status IN ('Submitting', 'Submitting_Nitro', 'Submitting_Coinsta')
+                WHERE status LIKE 'Submitting%'
                   AND (claimed_at IS NULL OR (? - claimed_at) > ?)
                 """,
                 (now, timeout)

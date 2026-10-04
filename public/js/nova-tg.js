@@ -154,7 +154,7 @@
     var swAdde = $('tg-adde-sw');
     var fieldAdde = $('tg-adde-field') || (swAdde ? swAdde.closest('.creator-field') : null);
 
-    // PayGo's pool drain now lives on its own "PayGo Pool" page (nova-paygopool.js).
+    // PayGo's cookie drain now lives on its own "PayGo Cookie" page (nova-paygopool.js).
     // The PayGo Bot page is a NORMAL bot panel (browser cookie creator), so the
     // pool radar / mode switcher / auto-mine are never shown here.
     if (radarBar) radarBar.style.display = 'none';
@@ -387,7 +387,7 @@
           '</button>' +
         '</div>' +
 
-        /* PayGo Pool Drain Container */
+        /* PayGo Cookie Drain Container */
         '<div id="tg-paygo-pool-container" style="display:none;margin-bottom:1rem;">' +
           '<div class="paygo-feature-card paygo-feature-automine" id="tg-paygo-card-automine" style="flex-direction:column;align-items:stretch;">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;gap:1.25rem;width:100%;">' +
@@ -581,7 +581,7 @@
                  ', ' + (state.cfg.headless ? 'headless' : 'visible') +
                  ', captcha=' + captchaChoice +
                  ', add_email=' + effAddEmail + ')');
-          post('/api/tg/start', {
+          var _doPost = function () { post('/api/tg/start', {
             concurrency: effConc,
             target: effTarget,
             headless: state.cfg.headless,
@@ -590,7 +590,12 @@
             tg_bot: bot,
             add_email: effAddEmail,
             use_ig_pool: isIgPool,
-          });
+          }); };
+          if (typeof window.__tgTaskCheck === 'function') {
+            window.__tgTaskCheck(bot, task, append).then(function (pre) {
+              if (pre.proceed) _doPost(); else if (btn) btn.disabled = false;
+            });
+          } else _doPost();
         }
       })
       .catch(function (e) {
@@ -912,7 +917,7 @@
     var isOtherBotRunning = running && activeBot && !isCurrentBotRunning;
     state.currentBotRunning = !!isCurrentBotRunning;
     var botName = bot === 'paygo' ? 'PayGo' : bot === 'fastpay' ? 'FastPay' : 'Taskly';
-    var activeBotName = activeBot === 'paygo' ? (engineCfg && engineCfg.use_ig_pool ? 'PayGo Pool' : 'PayGo')
+    var activeBotName = activeBot === 'paygo' ? (/paygo\s*2fa/i.test(_task) ? 'PayGo 2FA' : (engineCfg && engineCfg.use_ig_pool ? 'PayGo Cookie' : 'PayGo'))
       : activeBot === 'fastpay' ? (/fastpay\s*2fa|fastpay_pool/i.test(_task) ? 'FastPay 2FA' : 'FastPay')
       : (activeBot ? (/taskly\s*2fa|pool\s*2fa/i.test(_task) ? 'Taskly 2FA' : 'Taskly') : '');
     var isIgPool = (bot === 'paygo') && !!($('tg-igpool-sw') && $('tg-igpool-sw').checked);
@@ -1308,9 +1313,9 @@
     if (!d) return;
     if (d && (d.pipeline === 'meta' || d.engine === 'metainsta' || d.engine === 'meta' || d.engine === 'ig')) return;
     if (d && d.pipeline && d.pipeline !== 'telegram') return;
-    // Pool-drain routes have their OWN panels (Taskly 2FA / PayGo Pool /
-    // FastPay 2FA). Never let their lines bleed into the regular bot log.
-    if (d.route && (d.route === 'taskly2fa' || d.route === 'fastpay2fa' || d.route === 'paygo_pool')) return;
+    // Pool-drain routes have their OWN panels (Taskly 2FA / PayGo Cookie /
+    // FastPay 2FA / PayGo 2FA). Never let their lines bleed into the regular bot log.
+    if (d.route && (d.route === 'taskly2fa' || d.route === 'fastpay2fa' || d.route === 'paygo_pool' || d.route === 'paygo2fa')) return;
     if (d && d.type === 'throttle') {
       hideThrottleBanner();
       return;
@@ -1360,7 +1365,12 @@
     if (!root) return;
     shell(); setWindow(false); setAddEmail(true); mtWire(); mtLoadCreds(); refresh();
     try {
-      if (!window.__tgEs) {
+      // Shared SSE hub (nova-core.js): one stream per page. Falls back to a
+      // private stream only if the hub is unavailable (stale cached core).
+      if (!window.__tgEsShared && typeof window.__novaEsSubscribe === 'function') {
+        window.__tgEsShared = true;
+        window.__novaEsSubscribe(handleTgEvent);
+      } else if (!window.__tgEs && typeof window.__novaEsSubscribe !== 'function') {
         window.__tgEs = new EventSource('/api/meta-insta/events');
         window.__tgEs.onmessage = function (ev) {
           try {

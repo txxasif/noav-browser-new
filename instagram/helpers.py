@@ -396,26 +396,59 @@ class IgHelpersMixin:
 
             escaped = False
             user = getattr(self, "ig_username", None) or getattr(self, "username", None)
-            prof_selectors = [
+            # NEVER click a generic profile-picture link. The feed renders dozens
+            # of `a[role="link"]:has(img[alt*="profile picture"])` links (one per
+            # suggested account), so `.first` navigated to a FEED account — and a
+            # removed one shows "Sorry, this page isn't available." (observed live
+            # 2026-10-03: instagram.com/marko…/). Target the bottom-nav Profile tab
+            # by its LIVE href (the feed tab bar's last link), never a feed link.
+            prof_selectors = []
+            try:
+                _live = self._ig_profile_tab_href(p) if hasattr(self, "_ig_profile_tab_href") else None
+            except Exception:
+                _live = None
+            if user:
+                prof_selectors.append(f'a[href="/{user}/"]')
+            if _live:
+                prof_selectors.append(f'a[href="{_live}"]')
+            prof_selectors += [
                 'a[href*="/"][role="link"]:has(svg[aria-label*="Profile" i])',
                 'svg[aria-label*="Profile" i]',
                 '[aria-label="Profile"]',
                 'a:has([aria-label="Profile"])',
-                'a[role="link"]:has(img[alt*="profile picture" i])',
-                'nav a:last-child',
-                'footer a:last-child',
             ]
-            if user:
-                prof_selectors.insert(0, f'a[href*="/{user}/"]')
             for sel in prof_selectors:
                 try:
-                    tab = p.locator(sel).first
+                    _loc = p.locator(sel)
+                    # `.last` — the bottom tab bar renders AFTER the feed, so the
+                    # nav profile link is the last match.
+                    tab = _loc.last if _loc.count() > 1 else _loc.first
                     if tab.count() > 0 and tab.is_visible():
                         tab.click(force=True, timeout=3000)
                         escaped = True
                         break
                 except Exception:
                     pass
+            # "Sorry, this page isn't available." — we ended up on a REMOVED
+            # profile (a feed link was clicked). Recover to the feed so the next
+            # AC entry starts from a clean state instead of a dead page.
+            try:
+                _b = (p.inner_text("body") or "").lower()
+                if ("page isn't available" in _b or "page may have been removed" in _b
+                        or "the link you followed may be broken" in _b):
+                    self.log('[ac] Way Out: landed on an unavailable profile — recovering via Home…')
+                    for _hs in ('a[href="/"]', '[aria-label="Home"]', 'svg[aria-label="Home"]'):
+                        try:
+                            _h = p.locator(_hs).first
+                            if _h.count() > 0 and _h.is_visible():
+                                _h.click(force=True, timeout=3000)
+                                break
+                        except Exception:
+                            continue
+                    p.wait_for_timeout(2500)
+                    escaped = True
+            except Exception:
+                pass
             if not escaped:
                 try:
                     p.goto(Urls.IG_HOME, wait_until="commit", timeout=30000)
@@ -987,32 +1020,80 @@ class IgHelpersMixin:
         except Exception:
             pass
 
-        # Trusted-first for the two critical controls (2026-09-28): the JS
-        # below fires SYNTHETIC events (isTrusted=false — countable by a
-        # serious detector). A real tap leaves no such mark, so try the
-        # trusted path first on the modal + Back exit; synthetic JS stays as
-        # the fallback. A tap here returns immediately — SWW screens never
-        # co-occur with a save-modal, so no recovery is skipped in practice.
-        if "save your login info" in _tail0 or "save login info" in _tail0:
-            for _sel in ('[role="dialog"] button:has-text("Not now")',
-                         '[role="dialog"] div[role="button"]:has-text("Not now")',
-                         'button:has-text("Not now")'):
-                try:
-                    _b = p.locator(_sel).first
-                    if _b.count() > 0 and _b.is_visible():
-                        if self._tap_or_click(p, _b, timeout=2500):
-                            self.log('[+] _dismiss_ig_sheets: trusted tap on Not now (save-login).')
-                            p.wait_for_timeout(600)
-                            return True
-                except Exception:
-                    continue
+        def _first_visible(loc):
+            try:
+                cnt = loc.count()
+                for i in range(cnt):
+                    c = loc.nth(i)
+                    if c.is_visible():
+                        return c
+            except Exception:
+                pass
+            return None
+
+        # Trusted-first for the critical controls (2026-09-28 / 2026-10-03):
+        # Cookie-injected sessions frequently stack TWO overlays: "Add to Home screen"
+        # on top of "Save your login info". Multi-pass trusted tap dismisses both
+        # cleanly with React state synchronization, avoiding dark orphaned backdrops.
+        for _pass in range(2):
+            pass_dismissed = False
+
+            # 1. "Add Instagram to your Home screen?" modal dialog (sits ON TOP!)
+            if "home screen" in _tail0 or "add instagram to your home" in _tail0 or p.locator('[role="dialog"]').count() > 0:
+                for _sel in ('[role="dialog"] button:has-text("Cancel")',
+                             '[role="dialog"] div[role="button"]:has-text("Cancel")',
+                             'button:has-text("Cancel")',
+                             'div[role="button"]:has-text("Cancel")'):
+                    try:
+                        _b = _first_visible(p.locator(_sel))
+                        if _b is not None:
+                            if self._tap_or_click(p, _b, timeout=1200):
+                                self.log('[+] _dismiss_ig_sheets: trusted tap on Cancel (home-screen).')
+                                dismissed = True
+                                pass_dismissed = True
+                                p.wait_for_timeout(400)
+                                try:
+                                    _tail0 = (p.inner_text("body") or "").lower()
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        continue
+
+            # 2. "Save your login info" bottom sheet
+            if "save your login info" in _tail0 or "save login info" in _tail0 or "save info" in _tail0 or p.locator('[role="dialog"]').count() > 0:
+                for _sel in ('[role="dialog"] div[role="button"]:has-text("Not now")',
+                             '[role="dialog"] button:has-text("Not now")',
+                             'div[role="button"]:has-text("Not now")',
+                             'button:has-text("Not now")',
+                             'div[role="button"]:text-is("Not now")',
+                             'button:text-is("Not now")'):
+                    try:
+                        _b = _first_visible(p.locator(_sel))
+                        if _b is not None:
+                            if self._tap_or_click(p, _b, timeout=1500):
+                                self.log('[+] _dismiss_ig_sheets: trusted tap on Not now (save-login).')
+                                dismissed = True
+                                pass_dismissed = True
+                                p.wait_for_timeout(400)
+                                try:
+                                    _tail0 = (p.inner_text("body") or "").lower()
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        continue
+
+            if not pass_dismissed:
+                break
+
         if ("/accounts/registered" in (p.url or "")
                 and ("get the instagram app" in _tail0 or "open instagram" in _tail0
                      or "connect to facebook" in _tail0 or "add a profile photo" in _tail0)):
             for _sel in ('nav a[href="/"]', 'a[aria-label="Back"]', 'a:has-text("Back")'):
                 try:
-                    _b = p.locator(_sel).first
-                    if _b.count() > 0 and _b.is_visible():
+                    _b = _first_visible(p.locator(_sel))
+                    if _b is not None:
                         if "instagram" in (_b.inner_text() or "").strip().lower():
                             continue  # header wordmark, not the chevron
                         if self._tap_or_click(p, _b, timeout=2500):
@@ -1037,12 +1118,6 @@ class IgHelpersMixin:
                 }
 
                 function cleanBackdrops() {
-                    // NON-DESTRUCTIVE (2026-09-21): never remove() app-shell-sized
-                    // nodes here. IG's route/app container is a large
-                    // `div[tabindex="-1"]`, so removing it nuked the header (and
-                    // the profile settings gear) — a prime suspect for "Accounts
-                    // Center unreachable" (Step 2 could not find the gear).
-                    // Disabling pointer events is enough to let taps through.
                     const backdrops = document.querySelectorAll('div[style*="position: fixed"], div[style*="position: absolute"], ._a9-z, div[tabindex="-1"]');
                     for (const b of backdrops) {
                         const r = b.getBoundingClientRect();
@@ -1052,44 +1127,43 @@ class IgHelpersMixin:
                     }
                 }
 
-                // (A0) MODAL FIRST — "Save your login info to Instagram?" is an
-                // OVERLAY on the join page. This MUST run before every
-                // page-level handler, INCLUDING (A) below: on
-                // /accounts/registered/ ALL cards pre-render at once, so the
-                // getapp text is always in the body and (A) used to win every
-                // pass — tapping a Skip BEHIND the modal while Not-now sat
-                // unclicked (operator report 2026-09-28: "it never clicks Not
-                // now, it keeps clicking Skip"). Modal text present = handle
-                // the modal, full stop.
+                const actionsTaken = [];
+
+                // (A) "Add Instagram to your Home screen?" modal dialog (sits ON TOP of save-login)
+                if (bodyText.includes("home screen") || bodyText.includes("add instagram to your home")) {
+                    for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
+                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if (t === 'cancel') {
+                            fireClick(el);
+                            actionsTaken.push('cancel_home_screen');
+                            break;
+                        }
+                    }
+                }
+
+                // (B) "Save your login info to Instagram?" bottom sheet / modal
                 if (bodyText.includes("save your login info") || bodyText.includes("save login info")) {
                     for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
                         const t = (el.innerText || el.textContent || '').trim().toLowerCase();
                         if (t === 'not now') {
                             fireClick(el);
-                            cleanBackdrops();
-                            return 'clicked_not_now_save_login';
+                            actionsTaken.push('not_now_save_login');
+                            break;
                         }
                     }
                 }
 
-                // (A) "Get the Instagram app" interstitial screen (Screenshot 2)
-                // Prefer the TOP-LEFT BACK control (exits straight to the feed);
-                // never click "Open Instagram". Skip is the fallback.
-                //
-                // Carousel coexistence (verified live 2026-09-28): on
-                // /accounts/registered/ the getapp card text is ALWAYS present
-                // (all cards pre-render) AND a plain Back LINK exists next to
-                // it — one tap exits the whole stack. The old aria-only list
-                // never matched that plain link, so the bot Skipped
-                // card-by-card instead. Plain-link Back wins here, scoped to
-                // the registered path so feed/photo pages are untouched.
+                if (actionsTaken.length > 0) {
+                    cleanBackdrops();
+                    return 'clicked_' + actionsTaken.join('_and_');
+                }
+
+                // (C) "Get the Instagram app" interstitial screen
                 if (bodyText.includes("get the instagram app") || bodyText.includes("turn on notifications, read comments and discover reels")) {
                     if (window.location.href.includes('/accounts/registered')) {
                         for (const el of document.querySelectorAll('nav a[href="/"], a[aria-label="Back"]')) {
                             const t = (el.innerText || el.textContent || '').trim().toLowerCase();
                             const r = el.getBoundingClientRect();
-                            // The header wordmark is also a[href="/"] ("instagram")
-                            // — take only the chevron (empty/icon) or "back".
                             if ((t === 'back' || t === '') && r.width > 0 && r.height > 0) {
                                 fireClick(el);
                                 cleanBackdrops();
@@ -1115,11 +1189,7 @@ class IgHelpersMixin:
                     }
                 }
 
-                // (A2) "Add phone number" prompt — OPTIONAL (it renders a Skip
-                // link). Previously nothing handled this screen: the generic
-                // fallback only tried `button`/`a`, so when IG renders Skip as a
-                // plain div/span the flow sat on the screen for whole passes.
-                // Click Skip the moment the screen is up, matching any element.
+                // (D) "Add phone number" prompt — OPTIONAL
                 if (bodyText.includes("add phone number")
                         || bodyText.includes("adding your number will help")) {
                     for (const el of document.querySelectorAll('a, button, div[role="button"], span, div[tabindex]')) {
@@ -1132,30 +1202,6 @@ class IgHelpersMixin:
                     }
                 }
 
-                // (B) REMOVED 2026-09-28 — dead duplicate of (A0) above (same
-                // condition, same action; (A0) always returns first).
-
-                // (C) "Add Instagram to your Home screen?" modal dialog (Screenshot 4)
-                // Extremely fast dismissal: click Cancel, remove modal from DOM immediately, unblock backdrops
-                if (bodyText.includes("home screen") || bodyText.includes("add instagram to your home")) {
-                    for (const el of document.querySelectorAll('button, div[role="button"], a, span, div[tabindex]')) {
-                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-                        if (t === 'cancel') {
-                            fireClick(el);
-                            const modal = el.closest('[role="dialog"], div[aria-modal="true"], ._a9-v');
-                            if (modal) {
-                                // Non-destructive: hide + unblock, never remove().
-                                // Removing React roots breaks later updates and is
-                                // MutationObserver-visible; hiding is normal UI.
-                                modal.style.pointerEvents = 'none';
-                                modal.style.display = 'none';
-                            }
-                            cleanBackdrops();
-                            return 'clicked_cancel_home_screen';
-                        }
-                    }
-                }
-
                 // (D) Any standard dialogs / bottom sheets with Cancel / Not now / Skip / Close / Dismiss
                 const dialogs = document.querySelectorAll('[role="dialog"], div[aria-modal="true"], ._a9-v, div[data-bloks-name]');
                 for (const d of dialogs) {
@@ -1164,8 +1210,6 @@ class IgHelpersMixin:
                         const t = (el.innerText || el.textContent || '').trim().toLowerCase();
                         if (t === 'cancel' || t === 'not now' || t === 'skip' || t === 'close' || t === 'dismiss') {
                             fireClick(el);
-                            // Non-destructive (see (C)): unblock, never remove().
-                            try { d.style.pointerEvents = 'none'; } catch(e) {}
                             cleanBackdrops();
                             return 'clicked_dialog_' + t;
                         }
@@ -1221,13 +1265,6 @@ class IgHelpersMixin:
                 self.log(f'[+] _dismiss_ig_sheets: JS action "{js_res}".')
                 p.wait_for_timeout(400)
                 dismissed = True
-                # A synthetic dispatch can be IGNORED by IG's React handlers,
-                # yet the JS still returns a success string. Previously that set
-                # dismissed=True and SKIPPED the real Playwright click below, so
-                # the promo stayed on screen until a later pass — this is why
-                # phone-Skip / Home-screen-Cancel / Save-login "Not now" felt
-                # slow. If the promo is still present, fall through to the real
-                # click instead of trusting the synthetic one.
                 try:
                     _tail_now = (p.inner_text("body") or "").lower()
                 except Exception:
@@ -1248,11 +1285,24 @@ class IgHelpersMixin:
         except Exception:
             pass
 
-        # 2. Fast Playwright locator fallback (short timeouts, strictly avoiding slow loops)
-        if not dismissed:
+        # 2. Fast Playwright locator fallback (short timeouts, strictly avoiding slow loops).
+        try:
+            _tail2 = (p.inner_text("body") or "").lower()
+        except Exception:
+            _tail2 = ""
+        _another_overlay = (
+            "home screen" in _tail2
+            or "save your login info" in _tail2 or "save login info" in _tail2
+            or "add phone number" in _tail2
+            or "get the instagram app" in _tail2
+            or "use the app" in _tail2
+        )
+        if (not dismissed) or _another_overlay:
             fast_selectors = (
                 '[role="dialog"] button:has-text("Cancel")',
+                '[role="dialog"] div[role="button"]:has-text("Cancel")',
                 '[role="dialog"] button:has-text("Not now")',
+                '[role="dialog"] div[role="button"]:has-text("Not now")',
                 'button:has-text("Cancel")',
                 'div[role="button"]:has-text("Cancel")',
                 'button:has-text("Not now")',
@@ -1264,8 +1314,8 @@ class IgHelpersMixin:
             )
             for sel in fast_selectors:
                 try:
-                    el = p.locator(sel).first
-                    if el.count() > 0 and el.is_visible():
+                    el = _first_visible(p.locator(sel))
+                    if el is not None:
                         el.click(force=True, timeout=500)
                         self.log(f'[+] _dismiss_ig_sheets: dismissed via locator "{sel}".')
                         dismissed = True

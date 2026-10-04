@@ -59,8 +59,34 @@ FLOWS = {
     "pool_2fa": {
         "label": "Create Inst (2FA) — pooled account drain (no Meta)",
         "runner": "run_pool_2fa_cycle",
-        "steps": ["ig_rename", "2fa", "register"],
+        "steps": ["ig_rename", "password", "email_link", "2fa", "register"],
         "needs_email": True,
+        "needs_2fa": True,
+    },
+    # PayGo "📱 Create Inst (2FA)" run as a POOL DRAIN (no Meta, no signup):
+    # same-to-same as Taskly's pool_2fa — reuse a pre-created IG account from
+    # the IG Creator pool: rename to the bot login via the direct Web API,
+    # link the bot-issued email (📥 Get code), enable 2FA from the account's
+    # STORED mail.td inbox, register, then consume. Own runner so the Taskly
+    # drain, the PayGo cookie drain and their counters stay untouched
+    # (invariant 24).
+    "paygo_pool_2fa": {
+        "label": "Create Inst (2FA) — PayGo pooled account drain (no Meta)",
+        "runner": "run_paygo_pool_2fa_cycle",
+        "steps": ["ig_rename", "password", "email_link", "2fa", "register"],
+        "needs_email": True,
+        "needs_2fa": True,
+    },
+    # PayGo "PayGo 2FA Optimized" panel — EXPERIMENTAL variant of
+    # paygo_pool_2fa with the email_link step dropped (runner
+    # run_paygo_pool_2fa_opt_cycle skips it: PayGo accepted registration
+    # with linkage False, while the step burns ~60s). Additive only — the
+    # original paygo_pool_2fa flow is untouched.
+    "paygo_pool_2fa_opt": {
+        "label": "Create Inst (2FA) — PayGo OPTIMIZED pooled drain (no email link)",
+        "runner": "run_paygo_pool_2fa_opt_cycle",
+        "steps": ["ig_rename", "password", "2fa", "register"],
+        "needs_email": False,
         "needs_2fa": True,
     },
     # FastPay2025_bot "Instagram 2FA" run as a POOL DRAIN (no Meta, no signup):

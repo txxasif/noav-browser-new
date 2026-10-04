@@ -178,9 +178,14 @@ TG_BOTS = {
         "username": "PayGoeasy_bot",
         "url": "https://web.telegram.org/a/#8249657346",
         "task_keyword": "Create Inst",
-        # PayGo Tasks submenu (learned live 2026-09-27): the ONLY category is
-        # "🍪 Cookies ($0.0200)", which opens "📱 Create Inst (Cookies)
-        # ($0.0200)". The old "🔥 Create Inst (2FA)" button is GONE — the
+        # PayGo Tasks submenu (live 2026-10-02 over MTProto): TWO tasks —
+        #   "📱 Create Inst (2FA) ($0.0220)" — SAME protocol as Taskly's 2FA
+        #      task (identical preview text, First name/Login/Password/Email
+        #      creds, 📥 Get code, "Account Registered" confirm). Drained via
+        #      the "PayGo 2FA" pool panel (tg_tasks.PAYGO_2FA_POOL).
+        #   "🍪 Cookies ($0.0200)" → "📱 Create Inst (Cookies)" — cookie export
+        #      + submit (the older flow below; drained via "PayGo Pool").
+        # The old "🔥 Create Inst (2FA)" button is GONE — the
         # strict 2FA-only config below was stale and every PayGo pick failed.
         # Flow (probed live): Start → same First name/Login/Password creds →
         # "🍪 Please send the account Cookie:" (min 100 chars; a 209-char
@@ -188,12 +193,14 @@ TG_BOTS = {
         # gate) → "👉 Press the button to confirm registration" →
         # "✅ Account registered" (same register gate as 2FA tasks).
         # Offered tasks are the single source of truth in tg_tasks.py.
-        # "Create Inst (No mail)" is Taskly-ONLY; PayGo offers ONLY Cookies.
-        # There are deliberately NO cross-bot remaps here: asking a bot for
-        # a task it does not offer must fail loud, never silently run a
-        # different task. Labels mirror the bot buttons (see tg_tasks.py).
-        "tasks": ["📱 Create Inst (Cookies)"],
+        # "Create Inst (No mail)" is Taskly-ONLY. There are deliberately NO
+        # cross-bot remaps here: asking a bot for a task it does not offer
+        # must fail loud, never silently run a different task. Labels mirror
+        # the bot buttons (see tg_tasks.py).
+        "tasks": ["📱 Create Inst (2FA)", "📱 Create Inst (Cookies)"],
         "task_aliases": {
+            "📱 Create Inst (2FA)": "📱 Create Inst (2FA)",
+            "Create Inst (2FA)": "📱 Create Inst (2FA)",
             "📱 Create Inst (Cookies)": "📱 Create Inst (Cookies)",
             "Create Inst (Cookies)": "📱 Create Inst (Cookies)",
         },

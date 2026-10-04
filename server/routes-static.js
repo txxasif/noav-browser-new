@@ -46,6 +46,24 @@ const STATIC_CACHE = new Map();
     return true;
   }
 
+  // GET /api/build-mode: returns which modules and bots are active in this distribution
+  if (pathname === '/api/build-mode' && req.method === 'GET') {
+    let modeInfo = { ok: true, meta_only: false, modules: ['meta', 'ig', 'tg'], bots: ['taskly', 'paygo', 'fastpay'] };
+    try {
+      const buildManifest = path.join(ROOT_DIR, 'build_mode.json');
+      if (fs.existsSync(buildManifest)) {
+        const j = JSON.parse(fs.readFileSync(buildManifest, 'utf-8'));
+        modeInfo = Object.assign(modeInfo, j, { ok: true });
+      }
+    } catch (e) {}
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+    });
+    res.end(JSON.stringify(modeInfo));
+    return true;
+  }
+
   // Any unhandled API requests MUST return JSON 404, never fall through to static HTML
   if (res.headersSent) return true;
   if (pathname.startsWith('/api/') || pathname === '/api') {

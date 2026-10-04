@@ -388,13 +388,13 @@ class EngineCaptchaMixin:
         INSTA_VISUAL_CAPTCHA_TIMEOUT (cap) / INSTA_VISUAL_CAPTCHA_BAIL (hand-off).
         """
         try:
-            timeout = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "30") or 30)
+            timeout = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "60") or 60)
         except Exception:
-            timeout = 30.0
+            timeout = 60.0
         try:
-            bail = float(os.environ.get("INSTA_VISUAL_CAPTCHA_BAIL", "15") or 15)
+            bail = float(os.environ.get("INSTA_VISUAL_CAPTCHA_BAIL", "45") or 45)
         except Exception:
-            bail = 15.0
+            bail = 45.0
         self.log(f'[🧩] Visual AI Extension: monitoring DOM for in-browser solve (up to {int(timeout)}s)…')
         start = time.time()
         initial_url = page.url or ""
@@ -446,13 +446,13 @@ class EngineCaptchaMixin:
                         return True
 
             # If extension has not solved after the bail window and a challenge
-            # iframe remains open, hand off to Audio STT only when no action is
-            # visible. A present Continue button may still be transitioning from
-            # disabled to enabled after the green checkbox state.
-            if (time.time() - start) >= bail and bframe is not None:
+            # iframe remains open, hand off to Audio STT only when audio fallback
+            # is enabled and no action is visible.
+            has_audio = "audio" in getattr(self, "_captcha_order", lambda: ())()
+            if has_audio and (time.time() - start) >= bail and bframe is not None:
                 if self._checkpoint_action(page, names=("Continue", "Next", "Confirm"),
                                            require_enabled=False) is None:
-                    self.log(f'[⚠️] Visual AI did not finish in {int(bail)}s.')
+                    self.log(f'[⚠️] Visual AI did not finish in {int(bail)}s; handing off to audio.')
                     return False
 
         self.log(f'[⚠️] Visual AI extension did not finish in {timeout}s.')

@@ -1,15 +1,18 @@
-/* nova-taskly2fa.js — "Taskly 2FA" panel (POOL DRAIN mode).
+/* nova-paygo2faopt.js — "PayGo 2FA Optimized" panel (POOL DRAIN, experimental).
  *
- * A NEW, self-contained page that runs Taskly's "📱 Create Inst (2FA)" task the
+ * Copy of nova-paygo2fa.js with its own root/route/counter. Difference: the
+ * engine task alias is "PayGo 2FA Optimized" (no email_link step).
+ *
+ * A NEW, self-contained page that runs PayGo's "📱 Create Inst (2FA)" task the
  * pool-drain way: it reuses a PRE-CREATED Instagram account from the IG Creator
  * pool (rename via the direct Web API + 2FA in Accounts Center, solving the
  * email re-auth from the account's STORED mail.td inbox) — NO Meta signup, NO
  * fresh IG creation. The pooled account is consumed (removed) after each submit.
  *
- * It is deliberately separate from the existing TG Classic / Taskly Bot panel
- * (nova-tg.js): same classes/CSS vocabulary, its own root (#tg-taskly2fa-root),
+ * It is deliberately separate from the existing TG Classic / PayGo Bot panel
+ * (nova-tg.js): same classes/CSS vocabulary, its own root (#tg-paygo2faopt-root),
  * its own SSE log buffer, its own Start/Stop. The engine task alias is
- * "Taskly 2FA" → tg_tasks.INST_2FA_POOL → flow pool_2fa → run_pool_2fa_cycle.
+ * "PayGo 2FA Optimized" → tg_tasks.PAYGO_2FA_OPT → flow paygo_pool_2fa_opt → run_paygo_pool_2fa_opt_cycle.
  */
 (function () {
   'use strict';
@@ -63,39 +66,39 @@
         '<div class="page-title-row" style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;">' +
           '<div>' +
             '<h2 style="margin:0;display:flex;align-items:center;gap:.5rem;">' +
-              '<i class="fa-solid fa-shield-halved" style="color:#4ade80;"></i> Taskly 2FA' +
-              '<span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL DRAIN</span>' +
+              '<i class="fa-solid fa-shield-halved" style="color:#4ade80;"></i> PayGo 2FA Optimized' +
+              '<span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL DRAIN · OPT</span>' +
             '</h2>' +
-            '<p style="margin:.35rem 0 0;">Runs Taskly <strong>📱 Create Inst (2FA)</strong> from the ' +
+            '<p style="margin:.35rem 0 0;">Runs PayGo <strong>📱 Create Inst (2FA)</strong> from the ' +
               '<strong>IG Creator pool</strong> — reuses an existing Instagram account (rename via direct Web API + 2FA ' +
               'from its stored inbox). <u>No Meta signup, no fresh IG creation.</u> Each pooled account is consumed once.</p>' +
           '</div>' +
           '<div class="creator-actions" style="display:flex;gap:.5rem;align-items:center;">' +
-            '<button id="t2fa-start" type="button" class="btn btn-primary"><i class="fa-solid fa-play"></i> Start Pool Drain</button>' +
-            '<button id="t2fa-stop" type="button" class="btn btn-danger" style="display:none;"><i class="fa-solid fa-stop"></i> Stop</button>' +
+            '<button id="pg2faopt-start" type="button" class="btn btn-primary"><i class="fa-solid fa-play"></i> Start Pool Drain</button>' +
+            '<button id="pg2faopt-stop" type="button" class="btn btn-danger" style="display:none;"><i class="fa-solid fa-stop"></i> Stop</button>' +
           '</div>' +
         '</div>' +
       '</div>' +
 
       /* ---- KPIs ---- */
       '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">' +
-        statCard('IG CREATOR POOL', 't2fa-kpi-pool', 'available accounts ready to drain', '#a5b4fc') +
-        statCard('SUBMITTED (Pool 2FA)', 't2fa-kpi-submitted', '2FA task accepted', '#4ade80') +
-        statCard('PARALLEL SLOTS', 't2fa-kpi-conc', 'concurrent creators', '#38bdf8') +
-        statCard('ENGINE', 't2fa-kpi-status', 'idle', '#f59e0b') +
+        statCard('IG CREATOR POOL', 'pg2faopt-kpi-pool', 'available accounts ready to drain', '#a5b4fc') +
+        statCard('SUBMITTED (Pool 2FA)', 'pg2faopt-kpi-submitted', '2FA task accepted', '#4ade80') +
+        statCard('PARALLEL SLOTS', 'pg2faopt-kpi-conc', 'concurrent creators', '#38bdf8') +
+        statCard('ENGINE', 'pg2faopt-kpi-status', 'idle', '#f59e0b') +
       '</div>' +
 
       /* ---- live banner ---- */
-      '<div id="t2fa-banner" style="margin-top:0.9rem;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:1rem;' +
+      '<div id="pg2faopt-banner" style="margin-top:0.9rem;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:1rem;' +
         'background:linear-gradient(180deg,#111726,#0d1117);border:1px solid var(--border-color);border-radius:12px;padding:14px 16px;">' +
         '<div style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;">' +
-          '<span id="t2fa-badge" style="padding:3px 9px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.04em;background:#1e293b;color:#94a3b8;border:1px solid #334155;">IDLE</span>' +
-          '<span id="t2fa-title" style="font-weight:700;color:var(--text-main);font-size:.95rem;">POOL DRAIN STOPPED</span>' +
-          '<span id="t2fa-sub" style="font-size:.78rem;color:var(--text-muted);border-left:1px solid var(--border-color);padding-left:.75rem;">Ready. Reuses pooled IG accounts — no Meta.</span>' +
+          '<span id="pg2faopt-badge" style="padding:3px 9px;border-radius:6px;font-size:11px;font-weight:700;letter-spacing:.04em;background:#1e293b;color:#94a3b8;border:1px solid #334155;">IDLE</span>' +
+          '<span id="pg2faopt-title" style="font-weight:700;color:var(--text-main);font-size:.95rem;">POOL DRAIN STOPPED</span>' +
+          '<span id="pg2faopt-sub" style="font-size:.78rem;color:var(--text-muted);border-left:1px solid var(--border-color);padding-left:.75rem;">Ready. Reuses pooled IG accounts — no Meta.</span>' +
         '</div>' +
         '<div style="text-align:right;">' +
           '<div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:600;">Execution Time</div>' +
-          '<div id="t2fa-timer" style="font-size:1rem;font-weight:700;font-family:var(--font-mono);color:var(--text-main);">00:00:00</div>' +
+          '<div id="pg2faopt-timer" style="font-size:1rem;font-weight:700;font-family:var(--font-mono);color:var(--text-main);">00:00:00</div>' +
         '</div>' +
       '</div>' +
 
@@ -105,7 +108,7 @@
         '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;">' +
           '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:12px;">' +
             '<div style="font-size:.7rem;color:var(--text-muted);font-weight:700;">1 · TASK CREDS</div>' +
-            '<div style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Lease TG → select <strong>Create Inst (2FA)</strong> → bot issues username.</div></div>' +
+            '<div style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Lease TG → select <strong>Create Inst (2FA)</strong> → bot issues username + email.</div></div>' +
           '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:12px;">' +
             '<div style="font-size:.7rem;color:var(--text-muted);font-weight:700;">2 · RENAME</div>' +
             '<div style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Pop a pool account → rename via <strong>IG Web API (~0.4s)</strong>.</div></div>' +
@@ -122,15 +125,15 @@
       '<div class="card-panel creator-panel" style="margin-top:1rem;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.9rem;">' +
           '<h3 class="panel-header" style="margin:0;"><i class="fa-solid fa-sliders" style="color:#4ade80;"></i> Pool Drain Settings</h3>' +
-          '<span style="font-size:.72rem;color:var(--text-muted);">Task: <strong>Taskly 2FA</strong> · Bot: <strong>@Taskl1_bot</strong></span>' +
+          '<span style="font-size:.72rem;color:var(--text-muted);">Task: <strong>PayGo 2FA Optimized</strong> · Bot: <strong>@PayGoeasy_bot</strong> · skips email_link</span>' +
         '</div>' +
         '<div class="creator-grid">' +
           '<div class="creator-field"><label>Parallel</label>' +
-            '<input id="t2fa-conc" class="form-control" type="number" min="1" max="10" value="6" title="Concurrent creators. Capped by the number of enabled Telegram profiles."></div>' +
+            '<input id="pg2faopt-conc" class="form-control" type="number" min="1" max="10" value="6" title="Concurrent creators. Capped by the number of enabled Telegram profiles."></div>' +
           '<div class="creator-field"><label>Target (0 = \u221e)</label>' +
-            '<input id="t2fa-target" class="form-control" type="number" min="0" value="0"></div>' +
+            '<input id="pg2faopt-target" class="form-control" type="number" min="0" value="0"></div>' +
           '<div class="creator-field creator-field--switch"><label>Headless</label>' +
-            '<label class="switch" title="Run browsers headless (recommended)"><input type="checkbox" id="t2fa-headless" checked><span class="slider"></span></label></div>' +
+            '<label class="switch" title="Run browsers headless (recommended)"><input type="checkbox" id="pg2faopt-headless" checked><span class="slider"></span></label></div>' +
           '<div class="creator-field creator-field--switch"><label>Auto-consume</label>' +
             '<label class="switch" title="Always on: a used pooled account is removed after submit"><input type="checkbox" checked disabled><span class="slider"></span></label></div>' +
         '</div>' +
@@ -145,17 +148,17 @@
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem;">' +
           '<h3 class="panel-header" style="margin:0;"><i class="fa-solid fa-terminal"></i> Live Engine Log (SSE)</h3>' +
           '<div style="display:flex;gap:.5rem;align-items:center;">' +
-            '<label style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--text-dim);"><input type="checkbox" id="t2fa-autoscroll" checked> Auto-scroll</label>' +
-            '<button id="t2fa-copy" type="button" class="btn btn-secondary btn-sm">Copy Log</button>' +
-            '<button id="t2fa-clear" type="button" class="btn btn-secondary btn-sm">Clear Log</button>' +
+            '<label style="display:flex;align-items:center;gap:.4rem;font-size:.78rem;color:var(--text-dim);"><input type="checkbox" id="pg2faopt-autoscroll" checked> Auto-scroll</label>' +
+            '<button id="pg2faopt-copy" type="button" class="btn btn-secondary btn-sm">Copy Log</button>' +
+            '<button id="pg2faopt-clear" type="button" class="btn btn-secondary btn-sm">Clear Log</button>' +
           '</div>' +
         '</div>' +
-        '<div id="t2fa-log" class="log-container" style="height:260px;overflow-y:auto;background:#060910;border:1px solid var(--border-color);' +
+        '<div id="pg2faopt-log" class="log-container" style="height:260px;overflow-y:auto;background:#060910;border:1px solid var(--border-color);' +
           'border-radius:8px;padding:.75rem;font-family:var(--font-mono);font-size:.78rem;white-space:pre-wrap;"></div>' +
       '</div>' +
 
       /* ---- route-scoped failure reasons + session logs (bottom, like other panels) ---- */
-      (window.NovaDiag ? NovaDiag.renderHtml('t2fa', 'taskly2fa') : '');
+      (window.NovaDiag ? NovaDiag.renderHtml('pg2faopt', 'paygo2faopt') : '');
 
     wire();
   }
@@ -164,10 +167,10 @@
     var entry = '[' + new Date().toLocaleTimeString() + '] ' + line;
     state.log.push(entry);
     if (state.log.length > MAX_LOG) state.log = state.log.slice(-400);
-    var el = $('t2fa-log');
+    var el = $('pg2faopt-log');
     if (!el) return;
     el.textContent = state.log.join('\n');
-    var auto = $('t2fa-autoscroll');
+    var auto = $('pg2faopt-autoscroll');
     if (!auto || auto.checked) el.scrollTop = el.scrollHeight;
   }
 
@@ -186,7 +189,7 @@
   }
 
   function start() {
-    var btn = $('t2fa-start');
+    var btn = $('pg2faopt-start');
     if (btn) btn.disabled = true;
     fetch('/api/tg/status', { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
@@ -201,8 +204,8 @@
         if (!connected) { toast('No logged-in Telegram profile. Log one in, then start.', 'error', 14000); return; }
         var avail = s.ig_pool_available || 0;
         if (!avail) { toast('IG Creator pool is empty — nothing to drain.', 'error', 14000); return; }
-        var conc = parseInt(($('t2fa-conc') || {}).value || 1, 10);
-        var target = parseInt(($('t2fa-target') || {}).value || 0, 10);
+        var conc = parseInt(($('pg2faopt-conc') || {}).value || 1, 10);
+        var target = parseInt(($('pg2faopt-target') || {}).value || 0, 10);
         append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
                ', ' + (state.headless ? 'headless' : 'visible') + ')');
@@ -211,13 +214,13 @@
           target: target,
           headless: state.headless,
           captcha: 'extension',
-          tg_task: 'Taskly 2FA',
-          tg_bot: 'taskly',
+          tg_task: 'PayGo 2FA Optimized',
+          tg_bot: 'paygo',
           add_email: false,
           use_ig_pool: true
         }); };
         if (typeof window.__tgTaskCheck === 'function') {
-          window.__tgTaskCheck('taskly', 'Taskly 2FA', append).then(function (pre) {
+          window.__tgTaskCheck('paygo', 'PayGo 2FA Optimized', append).then(function (pre) {
             if (pre.proceed) _doPost(); else if (btn) btn.disabled = false;
           });
         } else _doPost();
@@ -231,7 +234,7 @@
   }
 
   // Attribution: the single TG engine slot may be running a DIFFERENT bot. The
-  // regular Taskly bot shares tg_bot='taskly', so distinguish by the task.
+  // regular PayGo bot shares tg_bot='paygo', so distinguish by the task.
   function setRunning(running, cfg) {
     state.running = !!running;
     if (running && !state.startedAt) state.startedAt = Date.now();
@@ -239,13 +242,17 @@
 
     cfg = cfg || {};
     var activeBot = cfg.tg_bot ? String(cfg.tg_bot).toLowerCase() : null;
-    var isMine = !!(running && activeBot === 'taskly'
-                    && /taskly\s*2fa|pool\s*2fa/i.test(String(cfg.tg_task || '')));
+    var isMine = !!(running && activeBot === 'paygo'
+                    && /optim/i.test(String(cfg.tg_task || '')));
     var isOther = !!(running && activeBot && !isMine);
-    var otherName = activeBot === 'paygo' ? 'PayGo' : activeBot === 'fastpay' ? 'FastPay' : (activeBot || '');
+    // Same-bot sibling: the PayGo COOKIE pool shares tg_bot='paygo', so name
+    // it explicitly — "PAYGO POOL RUNNING · PayGo 2FA IDLE" is unambiguous.
+    var otherName = activeBot === 'taskly' ? 'Taskly'
+      : activeBot === 'fastpay' ? 'FastPay'
+      : activeBot === 'paygo' ? 'PayGo Cookie' : (activeBot || '');
 
-    var badge = $('t2fa-badge'), title = $('t2fa-title'), sub = $('t2fa-sub');
-    var startBtn = $('t2fa-start'), stopBtn = $('t2fa-stop');
+    var badge = $('pg2faopt-badge'), title = $('pg2faopt-title'), sub = $('pg2faopt-sub');
+    var startBtn = $('pg2faopt-start'), stopBtn = $('pg2faopt-stop');
     if (badge) {
       badge.textContent = isMine ? 'LIVE' : (isOther ? (otherName.toUpperCase() + ' RUNNING') : 'IDLE');
       badge.style.background = isMine ? 'rgba(74,222,128,.16)' : (isOther ? 'rgba(245,158,11,.2)' : '#1e293b');
@@ -253,13 +260,13 @@
       badge.style.borderColor = isMine ? 'rgba(74,222,128,.4)' : (isOther ? 'rgba(245,158,11,.45)' : '#334155');
     }
     if (title) {
-      title.textContent = isMine ? 'POOL DRAIN RUNNING'
-        : isOther ? (otherName.toUpperCase() + ' IS RUNNING · Taskly 2FA IDLE')
+      title.textContent = isMine ? 'POOL DRAIN RUNNING (OPT)'
+        : isOther ? (otherName.toUpperCase() + ' IS RUNNING · PayGo 2FA OPT IDLE')
         : 'POOL DRAIN STOPPED';
     }
     if (sub) {
       sub.textContent = isMine
-        ? ('Taskly 2FA · parallel ' + (cfg.concurrency || '-') + ' · ' + (cfg.headless ? 'headless' : 'visible'))
+        ? ('PayGo 2FA Optimized · parallel ' + (cfg.concurrency || '-') + ' · ' + (cfg.headless ? 'headless' : 'visible'))
         : isOther
           ? ('⚡ ' + otherName + ' is running (one engine at a time). Stop it from its own page.')
           : 'Ready. Reuses pooled IG accounts — no Meta.';
@@ -269,9 +276,9 @@
     if (stopBtn) {
       // Stop is PER-TASK: only this page's own engine. Never stop another task.
       stopBtn.style.display = isMine ? 'inline-flex' : 'none';
-      stopBtn.title = 'Stop the Taskly 2FA pool drain';
+      stopBtn.title = 'Stop the PayGo 2FA Optimized pool drain';
     }
-    var kpi = $('t2fa-kpi-status');
+    var kpi = $('pg2faopt-kpi-status');
     if (kpi) {
       kpi.textContent = isMine ? 'LIVE' : (isOther ? otherName.toUpperCase() : 'IDLE');
       kpi.style.color = isMine ? '#4ade80' : (isOther ? '#fbbf24' : '#f59e0b');
@@ -281,7 +288,7 @@
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
   function tickTimer() {
-    var el = $('t2fa-timer');
+    var el = $('pg2faopt-timer');
     if (!el) return;
     if (!state.running || !state.startedAt) { el.textContent = '00:00:00'; return; }
     var s = Math.floor((Date.now() - state.startedAt) / 1000);
@@ -295,23 +302,23 @@
         if (!s) return;
         setRunning(s.running, s.engine || null);
         state.pool = s.ig_pool_available || 0;
-        state.submitted = s.tg_submitted_taskly2fa || 0;
-        var p = $('t2fa-kpi-pool'); if (p) p.textContent = String(state.pool);
-        var sub = $('t2fa-kpi-submitted'); if (sub) sub.textContent = String(state.submitted);
-        var c = $('t2fa-kpi-conc'); if (c) c.textContent = String((s.engine && s.engine.concurrency) || 0);
+        state.submitted = s.tg_submitted_paygo2faopt || 0;
+        var p = $('pg2faopt-kpi-pool'); if (p) p.textContent = String(state.pool);
+        var sub = $('pg2faopt-kpi-submitted'); if (sub) sub.textContent = String(state.submitted);
+        var c = $('pg2faopt-kpi-conc'); if (c) c.textContent = String((s.engine && s.engine.concurrency) || 0);
       })
       .catch(function () {});
   }
 
   function handleEvent(d) {
     if (!d) return;
-    // Route-scoped: this panel only shows the taskly2fa route. The server tags
-    // every event with route = meta|ig|taskly|paygo|fastpay|taskly2fa, so
-    // PayGo/Meta-creator/regular-Taskly lines never bleed into this log.
-    if (d.route && d.route !== 'taskly2fa') return;
+    // Route-scoped: this panel only shows the paygo2faopt route. The server tags
+    // every event with route = meta|ig|taskly|paygo|fastpay|taskly2fa|fastpay2fa|paygo_pool|paygo2fa|paygo2faopt,
+    // so other pools' lines never bleed into this log.
+    if (d.route && d.route !== 'paygo2faopt') return;
     if (d.pipeline && d.pipeline !== 'telegram') return;
     var bot = d.tg_bot ? String(d.tg_bot).toLowerCase() : null;
-    if (bot && bot !== 'taskly') return;
+    if (bot && bot !== 'paygo') return;
     var msg = d.message ||
       (d.type === 'slot_event' && d.detail ? ('[Slot ' + (d.slot_id || '?') + '] ' + d.detail) : null);
     if (msg) append(String(msg));
@@ -319,25 +326,25 @@
   }
 
   function wire() {
-    if ($('t2fa-start')) $('t2fa-start').addEventListener('click', start);
-    if ($('t2fa-stop')) $('t2fa-stop').addEventListener('click', stop);
-    if ($('t2fa-headless')) $('t2fa-headless').addEventListener('change', function () { state.headless = this.checked; });
-    if ($('t2fa-conc')) {
-      try { var saved = localStorage.getItem('nova_t2fa_parallel'); if (saved) $('t2fa-conc').value = saved; } catch (e) {}
-      $('t2fa-conc').addEventListener('change', function () {
-        try { localStorage.setItem('nova_t2fa_parallel', this.value); } catch (e) {}
+    if ($('pg2faopt-start')) $('pg2faopt-start').addEventListener('click', start);
+    if ($('pg2faopt-stop')) $('pg2faopt-stop').addEventListener('click', stop);
+    if ($('pg2faopt-headless')) $('pg2faopt-headless').addEventListener('change', function () { state.headless = this.checked; });
+    if ($('pg2faopt-conc')) {
+      try { var saved = localStorage.getItem('nova_pg2faopt_parallel'); if (saved) $('pg2faopt-conc').value = saved; } catch (e) {}
+      $('pg2faopt-conc').addEventListener('change', function () {
+        try { localStorage.setItem('nova_pg2faopt_parallel', this.value); } catch (e) {}
       });
     }
-    if ($('t2fa-clear')) $('t2fa-clear').addEventListener('click', function () {
-      state.log = []; var el = $('t2fa-log'); if (el) el.textContent = '';
+    if ($('pg2faopt-clear')) $('pg2faopt-clear').addEventListener('click', function () {
+      state.log = []; var el = $('pg2faopt-log'); if (el) el.textContent = '';
     });
-    if ($('t2fa-copy')) $('t2fa-copy').addEventListener('click', function () {
+    if ($('pg2faopt-copy')) $('pg2faopt-copy').addEventListener('click', function () {
       try { navigator.clipboard.writeText(state.log.join('\n')); toast('Log copied', 'success'); } catch (e) {}
     });
   }
 
   function boot() {
-    root = $('tg-taskly2fa-root');
+    root = $('tg-paygo2faopt-root');
     if (!root) return;
     shell();
     if (window.NovaDiag) { NovaDiag.refreshReasons(); NovaDiag.refreshLogs(); }
@@ -348,12 +355,12 @@
     tick = setInterval(tickTimer, 1000);
     try {
       // Shared SSE hub (nova-core.js): one stream per page.
-      if (!window.__t2faEsShared && typeof window.__novaEsSubscribe === 'function') {
-        window.__t2faEsShared = true;
+      if (!window.__pg2faoptEsShared && typeof window.__novaEsSubscribe === 'function') {
+        window.__pg2faoptEsShared = true;
         window.__novaEsSubscribe(handleEvent);
-      } else if (!window.__t2faEs && typeof window.__novaEsSubscribe !== 'function') {
-        window.__t2faEs = new EventSource('/api/meta-insta/events');
-        window.__t2faEs.onmessage = function (ev) {
+      } else if (!window.__pg2faoptEs && typeof window.__novaEsSubscribe !== 'function') {
+        window.__pg2faoptEs = new EventSource('/api/meta-insta/events');
+        window.__pg2faoptEs.onmessage = function (ev) {
           try {
             var d = JSON.parse(ev.data);
             if (d && d.type === 'batch' && Array.isArray(d.items)) {

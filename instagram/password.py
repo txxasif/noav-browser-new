@@ -89,15 +89,25 @@ class IgPasswordMixin:
             pass
 
         def _challenge_present() -> bool:
-            targets = [p] + list(getattr(p, "frames", []))
-            for tgt in targets:
+            try:
+                body_all = (p.inner_text("body") or "").lower()
+                if any(m in body_all for m in ("password updated", "password saved", "meta account password updated")):
+                    return False
+            except Exception:
+                pass
+            for sel in (
+                'div[role="dialog"]',
+                'div[aria-modal="true"]',
+            ):
                 try:
-                    low = (tgt.evaluate("() => document.body.innerText || ''") or "").lower()
-                    if any(k in low for k in ("check your email", "enter the code we sent",
-                                              "enter code we sent", "get a new code",
-                                              "sent a code to", "enter the 6-digit code",
-                                              "enter the 8-digit code")):
-                        return True
+                    for cand in p.locator(sel).all():
+                        if cand.is_visible():
+                            txt = (cand.inner_text() or "").lower()
+                            if any(k in txt for k in ("check your email", "enter the code we sent",
+                                                      "enter code we sent", "get a new code",
+                                                      "sent a code to", "enter the 6-digit code",
+                                                      "enter the 8-digit code")):
+                                return True
                 except Exception:
                     pass
             return False
@@ -317,7 +327,18 @@ class IgPasswordMixin:
             if el is None:
                 return False
             try:
-                el.scroll_into_view_if_needed(timeout=3000)
+                # Scroll is BEST-EFFORT. A force-click + fill work WITHOUT it, and
+                # a ``scroll_into_view_if_needed`` "element not stable" timeout used
+                # to ABORT the whole password change (observed live 2026-10-03:
+                # "Error typing Current password: Locator.scroll_into_view_if_needed:
+                # Timeout 1445ms exceeded." → "Failed to fill Current password —
+                # aborting", reason=unknown). The field WAS present; only the
+                # smooth-scroll animation had not settled. Never let a cosmetic
+                # scroll kill the step.
+                try:
+                    el.scroll_into_view_if_needed(timeout=1200)
+                except Exception:
+                    pass
                 el.click(force=True, timeout=3000)
                 p.wait_for_timeout(300)
                 el.fill("")
@@ -342,16 +363,19 @@ class IgPasswordMixin:
 
         if curr_inp is not None:
             if not _safe_type_field(curr_inp, curr, "Current password"):
+                self._pw_fail_reason = "type_current_failed"
                 self.log("[⚠️] Failed to fill Current password — aborting.")
                 return False
             p.wait_for_timeout(600)
 
         if not _safe_type_field(new_inp, new_password, "New password"):
+            self._pw_fail_reason = "type_new_failed"
             self.log("[⚠️] Failed to fill New password — aborting.")
             return False
         p.wait_for_timeout(600)
 
         if not _safe_type_field(retype_inp, new_password, "Re-type new password"):
+            self._pw_fail_reason = "type_retype_failed"
             self.log("[⚠️] Failed to fill Re-type new password — aborting.")
             return False
         p.wait_for_timeout(800)
@@ -465,16 +489,19 @@ class IgPasswordMixin:
         error_markers = ("incorrect", "invalid", "wrong", "doesn't match",
                          "does not match", "try again", "something went wrong")
         body = ""
+        success_found = False
         for _poll in range(40):
             p.wait_for_timeout(500)
-            body = self._page_tail(p, 800).lower()
+            body = (p.inner_text("body") or "").lower()
             if any(k in body for k in error_markers):
                 break
             if any(k in body for k in success_markers):
+                success_found = True
                 break
             try:
                 # If form inputs disappeared and not challenge, form submitted successfully
                 if not new_inp.is_visible() and not _challenge_present():
+                    success_found = True
                     break
             except Exception:
                 pass
@@ -490,8 +517,8 @@ class IgPasswordMixin:
                 except Exception:
                     pass
 
-        # Handle post-submit email re-auth if requested
-        if _challenge_present():
+        # Handle post-submit email re-auth ONLY if success was NOT already confirmed and challenge is present
+        if not success_found and _challenge_present():
             self.log('[🔐] Password change asked for email re-auth — fetching the code…')
             try:
                 self._ac_reauth(p, password=curr)
@@ -499,21 +526,23 @@ class IgPasswordMixin:
                 self.log(f"[ac] password re-auth error: {exc}")
             for _poll in range(40):
                 p.wait_for_timeout(500)
-                body = self._page_tail(p, 800).lower()
+                body = (p.inner_text("body") or "").lower()
                 if any(k in body for k in error_markers):
                     break
                 if any(k in body for k in success_markers):
+                    success_found = True
                     break
                 try:
                     if not new_inp.is_visible() and not _challenge_present():
+                        success_found = True
                         break
                 except Exception:
                     pass
 
         self.log(f"[ac] change-pass result: {self._page_tail(p, 300)}")
 
-        # Check for errors
-        if any(k in body for k in error_markers):
+        # Check for errors only if success was not found
+        if not success_found and any(k in body for k in error_markers):
             self._pw_fail_reason = "rejected"
             self.log(f"[⚠️] Password change rejected by Instagram (url={p.url}): {body[:150]}")
             return False
@@ -525,9 +554,14 @@ class IgPasswordMixin:
         except Exception:
             form_closed = True
 
-        if any(k in body for k in success_markers) or form_closed:
+        if success_found or any(k in body for k in success_markers) or form_closed:
             self.password = new_password
             self.log('<font color="#00FF00"><b>[✔] Password set (Meta account).</b></font>')
+            # Dismiss any lingering modal / dialog overlay so next steps proceed unblocked
+            try:
+                self._dismiss_contact_modal(p)
+            except Exception:
+                pass
             self._dismiss_extra_protection_upsell(p)
             p.wait_for_timeout(1000)
             return True

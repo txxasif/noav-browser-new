@@ -166,14 +166,16 @@ class IgIdentityMixin:
     def _dismiss_contact_modal(self, p) -> None:
         """Dismiss any active Add email, Confirmation code, or Contact info overlay modal."""
         for _ in range(6):
-            if p.locator('div[role="dialog"]').count() == 0:
+            if p.locator('div[role="dialog"], div[aria-modal="true"]').count() == 0:
                 break
             closed = False
             for sel in (
-                'div[role="dialog"] [aria-label="Close"]',
-                'div[role="dialog"] [aria-label="Back"]',
-                '[aria-label="Close"]',
-                '[aria-label="Back"]',
+                'div[role="dialog"] [aria-label*="Close" i]',
+                'div[role="dialog"] [aria-label*="Back" i]',
+                'div[role="dialog"] button:has(svg)',
+                'div[role="dialog"] [role="button"]:has(svg)',
+                '[aria-label*="Close" i]',
+                '[aria-label*="Back" i]',
                 'button:has-text("Cancel")',
                 'div[role="button"]:has-text("Cancel")',
             ):
@@ -181,19 +183,32 @@ class IgIdentityMixin:
                     loc = p.locator(sel)
                     cnt = loc.count()
                     if cnt > 0:
-                        # Try the top-most dialog button first
                         for idx in (cnt - 1, 0):
                             candidate = loc.nth(idx)
                             if candidate.is_visible():
                                 self._tap_or_click(p, candidate, timeout=2000)
-                                p.wait_for_timeout(800)
+                                p.wait_for_timeout(600)
                                 closed = True
                                 break
                         if closed:
                             break
                 except Exception:
                     pass
-            if not closed or p.locator('div[role="dialog"]').count() > 0:
+            if not closed or p.locator('div[role="dialog"], div[aria-modal="true"]').count() > 0:
+                try:
+                    p.evaluate("""() => {
+                        const dialogs = document.querySelectorAll('div[role="dialog"], div[aria-modal="true"]');
+                        for (const d of dialogs) {
+                            const btn = d.querySelector('[aria-label*="close" i], button:has(svg), div[role="button"]:has(svg), svg');
+                            if (btn) {
+                                btn.click();
+                                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                            }
+                        }
+                    }""")
+                    p.wait_for_timeout(400)
+                except Exception:
+                    pass
                 try:
                     p.keyboard.press("Escape")
                     p.wait_for_timeout(600)

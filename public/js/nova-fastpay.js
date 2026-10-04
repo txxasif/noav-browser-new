@@ -238,19 +238,25 @@
     if (!root) return;
     shell();
     refresh();
+    function handleFastpayEvent(d) {
+      try {
+        if (d && d.pipeline && d.pipeline !== 'telegram') return;
+        if (d && d.message && /\[fastpay\]|FastPay/i.test(String(d.message))) logLine(String(d.message));
+        else if (d && d.type === 'fastpay_done') {
+          logLine('[engine] FastPay run finished' + (d.exit_code != null ? ' (code ' + d.exit_code + ')' : ''));
+          refresh();
+        }
+      } catch (e) {}
+    }
     try {
-      if (!window.__fastpayEs) {
+      // Shared SSE hub (nova-core.js): one stream per page.
+      if (!window.__fastpayEsShared && typeof window.__novaEsSubscribe === 'function') {
+        window.__fastpayEsShared = true;
+        window.__novaEsSubscribe(handleFastpayEvent);
+      } else if (!window.__fastpayEs && typeof window.__novaEsSubscribe !== 'function') {
         window.__fastpayEs = new EventSource('/api/meta-insta/events');
         window.__fastpayEs.onmessage = function (ev) {
-          try {
-            var d = JSON.parse(ev.data);
-            if (d && d.pipeline && d.pipeline !== 'telegram') return;
-            if (d && d.message && /\[fastpay\]|FastPay/i.test(String(d.message))) logLine(String(d.message));
-            else if (d && d.type === 'fastpay_done') {
-              logLine('[engine] FastPay run finished' + (d.exit_code != null ? ' (code ' + d.exit_code + ')' : ''));
-              refresh();
-            }
-          } catch (e) {}
+          try { handleFastpayEvent(JSON.parse(ev.data)); } catch (e) {}
         };
       }
     } catch (e) {}

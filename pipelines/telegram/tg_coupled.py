@@ -264,7 +264,8 @@ def run_tg_coupled_cycle(
         login_try = raw_name = None
         for _try in range(3):
             if not bot.choose_task(target_task):
-                raise RuntimeError(f"Could not select task '{target_task}' in {bot.bot_name}")
+                _v = getattr(bot, "last_task_verdict", None) or "hidden"
+                raise RuntimeError(f"Could not select task '{target_task}' in {bot.bot_name} [task_unavailable:{_v}]")
             creds = bot.start_task() or {}
             login_try = _clean_username(creds.get("login") or "")
             raw_name = creds.get("first_name") or ""

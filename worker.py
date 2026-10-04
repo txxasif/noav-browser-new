@@ -159,6 +159,18 @@ def _resolve_start_stagger_ms(value=None) -> int:
     return max(0, min(value, 10000))
 
 
+class _SlotStatusSignal:
+    """Mock Qt status signal that consumes internal state changes without logging them."""
+    def __init__(self, slot_id: int):
+        self.slot_id = slot_id
+
+    def emit(self, val):
+        # Internal lifecycle status (e.g. "running", "stopped", "idle", "error").
+        # We do not log raw "stopped" or "running" because it misleads users
+        # into thinking the slot died or aborted mid-run.
+        pass
+
+
 class AISlotWorker:
     """Worker slot interface used by MetaInstaRunner for logging and browser lifecycle."""
 
@@ -173,10 +185,12 @@ class AISlotWorker:
         self.context = None
         self.page = None
         self.log_signal = self
-        self.status_signal = self
+        self.status_signal = _SlotStatusSignal(self.slot_id)
 
     def emit(self, val):
         clean_text = re.sub(r"<[^>]+>", "", str(val)).strip()
+        if not clean_text or clean_text in ("stopped", "running", "idle", "error"):
+            return
         ts = datetime.now().strftime("%H:%M:%S")
         evt = {
             "type": "log",
@@ -521,30 +535,67 @@ TG_DEFAULT_TASK = "Create Inst (No mail)"
 _active_slots_lock = threading.Lock()
 _active_slots = set()
 
-def _is_no_task_error(err_text: str) -> bool:
-    """True ONLY for definitive terminal conditions: bot hourly limit reached or pool empty.
+# Fleet availability agreement: slots whose latest cycle ended in a
+# task-availability miss vote here (slot_id -> reason). The run stops only
+# when EVERY active creator's latest verdict is a miss — one slot's blip
+# never kills the fleet. A slot clears its vote on any successful cycle.
+_task_miss_lock = threading.Lock()
+_task_miss_slots = {}
+_TASK_UNAVAIL_RE = re.compile(r"\[task_unavailable:(\w+)\]")
 
-    Transient profile lease delays, network button lags, or single-task credential
-    glitches must NOT trip this and must not kill the entire fleet prematurely.
+def _task_miss_reason(err_text: str):
+    """Machine-readable task-availability verdict, or None (slot-local issue).
+
+    New ``[task_unavailable:<reason>]`` tags win; legacy sold-out prose maps
+    to "soldout" for older messages. "flood" (Telegram rate-limit on one
+    profile) and anything else stay slot-local and never stop the fleet.
     """
     if not err_text:
-        return False
+        return None
+    m = _TASK_UNAVAIL_RE.search(str(err_text))
+    if m:
+        r = m.group(1).lower()
+        if r in ("hidden", "soldout", "unoffered"):
+            return r
+        return None
     e = str(err_text).lower()
-    return any(p in e for p in (
+    if any(p in e for p in (
         "limit is reached",
         "limit reached",
         "hour's limit",
         "hourly limit",
         "available this hour: 0/",
         "available this hour: 0 ",
-        "no_pool_accounts",
-        "no available ig creator accounts",
-        "pool empty",
         "tasks out of stock",
         "temporarily out of stock",
         "all tasks completed",
         "task list is empty",
+    )):
+        return "soldout"
+    return None
+
+
+def _is_pool_empty_error(err_text: str) -> bool:
+    """Immediate-stop conditions: the IG Creator pool itself is drained.
+
+    Unlike a task-availability miss (which waits for every creator to agree),
+    an empty pool can never resolve by retrying, so the first witness stops
+    the fleet at once.
+    """
+    if not err_text:
+        return False
+    e = str(err_text).lower()
+    return any(p in e for p in (
+        "no_pool_accounts",
+        "no available ig creator accounts",
+        "pool empty",
     ))
+
+
+def _is_no_task_error(err_text: str) -> bool:
+    """Legacy entry point (pool-empty OR task miss). Kept for callers that
+    only need a boolean; the agreement gate uses _task_miss_reason."""
+    return bool(_task_miss_reason(err_text) or _is_pool_empty_error(err_text))
 
 
 def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
@@ -644,6 +695,29 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     mail_provider=mail_provider, stop_event=_stop,
                     add_email=add_email, tg_task=task, tg_bot=tg_bot,
                     use_ig_pool=True)
+            elif str(_runner) == "run_paygo_pool_2fa_cycle":
+                # PayGo "📱 Create Inst (2FA)" POOL DRAIN (new "PayGo 2FA"
+                # panel): same-to-same as the Taskly pool drain — reuse a
+                # pre-created IG account (rename via Web API + bot email link
+                # via 📥 Get code + 2FA from the stored inbox + register).
+                from run_paygo_pool_2fa_cycle import run_paygo_pool_2fa_cycle_once
+                ok, detail = run_paygo_pool_2fa_cycle_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
+                    use_ig_pool=True)
+            elif str(_runner) == "run_paygo_pool_2fa_opt_cycle":
+                # EXPERIMENTAL "PayGo 2FA Optimized" panel: same-to-same as
+                # the PayGo pool drain but WITHOUT the email_link step (own
+                # module/counter — the original branch above is untouched).
+                from run_paygo_pool_2fa_opt_cycle import run_paygo_pool_2fa_opt_cycle_once
+                ok, detail = run_paygo_pool_2fa_opt_cycle_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
+                    use_ig_pool=True)
             else:
                 ok, detail = tg_worker.run_tg_coupled_cycle(
                     AISlotWorker, slot_id=slot_id, is_headless=is_headless,
@@ -659,12 +733,53 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
             if err_text.strip().lower() == "stopped":
                 with _session_lock:
                     _session_count = max(0, _session_count - 1)
+                with _task_miss_lock:
+                    _task_miss_slots.pop(slot_id, None)
                 return "stopped"
             with _session_lock:
                 _session_count = max(0, _session_count - 1)
 
-            # Slot-by-slot graceful shutdown: if bot has no task or pool is empty, retire
-            if _is_no_task_error(err_text):
+            # Fleet availability agreement: a task miss (hidden button,
+            # sold-out stock, unoffered task) VOTES; the run stops only when
+            # EVERY active creator's latest verdict is a miss. Pool-empty
+            # stays an immediate fleet stop (it can never resolve by retry).
+            miss_reason = _task_miss_reason(err_text)
+            if miss_reason:
+                with _task_miss_lock:
+                    _task_miss_slots[slot_id] = miss_reason
+                    votes = dict(_task_miss_slots)
+                with _active_slots_lock:
+                    active = set(_active_slots)
+                agreed = bool(active) and all(s in votes for s in active)
+                if agreed:
+                    _stop.set()
+                    with _active_slots_lock:
+                        _active_slots.discard(slot_id)
+                        remaining = len(_active_slots)
+                    print(f"[*] [Slot {slot_id}] 🛑 Task unavailable on ALL {len(active)} creator(s) (reason={miss_reason}). Stopping fleet.", flush=True)
+                    emit_event({
+                        "type": "slot_event",
+                        "slot_id": slot_id,
+                        "status": "stopped",
+                        "detail": f"Task unavailable on all creators ({miss_reason}) — Creator {slot_id} stopped ({remaining} remaining)."
+                    })
+                    emit_event({
+                        "type": "log",
+                        "pipeline": "telegram",
+                        "message": f"[tg:slot-{slot_id}] All {len(active)} creators agree: task unavailable ({miss_reason}). Stopped."
+                    })
+                    return "no_task"
+                print(f"[*] [Slot {slot_id}] Task miss ({miss_reason}) recorded "
+                      f"({len([s for s in votes if s in active])}/{len(active)} creators agree) — waiting for the rest.", flush=True)
+                emit_event({
+                    "type": "log",
+                    "pipeline": "telegram",
+                    "message": f"[tg:slot-{slot_id}] Task unavailable ({miss_reason}) — waiting for all creators to confirm."
+                })
+                return "ok"
+
+            # Pool-empty: immediate fleet stop (preserved behavior).
+            if _is_pool_empty_error(err_text):
                 # When pool is empty or bot has no task available, stop ALL creators immediately
                 _stop.set()
                 with _active_slots_lock:
@@ -699,6 +814,8 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 # into the same wall.
                 _note_ig_throttle(slot_id, err_text)
                 return "throttled"
+        with _task_miss_lock:
+            _task_miss_slots.pop(slot_id, None)
         _clear_ig_throttle()
         return "ok"
 
@@ -728,6 +845,8 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
         with _active_slots_lock:
             _active_slots.discard(slot_id)
             remaining = len(_active_slots)
+        with _task_miss_lock:
+            _task_miss_slots.pop(slot_id, None)
         if remaining == 0:
             print(f"[*] 🛑 All creators stopped — no tasks available from bot. Engine idle until manual restart.", flush=True)
             emit_event({
@@ -893,27 +1012,37 @@ def main():
             pass
         with _active_slots_lock:
             _active_slots.clear()
+        with _task_miss_lock:
+            _task_miss_slots.clear()
 
-    stop_flag_path = os.path.join(DATA_DIR, "stop_tg.flag")
-    if os.path.exists(stop_flag_path):
-        try:
-            os.remove(stop_flag_path)
-        except Exception:
-            pass
+    # TG Classic stop flag (data/stop_tg.flag) is honoured ONLY by the coupled
+    # (TG) loop. Plain Meta/IG workers must ignore it: the flag is written by
+    # /api/tg/stop and TG Freeze, and with a shared DATA_DIR a TG stop
+    # silently killed a concurrently-running Meta/IG engine that nobody asked
+    # to stop (it exited via "Graceful stop requested"). Likewise the stale
+    # startup delete below must not run here — it would steal a TG stop signal
+    # meant for a concurrently-running TG worker.
+    if _loop is coupled_loop:
+        stop_flag_path = os.path.join(DATA_DIR, "stop_tg.flag")
+        if os.path.exists(stop_flag_path):
+            try:
+                os.remove(stop_flag_path)
+            except Exception:
+                pass
 
-    def _watch_stop_flag():
-        while not _stop.is_set():
-            if os.path.exists(stop_flag_path):
-                _stop.set()
-                try:
-                    os.remove(stop_flag_path)
-                except Exception:
-                    pass
-                print("[*] Graceful stop requested — allowing in-flight tasks to finish...", flush=True)
-                break
-            time.sleep(0.3)
+        def _watch_stop_flag():
+            while not _stop.is_set():
+                if os.path.exists(stop_flag_path):
+                    _stop.set()
+                    try:
+                        os.remove(stop_flag_path)
+                    except Exception:
+                        pass
+                    print("[*] Graceful stop requested — allowing in-flight tasks to finish...", flush=True)
+                    break
+                time.sleep(0.3)
 
-    threading.Thread(target=_watch_stop_flag, daemon=True).start()
+        threading.Thread(target=_watch_stop_flag, daemon=True).start()
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:

@@ -97,6 +97,20 @@ _REGISTER_LABELS = ("account registered", "register", "register account",
                     "confirm registration", "confirm", "done")
 _REGISTER_BAD = ("cancel", "back", "return", "menu", "stop", "balance")
 
+# A task is LIVE (mid-flight) while the newest bot text contains one of these.
+# reset_to_main_menu / cancel_task must NEVER send Cancel here — observed
+# 2026-10-03/04: Cancel tapped into a cookie prompt, a 2FA-key prompt, or a
+# task preview ("Review time…") reset the task ("Our previous conversation
+# was reset"). Includes the preview: mid-cycle retries must not kill a task
+# that was just selected but not Started yet.
+_ACTIVE_TASK_MARKERS = (
+    "please send the account cookie", "send the account cookie",
+    "please send your cookie", "please send the cookie",
+    "send the 2fa key", "please send the 2fa", "enter your 2fa key",
+    "press the button to get the code",
+    "confirm registration", "please send the account",
+)
+
 # Deterministic per-account device identity (seeded by the account id) so two
 # MTProto sessions never present the same app/device pair (invariant 25).
 _APP_VERSIONS = ("4.16.8", "4.15.2", "4.14.12", "4.13.1")
@@ -453,6 +467,15 @@ class MtprotoTasklyBot:
         self.one_time_code = None
         self._client = None
         self._entity = None
+        # Machine-readable outcome of the last choose_task() call (None until
+        # it runs, "ok" on success). Runners surface it as
+        # "task_unavailable:<reason>" so the worker can tell a HIDDEN task
+        # button from SOLD-OUT stock without fragile prose matching.
+        # Reasons: "unoffered" (registry refuses this bot+task), "hidden"
+        # (button absent twice), "soldout" (limit/counter/0-stock or no Start
+        # key), "flood" (Telegram flood-limit on this profile — slot-local,
+        # never a fleet stop).
+        self.last_task_verdict = None
 
     # -- lifecycle ------------------------------------------------------
     def start(self, **_kw):
@@ -883,6 +906,20 @@ class MtprotoTasklyBot:
                 self._clear_flood_until()
                 return True
 
+            # NEVER cancel a LIVE task. The bot's task keyboard ALWAYS carries a
+            # Cancel button (e.g. [📥 Get code] [❌ Cancel] / [🥧 send Cookie]
+            # [❌ Cancel]), so ANY errant reset — a second slot, the PayGo stock
+            # probe, choose_task's retry, a stale lease — used to tap it and kill a
+            # task that was mid-flight. Observed live 2026-10-03: the bot tapped
+            # Cancel right after "🍪 Please send the account Cookie:", then the
+            # cookie was sent into a dead task ("Action cancelled" after the
+            # prompt). A task awaiting the cookie / 2FA key must be LEFT ALONE.
+            if any(k in low for k in _ACTIVE_TASK_MARKERS):
+                self.log("[tg] reset_to_main_menu: task is ACTIVE (awaiting cookie/key) — "
+                         "NOT cancelling (invariant 23).")
+                self._clear_flood_until()
+                return True
+
             # Step 3: Handle cancel or back buttons in active sub-menus
             cbtn = next((b for b in btns if "cancel" in _norm_btn(b)), None)
             if cbtn:
@@ -908,7 +945,19 @@ class MtprotoTasklyBot:
                 self._clear_flood_until()
                 return True
 
-            # Step 5: Absolute fallback when NO buttons exist at all:
+            # Step 5: Absolute fallback when NO buttons exist at all. Re-check
+            # the chat FIRST: keyboards swap asynchronously, so "no buttons"
+            # can be a transient gap on a LIVE task — /start there resets it
+            # ("Our previous conversation was reset", observed 2026-10-04).
+            try:
+                _fresh_low = self._last_text().lower()
+            except Exception:
+                _fresh_low = ""
+            if any(k in _fresh_low for k in _ACTIVE_TASK_MARKERS):
+                self.log("[tg] reset_to_main_menu: no buttons but task looks ACTIVE — "
+                         "NOT sending /start (invariant 23).")
+                self._clear_flood_until()
+                return True
             # Strictly throttle /start to once every 60s per account
             now = time.time()
             last_start = MtprotoTasklyBot._last_start_times.get(self.tg_id, 0.0)
@@ -953,6 +1002,12 @@ class MtprotoTasklyBot:
                 self.log("[tg] cancel_task: task looks SUBMITTED/under review — "
                          "refusing to cancel (invariant 23).")
                 return False
+            # Same live-task guard as reset_to_main_menu: a task awaiting the
+            # cookie / 2FA key must not be cancelled by an unrelated error path.
+            if any(k in low for k in _ACTIVE_TASK_MARKERS):
+                self.log("[tg] cancel_task: task is ACTIVE (awaiting cookie/key) — "
+                         "refusing to cancel (invariant 23).")
+                return False
             btns, _m = self._buttons()
             cbtn = next((b for b in btns if "cancel" in b.lower()), None)
             if cbtn:
@@ -961,6 +1016,41 @@ class MtprotoTasklyBot:
         except Exception:
             pass
         return False
+
+    def clear_orphan_task(self):
+        """Cancel ONE orphan task left by a killed engine — fresh-lease startup only.
+
+        After a preempt/SIGTERM the old engine is dead but its bot tasks stay
+        live on every TG account. A fresh cycle inheriting such a chat can
+        never walk the menu (mid-task keyboards hold no task buttons), so it
+        spins on hidden forever — observed 2026-10-04: 5/6 cookie slots stuck
+        while the ACTIVE guards protected the corpses. Call ONCE right after
+        leasing, NEVER mid-cycle (mid-cycle keeps refusing via cancel_task).
+        Still refuses submitted/under-review states. Probes never Start, so a
+        racing probe's preview is the only collateral — and it fails open.
+        """
+        try:
+            low = self._last_text().lower()
+            if any(p in low for p in ("report has been received", "under review", "check your work")):
+                self.log("[tg] clear_orphan_task: task looks SUBMITTED/under review — leaving it.")
+                return False
+            btns, _m = self._buttons()
+            cbtn = next((b for b in btns if "cancel" in _norm_btn(b)), None)
+            if cbtn:
+                self._send(cbtn)
+                self.log("[tg] clear_orphan_task: cancelled one orphan task from a dead run — menu should be clean.")
+                time.sleep(1.5)
+                return True
+            rbtn = next((b for b in btns
+                         if any(k in _norm_btn(b) for k in ("return", "back", "main menu"))), None)
+            if rbtn:
+                self._send(rbtn)
+                time.sleep(1.0)
+                return True
+            return True
+        except Exception as exc:
+            self.log(f"[tg] clear_orphan_task note: {exc}")
+            return False
 
     def _pick_task_button(self, btns, task, clean):
         """Legacy fuzzy picker — kept for interface parity only.
@@ -999,7 +1089,7 @@ class MtprotoTasklyBot:
                 return None
             time.sleep(0.5)
 
-    def choose_task(self, task=TG_DEFAULT_TASK):
+    def choose_task(self, task=TG_DEFAULT_TASK, level_timeout=8.0, tries=2):
         """Walk the registry button path for this bot — strict, no fallback.
 
         ``tg_tasks.resolve`` maps the requested task for THIS bot only. An
@@ -1009,26 +1099,41 @@ class MtprotoTasklyBot:
         started the wrong task are gone. Stock gaps (task temporarily
         absent) poll each level briefly, then fail loud with the missing
         level so the cycle cancels instead of improvising.
+
+        Records ``self.last_task_verdict`` ("ok" | "unoffered" | "hidden" |
+        "soldout" | "flood") for the fleet availability gate.
         """
         try:
             from tg_tasks import resolve, LABELS
         except ImportError:
+            self.last_task_verdict = "hidden"
             self.log("[tg] tg_tasks registry unavailable — refusing to pick")
             return False
         task_id, levels = resolve(self.bot_target, task)
         if task_id is None:
+            self.last_task_verdict = "unoffered"
             self.log(f"[tg] ❌ {levels} (task={task!r}, bot={self.bot_target})")
             return False
+        self.last_task_verdict = None
         want = LABELS.get(task_id, task)
-        for _try in range(2):
+        # Only the Cookies tasks publish the hourly stock counter
+        # ("Available this hour: 0/5700"). A stale 0-stock message from an
+        # earlier Cookies check must never mark a 2FA task sold out.
+        is_cookies_task = "cookie" in str(task_id or "").lower()
+        for _try in range(max(1, int(tries or 1))):
             if not self.reset_to_main_menu():
                 if getattr(self, "_last_flood_wait", 0) > time.time():
+                    self.last_task_verdict = "flood"
                     self.log("[tg] choose_task: aborting — account is currently flood-limited by Telegram.")
                     return False
+            try:
+                base_id = self._last_id() or 0
+            except Exception:
+                base_id = 0
             navigated = []
             failed = None
             for depth, level in enumerate(levels):
-                pick = self._await_level(level, timeout=8.0)
+                pick = self._await_level(level, timeout=level_timeout)
                 if not pick:
                     failed = depth
                     break
@@ -1038,22 +1143,44 @@ class MtprotoTasklyBot:
             if failed is None:
                 for p in navigated:
                     self.log(f"[tg] Selected task: {p}")
-                # Check for limit / sold out messages from bot
-                for t in self._recent_texts(4):
+                # Sold-out check — FRESH messages only (posted after our
+                # selection). Scanning stale history made an old Cookies
+                # "0/5700" or an old limit notice veto a healthy 2FA pick.
+                try:
+                    fresh = []
+                    for m in self._messages(limit=10, min_id=base_id):
+                        if getattr(m, "out", False):
+                            continue
+                        t = (getattr(m, "text", "") or "").strip()
+                        if t:
+                            fresh.append(t)
+                        if len(fresh) >= 4:
+                            break
+                except Exception:
+                    fresh = []
+                phrases = ("limit is reached", "hour's limit")
+                if is_cookies_task:
+                    phrases = phrases + ("available this hour: 0/", "available this hour: 0 ")
+                for t in fresh:
                     tl = t.lower()
-                    if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
-                        self.log(f"[tg] choose_task: {self.bot_target} hourly limit reached: {t.strip()}")
+                    if any(ph in tl for ph in phrases):
+                        self.last_task_verdict = "soldout"
+                        self.log(f"[tg] choose_task: {self.bot_target} hourly limit reached: {t.strip()[:120]}")
                         return False
                 # The bot answers with the task preview, whose keyboard
                 # carries "▶️ Start". (FastPay has no Start button — selecting task issues creds immediately).
                 if self.bot_target != "fastpay":
-                    if not self._wait_for_button("start", timeout=8):
+                    if not self._wait_for_button("start", timeout=12):
+                        self.last_task_verdict = "soldout"
                         self.log(f"[tg] ⚠️ task selected but no Start key appeared (sold out or limit reached)")
                         return False
+                self.last_task_verdict = "ok"
                 return True
+            self.last_task_verdict = "hidden"
             self.log(f"[tg] '{want}' not available right now "
                      f"(level {failed + 1}/{len(levels)} missing; "
                      f"had: {navigated or 'main menu'}) — not substituting.")
+        self.last_task_verdict = "hidden"
         self.log(f"[tg] task '{want}' not found.")
         return False
 
@@ -1099,6 +1226,14 @@ class MtprotoTasklyBot:
                         except Exception as exc:
                             self.log(f"[tg] inline Start click failed: {exc}")
                 if sent is None:
+                    for m in reversed(self._messages(limit=6)):
+                        txt = (getattr(m, "text", "") or "").replace("`", "").replace("*", "")
+                        if re.search(r"(?:Login|Username):\s*.+", txt, re.I) and re.search(r"Password:\s*\S+", txt, re.I):
+                            found = self._parse_creds(txt)
+                            if found and found.get("login") and found.get("password"):
+                                self.creds = found
+                                self.log(f"[tg] start_task: recovered active creds already sent by bot → {self.creds}")
+                                return self.creds
                     for t in self._recent_texts(4):
                         tl = t.lower()
                         if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
@@ -1239,9 +1374,8 @@ class MtprotoTasklyBot:
             btns = []
         hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
         if hit:
-            self.log(f"[tg] '{hit}' button still on keyboard — clicking to advance bot state before submitting 2FA key…")
+            self.log(f"[tg] '{hit}' button still on keyboard — tapping it and submitting 2FA key immediately…")
             self._send(hit)
-            time.sleep(1.5)
 
         before_id = self._last_id()
         self._send(clean)
@@ -1506,6 +1640,10 @@ class MtprotoTasklyBot:
         self.log("[tg] no fresh verdict after register send — treating as UNCONFIRMED (not rejected).")
         return False
 
+    def get_last_task_verdict(self):
+        return getattr(self, "last_task_verdict", None)
+
+
 
 # ==============================================================================
 # Pooled warm workers — same shape/API as tg_bot.PooledTelegramBot
@@ -1677,8 +1815,20 @@ class MtprotoPooledBot:
     def open_bot(self):
         return self._call("open_bot")
 
+    @property
+    def last_task_verdict(self):
+        try:
+            return self._call("get_last_task_verdict")
+        except Exception:
+            return getattr(self, "_last_task_verdict", None)
+
     def choose_task(self, task=TG_DEFAULT_TASK):
-        return self._call("choose_task", task)
+        res = self._call("choose_task", task)
+        try:
+            self._last_task_verdict = self._call("get_last_task_verdict")
+        except Exception:
+            pass
+        return res
 
     def start_task(self):
         return self._call("start_task")
@@ -1700,6 +1850,12 @@ class MtprotoPooledBot:
 
     def cancel_task(self):
         return self._call("cancel_task")
+
+    def clear_orphan_task(self):
+        try:
+            return self._call("clear_orphan_task")
+        except Exception:
+            return False
 
     def _sleep_flood(self, exc, what: str = "request") -> int:
         secs = MtprotoTasklyBot._flood_wait_seconds(exc)
@@ -1812,3 +1968,55 @@ class MtprotoPooledBot:
     def close_inspectors(cls, *a, **kw) -> int:
         """No browsers to shed — no-op (kept for worker parity)."""
         return 0
+
+
+def probe_task_availability(bot_target, task, level_timeout=8.0, tries=2):
+    """Single-lease availability probe: is ``task`` currently pickable on ``bot_target``?
+
+    Non-blocking: acquires an idle profile with timeout=0 and releases it in
+    ``finally`` — never disturbs running workers. Walks the registry button
+    path WITHOUT pressing Start (choose_task never starts anything), so the
+    probe creates no task and costs nothing.
+
+    Returns {"ok": True, "available": bool, "reason": ...} where reason is one
+    of "ok" | "unoffered" | "hidden" | "soldout" | "flood". {"ok": False,
+    "busy": True} when every profile is leased (callers should fail OPEN and
+    let the mid-run all-slots gate decide).
+    """
+    try:
+        import tg_accounts as _tgm
+    except ImportError:
+        return {"ok": False, "error": "tg_accounts unavailable"}
+    try:
+        manager = _tgm.tg_manager
+        if not manager.usable():
+            return {"ok": False, "error": "No usable Telegram accounts in pool"}
+        acct = manager.acquire(timeout=0.0, bot="task_probe")
+        if not acct:
+            return {"ok": False, "busy": True,
+                    "error": "All Telegram profiles busy — skipping pre-flight probe"}
+        tg_id = acct.get("id")
+        bot = None
+        try:
+            bot = MtprotoTasklyBot(session_path=session_file(tg_id),
+                                   tg_id=tg_id, bot_target=(bot_target or "taskly").lower(),
+                                   log=lambda *a: None)
+            bot.start()
+            picked = bot.choose_task(task, level_timeout=level_timeout, tries=tries)
+            verdict = bot.last_task_verdict or ("ok" if picked else "hidden")
+            return {"ok": True, "available": bool(picked), "reason": verdict,
+                    "tg_id": tg_id}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:200]}
+        finally:
+            try:
+                if bot is not None:
+                    bot.disconnect()
+            except Exception:
+                pass
+            try:
+                manager.release(tg_id)
+            except Exception:
+                pass
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:200]}

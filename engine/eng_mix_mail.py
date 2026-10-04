@@ -367,11 +367,18 @@ class EngineMailMixin:
                 return None
             msgs = res.get("messages") or []
 
-            # Sort newest messages first so we never match an old email's code
+            # Sort newest messages first so we never match an old email's code.
+            # mail.td returns ``created_at`` (snake_case, ISO-8601 with offset) —
+            # NOT camelCase. Listing only ``createdAt``/``updatedAt`` fell through
+            # to ``id`` (a UUID), so the order was ARBITRARY and an OLD code could
+            # be returned (the "This code doesn't work" stale-code class). Check
+            # every known spelling before falling back to id.
             try:
                 msgs = sorted(
                     msgs,
-                    key=lambda m: str(m.get("createdAt") or m.get("updatedAt") or m.get("id") or ""),
+                    key=lambda m: str(m.get("created_at") or m.get("createdAt")
+                                      or m.get("updated_at") or m.get("updatedAt")
+                                      or m.get("id") or ""),
                     reverse=True,
                 )
             except Exception:

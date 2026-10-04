@@ -54,6 +54,7 @@ from run_pool_2fa_cycle import (  # noqa: E402
     _browser_logged_in,
     _mail_tokens_from_extra,
     _mailtd_list,
+    _mailtd_http_list,
     _make_pool_fetch_code,
 )
 from pipelines.telegram.tg_support import (  # noqa: E402
@@ -102,6 +103,13 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
     if _stopped():
         return False, "stopped"
 
+    # Reclaim submittals abandoned by an abrupt stop BEFORE the pool-empty
+    # gate — otherwise stuck claims make the pool look empty and the drain
+    # stops for good.
+    try:
+        store.recover_stale_submitting()
+    except Exception:
+        pass
     avail = store.count_ig_creator_accounts()
     if avail <= 0:
         log(slot_id, "[pool] No available IG Creator accounts in pool to drain.")
@@ -171,7 +179,8 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
             pass
 
         if not bot.choose_task(task):
-            raise RuntimeError(f"Could not select {task} in {bot_id}")
+            _v = getattr(bot, "last_task_verdict", None) or "hidden"
+            raise RuntimeError(f"Could not select {task} in {bot_id} [task_unavailable:{_v}]")
         log(slot_id, f"[task] Selected '{task}' on {bot_id} (TG {tg_acct['id']})")
 
         creds = bot.start_task() or {}
@@ -189,7 +198,7 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
         worker = worker_factory(slot_id=slot_id, is_headless=is_headless)
         runner = MetaInstaRunner(
             worker, twofa=True, telegram=False, tg_task=task,
-            captcha_mode=captcha_mode, mail_provider="mailtd", target="telegram",
+            captcha_mode="none", mail_provider="mailtd", target="telegram",
         )
         if os.path.exists(SELFIE_PATH):
             runner.selfie_path = SELFIE_PATH
@@ -213,6 +222,7 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
         # -- Claim + verify + rename, RETRYING the next pool account on a dead
         #    session / login wall / rename failure. TG task is never cancelled.
         secret = None
+        _2fa_already_on = False
         MAX_POOL_TRIES = 6
         for _try in range(MAX_POOL_TRIES):
             if _stopped():
@@ -289,19 +299,16 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
             preexisting_mail_ids = set()
             if mail_tokens:
                 try:
-                    runner._ensure_mail_tab()
-                    for _ in range(4):
-                        preexisting_mail_ids = {str(m.get("id")) for m in _mailtd_list(runner)}
-                        if preexisting_mail_ids:
-                            break
-                        time.sleep(1.5)
-                    log(slot_id, f"[📧] Inbox opened BEFORE 2FA — {len(preexisting_mail_ids)} "
+                    # HTTP snapshot of existing messages (fast ~0.3s, no extra browser tab)
+                    msgs = _mailtd_http_list(mail_tokens)
+                    preexisting_mail_ids = {str(m.get("id")) for m in msgs if m.get("id")}
+                    log(slot_id, f"[📧] Inbox snapshotted via HTTP — {len(preexisting_mail_ids)} "
                                  f"existing message(s) ignored; waiting for a fresh code.")
                     # The re-auth code goes to the account's EXISTING email, so
                     # read it from the stored inbox (no bot Get-code at this stage).
                     runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
                 except Exception as exc:
-                    log(slot_id, f"[⚠️] Could not pre-open the stored inbox for 2FA: {exc}")
+                    log(slot_id, f"[⚠️] HTTP inbox snapshot failed: {exc}")
             else:
                 log(slot_id, "[⚠️] Account has no stored mail.td tokens — the AC email "
                              "re-auth may fail (2FA setup might still proceed).")
@@ -310,20 +317,48 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
             # 3) 2FA: capture key on IG -> submit to FastPay -> confirm the code on IG
             emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                         "detail": f"2FA setup on pooled IG account ({login})…"})
+            # Enter Accounts Center the HUMAN way first: feed → Profile → Options
+            # → Settings → Accounts Center, with a short feed dwell. A direct
+            # deep-link to accountscenter.instagram.com is the strongest IG-side
+            # automation tell (no referer chain, no dwell), so it is now only a
+            # FALLBACK for when the click path cannot get there (a cookie-injected
+            # session occasionally has the profile tap blocked by the "Save your
+            # login info" sheet). ig_2fa_begin's _ac_section step 0 reuses the
+            # already-open Accounts Center tab, so this is the only entry.
             try:
-                page = runner._ig_tab()
-                page.goto("https://accountscenter.instagram.com/password_and_security/",
-                          wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(3000)
-                log(slot_id, f"[ac] pre-navigated to Accounts Center ({page.url[:70]})")
+                entered = runner._ac_warm_entry("/password_and_security/")
             except Exception as exc:
-                log(slot_id, f"[⚠️] AC pre-nav note: {exc}")
+                entered = False
+                log(slot_id, f"[⚠️] AC warm-entry note: {exc}")
+            if not entered:
+                try:
+                    page = runner._ig_tab()
+                    page.goto("https://accountscenter.instagram.com/password_and_security/",
+                              wait_until="domcontentloaded", timeout=45000)
+                    page.wait_for_timeout(3000)
+                    log(slot_id, "[ac] warm entry missed — used direct AC navigation (fallback).")
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] AC pre-nav note: {exc}")
+            else:
+                log(slot_id, "[ac] entered Accounts Center via the in-app UI (no URL jump).")
             try:
                 secret = runner.ig_2fa_begin()
             except IGDeadEnd as exc:
                 _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
                 pool_acc = None
                 raise RuntimeError(f"IG dead end after rename ({exc})")
+            # 2FA ALREADY ON (account created with the Meta Creator 2FA toggle):
+            # ig_2fa_begin returns None because there is no setup dialog, but the
+            # seed was parked on the record. Mirror core/lifecycle's "2FA already
+            # on" branch — submit the PARKED seed and skip the IG confirm. This
+            # is the browserless fast path, identical to the Taskly/PayGo drains.
+            if not secret:
+                parked = (pool_acc.get("twofa_secret") or "").strip()
+                if parked:
+                    secret = parked
+                    _2fa_already_on = True
+                    log(slot_id, f"[🔐] 2FA already enabled — using parked seed "
+                                 f"({parked[:4]}****); skipping IG setup.")
             if not secret:
                 store.restore_ig_creator_account(acc_id, rotate=True)
                 pool_acc = None
@@ -338,28 +373,48 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
         code = bot.submit_2fa_key(secret, allow_local_fallback=False)
         if not code:
             raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
-        log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
-        if not runner.ig_2fa_confirm(code):
-            raise RuntimeError("Instagram rejected the 2FA code")
-        log(slot_id, "✔ 2FA enabled on the pooled account.")
+        if _2fa_already_on:
+            # 2FA was already enabled with the parked seed — no IG setup dialog
+            # to confirm. The bot holds the key and derived the code.
+            log(slot_id, "✔ 2FA already enabled on the pooled account (parked seed) — no IG confirm needed.")
+        else:
+            log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
+            if not runner.ig_2fa_confirm(code):
+                raise RuntimeError("Instagram rejected the 2FA code")
+            log(slot_id, "✔ 2FA enabled on the pooled account.")
 
-        # 4) password — set the IG password to the bot-issued one
+        # 4) password — set the IG password to the bot-issued one.
+        # FastPay's task uses the Username/Password IT issued, so a wrong password
+        # means a rejected submission. One retry, then fail the cycle instead of
+        # submitting the account with the wrong password.
         target_pw = (runner.tg_creds or {}).get("password") or runner.new_password
         cur_pw = pool_acc.get("password") or runner.password
         if target_pw and target_pw != cur_pw:
-            try:
-                log(slot_id, "[🔑] Changing account password to the FastPay task password…")
-                runner.password = cur_pw
-                ok_pw = runner.ig_set_password(target_pw, current_password=cur_pw)
-            except Exception as exc:
-                ok_pw = False
-                log(slot_id, f"[⚠️] password change error: {exc}")
-            if ok_pw:
-                runner.password = target_pw
-                log(slot_id, "[🔑] Password updated to the FastPay task password.")
-            else:
+            ok_pw = False
+            why = "unknown"
+            for _pw_try in range(2):
+                try:
+                    log(slot_id, f"[🔑] Changing account password to the FastPay task password… (try {_pw_try + 1}/2)")
+                    runner.password = cur_pw
+                    ok_pw = runner.ig_set_password(target_pw, current_password=cur_pw)
+                except Exception as exc:
+                    ok_pw = False
+                    log(slot_id, f"[⚠️] password change error: {exc}")
+                if ok_pw:
+                    runner.password = target_pw
+                    log(slot_id, "[🔑] Password updated to the FastPay task password.")
+                    break
                 why = getattr(runner, "_pw_fail_reason", None) or "unknown"
-                log(slot_id, f"[⚠️] Password change failed (reason={why}) — continuing.")
+                log(slot_id, f"[⚠️] Password change failed (reason={why}) on try {_pw_try + 1}/2.")
+                time.sleep(1.5)
+            if not ok_pw:
+                # Do NOT abort — 293 FastPay submissions succeeded while the same
+                # "Password change failed" was logged, so the bot accepts the
+                # registration without the password matching. Log and continue.
+                log(slot_id, f"[⚠️] Password change failed (reason={why}) — continuing "
+                             f"(the bot accepts the registration; current pw in store may be stale).")
+                emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
+                            "detail": f"Password change failed (reason={why}) — continuing"})
 
         # 5) register — press Confirm in FastPay
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",

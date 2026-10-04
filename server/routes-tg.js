@@ -3,6 +3,7 @@ let _orchestratorInit = false;
 // One withdrawal at a time: two concurrent runs would each freeze/unfreeze the
 // same file flag and could unfreeze while the other is still touching sessions.
 let _withdrawing = false;
+let _lastProbeCache = { bot: '', task: '', time: 0, result: null };
 
 module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
   if (!_orchestratorInit) {
@@ -587,6 +588,31 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     return true;
   }
 
+  // GET /api/tg/task-availability?bot=&task= — single-lease pre-flight probe.
+  // Walks the registry button path WITHOUT pressing Start (creates nothing,
+  // costs nothing). Fail-OPEN: when every profile is busy or the probe
+  // errors, the start proceeds and the mid-run all-slots gate decides.
+  if (pathname === '/api/tg/task-availability' && req.method === 'GET') {
+    (async () => {
+      const bot = String(urlObj.searchParams.get('bot') || 'taskly').slice(0, 32);
+      const task = String(urlObj.searchParams.get('task') || '').slice(0, 80);
+      if (!task) {
+        sendJson(req, res, { ok: false, error: 'query param task is required' }, 400);
+        return;
+      }
+      try {
+        const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_task_probe.py',
+          ['--bot', bot, '--task', task], 75000);
+        // Never cache a flaky single-account "hidden" (see /api/tg/start).
+        if (r && !(r.ok && r.available === false && (r.reason || 'hidden') === 'hidden')) _lastProbeCache = { bot, task, time: Date.now(), result: r };
+        sendJson(req, res, r);
+      } catch (e) {
+        sendJson(req, res, { ok: false, error: String((e && e.message) || e).slice(0, 200) });
+      }
+    })();
+    return true;
+  }
+
   if (pathname === '/api/tg/status' && req.method === 'GET') {
     (async () => {
       const stats = readTgStats();
@@ -594,6 +620,8 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const subTaskly2fa = stats.taskly2fa || 0;
       const subFastpay2fa = stats.fastpay2fa || 0;
       const subPaygoPool = stats.paygo_pool || 0;
+      const subPaygo2fa = stats.paygo2fa || 0;
+      const subPaygo2faopt = stats.paygo2faopt || 0;
       const subPaygo = stats.paygo || 0;
       const subFastpay = stats.fastpay || 0;
       const submitted = stats.submitted != null ? stats.submitted : (subTaskly + subPaygo + subFastpay);
@@ -628,6 +656,8 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         tg_submitted_taskly2fa: subTaskly2fa,
         tg_submitted_fastpay2fa: subFastpay2fa,
         tg_submitted_paygo_pool: subPaygoPool,
+        tg_submitted_paygo2fa: subPaygo2fa,
+        tg_submitted_paygo2faopt: subPaygo2faopt,
         tg_submitted_paygo: subPaygo,
         tg_submitted_fastpay: subFastpay,
         tg_total_taskly: subTaskly,
@@ -703,6 +733,38 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         return;
       }
 
+      // Task-availability gate: single-lease probe (never presses Start).
+      // Hard-blocks only on soldout/unoffered/flood — a single-account
+      // "hidden" is flaky (slow menu, stale lease state) and must NOT veto
+      // the start: the mid-run all-slots gate (worker.py) already requires
+      // ALL creators to agree before stopping. Fails OPEN on hidden,
+      // busy, or error.
+      try {
+        let probe = null;
+        if (_lastProbeCache.bot === tgBot && _lastProbeCache.task === tgTask && (Date.now() - _lastProbeCache.time < 60000)) {
+          probe = _lastProbeCache.result;
+        } else {
+          probe = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_task_probe.py',
+            ['--bot', tgBot, '--task', tgTask], 75000);
+          // Never cache a flaky single-account "hidden" — it would veto the
+          // next start for 60s even when the task is back.
+          if (probe && !(probe.ok && probe.available === false && (probe.reason || 'hidden') === 'hidden')) _lastProbeCache = { bot: tgBot, task: tgTask, time: Date.now(), result: probe };
+        }
+        if (probe && probe.ok && probe.available === false && (probe.reason || 'hidden') !== 'hidden') {
+          releaseStartTg();
+          const why = probe.reason === 'soldout'
+            ? `Task "${tgTask}" is sold out on ${tgBot} right now (${probe.reason}).`
+            : probe.reason === 'unoffered'
+            ? `Task "${tgTask}" is not offered on ${tgBot} — refusing, not substituting.`
+            : `Task "${tgTask}" is not currently shown by ${tgBot} (${probe.reason || 'hidden'}).`;
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'TASK_UNAVAILABLE', reason: probe.reason || 'hidden', error: why }));
+          return;
+        }
+      } catch (e) {
+        console.warn('[tg:start] availability probe failed open:', (e && e.message) || e);
+      }
+
       const useIgPool = (tgBot === 'paygo') && (opts.use_ig_pool === true || opts.use_ig_pool === 'true');
 
       slot().config = { concurrency, headless, target, delay, captcha,
@@ -765,6 +827,8 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
 
       const runRoute = (tgBot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(tgTask)) ? 'taskly2fa'
         : (tgBot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(tgTask)) ? 'fastpay2fa'
+        : (tgBot === 'paygo' && /optim/i.test(tgTask)) ? 'paygo2faopt'
+        : (tgBot === 'paygo' && /paygo\s*2fa/i.test(tgTask)) ? 'paygo2fa'
         : (tgBot === 'paygo' && useIgPool) ? 'paygo_pool'
         : tgBot;
       const rlHandle = ctx.runlog ? ctx.runlog.start('telegram', { argv: args, route: runRoute }) : null;
@@ -775,7 +839,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       // instantly (e.g. a bad kwarg) — you see "started" and no browser tab.
       slot().proc.stdout.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
-        for (const line of feedWorkerStdout(data)) consumeWorkerLine(line, 'tg');
+        for (const line of feedWorkerStdout(data, 'tg')) consumeWorkerLine(line, 'tg');
       });
       slot().proc.stderr.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
@@ -792,7 +856,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       });
       const procRef = slot().proc;
       slot().proc.on('close', code => {
-        flushWorkerBuffer();
+        flushWorkerBuffer('tg');
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
         console.log(`[TG] loop process exited with code ${code}`);
         broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg',
@@ -819,24 +883,36 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
 
       if (slot().proc) {
         const proc = slot().proc;
-        const isWinStop = process.platform === 'win32';
-        if (!isWinStop) {
-          try { process.kill(-proc.pid, 'SIGTERM'); }
-          catch (e) { try { proc.kill('SIGTERM'); } catch (e2) {} }
-        }
-        // Two-phase graceful stop: allow in-flight tasks (rename/submit) up to 5s to finish cleanly
-        setTimeout(() => {
-          if (slot().proc === proc) {
-            try {
-              if (!isWinStop) {
-                try { process.kill(-proc.pid, 'SIGKILL'); } catch (e) {}
-              } else {
-                try { proc.kill(); } catch (e) {}
-              }
-            } catch (e) {}
-            slot().proc = null;
+        // Stamp the stop so the status-path reaper can finish an orphan that
+        // outlives this handler (observed: a pool worker survived SIGTERM 12s+
+        // and kept submitting after Stop).
+        try { slot().stoppedAt = Date.now(); } catch (e) {}
+        const kpg = ctx.killProcessGroup || (function (p, s) {
+          try {
+            if (process.platform !== 'win32') { try { process.kill(-p.pid, s); return; } catch (e) {} }
+            try { p.kill(s); } catch (e2) {}
+          } catch (e3) {}
+        });
+        kpg(proc, 'SIGTERM');
+        // Verify death instead of assuming it: poll exitCode, escalate to
+        // SIGKILL after an 8s grace, then always drop a dead handle. Never
+        // drop a LIVE handle here (that would orphan a running worker while
+        // the panel reports IDLE and allow a double-run).
+        const t0 = Date.now();
+        const check = function () {
+          if (slot().proc !== proc) return; // replaced/reaped elsewhere
+          let dead = false;
+          try { dead = proc.exitCode !== null; } catch (e) { dead = true; }
+          if (dead) { slot().proc = null; return; }
+          if (Date.now() - t0 > 8000) {
+            console.log('[MetaCreator] TG engine ignored SIGTERM after 8s — escalating to SIGKILL (pid=' + proc.pid + ').');
+            kpg(proc, 'SIGKILL');
+            setTimeout(function () { if (slot().proc === proc) slot().proc = null; }, 3000);
+            return;
           }
-        }, 5000);
+          setTimeout(check, 500);
+        };
+        setTimeout(check, 1000);
       }
       slot().config = null;
       broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopping gracefully...' });

@@ -2858,3 +2858,16 @@ body {
 .diag-details[open] summary .diag-chevron {
   transform: rotate(180deg);
 }
+
+/* Standalone / Meta-Only build mode: hides non-Meta sidebar tabs and elements */
+body.meta-only-mode #nav-item-global-pass,
+body.meta-only-mode button[data-view="view-ig-creator"],
+body.meta-only-mode #nav-tg-toggle,
+body.meta-only-mode #tg-submenu,
+body.meta-only-mode button[data-view="view-tg-manager"],
+body.meta-only-mode button[data-view="view-guide"],
+body.meta-only-mode .sidebar-nav > .nav-section-title:nth-of-type(1),
+body.meta-only-mode .sidebar-nav > .nav-section-title:nth-of-type(3),
+body.meta-only-mode .sidebar-nav > .nav-section-title:nth-of-type(4) {
+  display: none !important;
+}

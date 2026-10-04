@@ -28,6 +28,42 @@ except ImportError:  # pragma: no cover - top-level import path
 class IgAcReauthMixin:
     """Email-challenge solving, form-vs-prompt detection, and AC re-auth."""
 
+    def _ac_inbox_has_auth_mail(self) -> bool:
+        """True when the mailbox already holds an "Authenticate your profile" mail.
+
+        Reads the mail.td REST API (the message LIST) instead of the page DOM:
+        the list page has no body text, so a DOM phrase check is almost always
+        False and caused a resend ("Get a new code") on nearly every solve —
+        which invalidates the code already in flight. Returns True (do NOT
+        resend) when the answer is unknown, so a transient read failure can
+        never trigger a destructive resend.
+        """
+        try:
+            mail = getattr(self, "mail", None)
+            if mail is None or mail.is_closed():
+                return True  # unknown — never regenerate blindly
+            res = mail.evaluate("""async () => {
+                try {
+                    const id = localStorage.getItem('tempmail_account_id') || '';
+                    const token = localStorage.getItem('tempmail_token') || '';
+                    if (!id || !token) return null;
+                    const r = await fetch('/api/accounts/' + id + '/messages?page=1',
+                        {headers: {Authorization: 'Bearer ' + token}});
+                    if (!r.ok) return null;
+                    const j = await r.json();
+                    const msgs = (j && j.messages) || [];
+                    return msgs.some(m => {
+                        const blob = ((m.subject || '') + ' ' + (m.from || '') + ' ' + (m.sender || '')).toLowerCase();
+                        return blob.indexOf('authenticate') !== -1;
+                    });
+                } catch (e) { return null; }
+            }""")
+            if res is None:
+                return True  # unknown — don't resend
+            return bool(res)
+        except Exception:
+            return True
+
     def _ac_solve_email_challenge(self, p, timeout: int = 60) -> bool:
         """Handle Accounts Center email security challenge ('Check your email - Enter the code we sent to...')."""
         targets = [p] + list(getattr(p, "frames", []))
@@ -87,8 +123,8 @@ class IgAcReauthMixin:
                     # newest first, 8-digit — never a stale/foreign code.
                     try:
                         code = fetcher("instagram", timeout=wait_sec,
-                                       subject_hint="authenticate your profile|authenticate|security code|meta account code",
-                                       prefer_len=8)
+                                       subject_hint="authenticate your profile|authenticate|security code|meta account code|instagram|security",
+                                       prefer_len=None)
                     except TypeError:
                         code = fetcher("instagram", timeout=wait_sec)
                 except TypeError:
@@ -102,22 +138,19 @@ class IgAcReauthMixin:
                 # solver every round, and a per-call "once" still regenerates
                 # codes faster than delivery (observed 2026-09-19: 4 sends in
                 # ~4 min, each invalidating the last — death spiral). At most
-                # one resend per 5 minutes, and only when no Authenticate
-                # mail exists yet.
+                # one resend per 5 minutes, and only when the inbox REST API
+                # shows NO "Authenticate your profile" mail at all.
+                #
+                # The old test read the mail page's ``document.body.innerText``.
+                # The mail.td LIST page carries no message body, so the phrase
+                # "authenticate your profile" is almost never in that DOM — so
+                # it re-sent on nearly every solve. Two sends ~10s apart were
+                # observed live on the same challenge, and the resend is what
+                # makes a just-fetched code fail with "This code doesn't work".
                 import time as _time
                 if _time.time() - getattr(self, "_ac_new_code_at", 0) < 300:
                     continue
-                try:
-                    inbox = getattr(self, "mail", None)
-                    has_auth = False
-                    if inbox is not None and not inbox.is_closed():
-                        has_auth = "authenticate your profile" in (
-                            inbox.evaluate("() => document.body.innerText || ''") or "").lower()
-                    else:
-                        has_auth = True  # unknown — don't regenerate blindly
-                except Exception:
-                    has_auth = True
-                if has_auth:
+                if self._ac_inbox_has_auth_mail():
                     continue
                 try:
                     for sel in (
@@ -335,6 +368,15 @@ class IgAcReauthMixin:
             is_open = False
             try:
                 cur = (p.inner_text("body") or "").lower()
+                # If password was already updated, challenge is obsolete and completed!
+                if any(m in cur for m in ("password updated", "password saved", "meta account password updated")):
+                    self.log('[ac] Password confirmed updated during email challenge — dismissing dialog…')
+                    try:
+                        self._dismiss_contact_modal(p)
+                    except Exception:
+                        pass
+                    return True
+
                 if any(k in cur for k in ("enter the code we sent", "check your email", "enter code we sent")):
                     is_open = True
             except Exception:
@@ -344,8 +386,42 @@ class IgAcReauthMixin:
                 p.wait_for_timeout(1000)
                 break
 
+            # If Meta rejected the code ("This code doesn't work"), request a fresh code and retry
+            if "this code doesn't work" in cur or "try a new one" in cur:
+                if poll_i in (2, 6):
+                    self.log('[⚠️] Meta rejected email code ("This code doesn\'t work") — requesting fresh code…')
+                    try:
+                        gnc = p.locator('button:has-text("Get a new code"), [role="button"]:has-text("Get a new code"), a:has-text("Get a new code")').first
+                        if gnc.count() and gnc.is_visible():
+                            self._tap_or_click(p, gnc, timeout=2000)
+                            p.wait_for_timeout(1500)
+                            # Fetch new code
+                            new_c = None
+                            if callable(fetcher):
+                                try:
+                                    new_c = fetcher("instagram", timeout=25,
+                                                    subject_hint="authenticate your profile|authenticate|security code|meta account code|instagram|security",
+                                                    prefer_len=None)
+                                except Exception:
+                                    pass
+                            if new_c and new_c != code:
+                                self.log(f'[ac] Entering new code after rejection: {new_c}')
+                                code = new_c
+                                for inp in target_inps:
+                                    try:
+                                        inp.click(force=True, timeout=1000)
+                                        inp.fill("")
+                                        inp.press_sequentially(str(new_c), delay=40)
+                                    except Exception:
+                                        pass
+                                if btn is not None:
+                                    self._tap_or_click(p, btn, timeout=2000)
+                                    primary_inp.press("Enter")
+                    except Exception as exc:
+                        self.log(f'[⚠️] Error recovering from rejected code: {exc}')
+
             # If dialog remains open after 3s and 7s, re-trigger submit
-            if poll_i in (6, 14) and btn is not None:
+            elif poll_i in (6, 14) and btn is not None:
                 try:
                     if btn.is_visible():
                         self.log('[ac] Re-triggering Continue button on email security dialog…')

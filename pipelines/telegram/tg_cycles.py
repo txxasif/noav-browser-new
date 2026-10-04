@@ -220,7 +220,8 @@ def run_tg_submit_one(worker_factory, acct: dict, task: str = TG_DEFAULT_TASK, i
             raise RuntimeError(bot_msg)
         if not bot.choose_task(task):
             bot_error = True
-            raise RuntimeError(f"Task '{task}' could not be selected in {bot.bot_name}")
+            _v = getattr(bot, "last_task_verdict", None) or "hidden"
+            raise RuntimeError(f"Task '{task}' could not be selected in {bot.bot_name} [task_unavailable:{_v}]")
         # Taskly task window: bot auto-cancels ~8 min after Start ("Time's
         # up!"). Budget is logged at every phase boundary; if adapt runs
         # long, prefer Account Registered with username+password+2FA aligned
