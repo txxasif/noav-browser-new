@@ -37,7 +37,34 @@ class IgAcReauthMixin:
         which invalidates the code already in flight. Returns True (do NOT
         resend) when the answer is unknown, so a transient read failure can
         never trigger a destructive resend.
+
+        Pool drains have NO mail tab (``self.mail = None``) but DO store the
+        mail.td token, so read it over plain HTTP first. Previously the tab-only
+        check returned True=unknown there, which BLOCKED the resend and hung the
+        cycle forever when the first OTP email never arrived (2026-10-05: account
+        ai_1791143102720_16 stuck on "Check your email").
         """
+        # (1) Stored-token HTTP read — works with no browser tab.
+        try:
+            toks = getattr(self, "mail_tokens", None) or {}
+            tok = toks.get("tempmail_token")
+            aid = toks.get("tempmail_account_id")
+            if tok and aid:
+                import requests
+                r = requests.get(
+                    f"https://mail.td/api/accounts/{aid}/messages?page=1",
+                    headers={"Authorization": "Bearer " + tok}, timeout=10)
+                if r.status_code != 200:
+                    return True
+                msgs = (r.json() or {}).get("messages") or []
+                return any(
+                    "authenticate" in ((m.get("subject") or "") + " " +
+                                       (m.get("from") or "") + " " +
+                                       (m.get("sender") or "")).lower()
+                    for m in msgs)
+        except Exception:
+            return True
+        # (2) Legacy browser-tab read.
         try:
             mail = getattr(self, "mail", None)
             if mail is None or mail.is_closed():
@@ -116,7 +143,10 @@ class IgAcReauthMixin:
         code = None
         if callable(fetcher):
             for attempt in range(3):
-                wait_sec = 45 if attempt == 0 else 60
+                # First attempt shorter so a LOST email reaches the resend
+                # ("Get a new code") sooner. `_ac_inbox_has_auth_mail` gates the
+                # resend, so a merely-slow email is still picked up next attempt.
+                wait_sec = 25 if attempt == 0 else 60
                 try:
                     # Guide Scenario 2: the AC challenge is ALWAYS subject
                     # "Authenticate your profile" (noreply@account.meta.com),

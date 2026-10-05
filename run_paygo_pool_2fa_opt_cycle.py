@@ -251,71 +251,15 @@ def _make_pool_fetch_code(runner, preexisting_ids, bot=None):
                     return c
             except Exception:
                 pass
+        # NO browser-tab fallback (same hang fix as run_pool_2fa_cycle):
+        # ``_ensure_mail_tab`` opened a new mail.td tab + polled an empty inbox
+        # until timeout on a stale token (2026-10-05). Missing OTP falls through
+        # to the 2FA submit instead of stalling.
         try:
-            runner._ensure_mail_tab()
+            runner.log("[📧] No OTP from stored inbox or bot — not opening a mail tab; "
+                       "continuing (the caller falls through to 2FA).")
         except Exception:
             pass
-        mail = getattr(runner, "mail", None)
-        if mail is None:
-            return None
-        try:
-            if mail.is_closed():
-                return None
-        except Exception:
-            pass
-        end = time.time() + max(5, int(timeout or 60))
-        seen = {}
-        while time.time() < end:
-            msgs = [m for m in _mailtd_list(runner) if str(m.get("id")) not in preexisting_ids]
-            try:
-                msgs.sort(key=lambda m: str(m.get("created_at") or m.get("createdAt")
-                                              or m.get("updatedAt") or m.get("id") or ""),
-                          reverse=True)
-            except Exception:
-                pass
-            for msg in msgs:
-                mid = msg.get("id")
-                subject = str(msg.get("subject") or "").lower()
-                sender = str(msg.get("from") or "").lower()
-                if subject_hint:
-                    hints = [h.strip().lower() for h in str(subject_hint).split("|") if h.strip()]
-                    if not any(h in subject or h in sender for h in hints):
-                        continue
-                text = seen.get(mid)
-                if text is None and mid:
-                    try:
-                        ctx = runner._mailtd_api_ctx() or {}
-                        text = mail.evaluate("""async ({id, mid, token}) => {
-                            try {
-                                const r = await fetch('/api/accounts/' + id + '/messages/' + mid,
-                                    {headers: {Authorization: 'Bearer ' + token}});
-                                if (!r.ok) return '';
-                                const j = await r.json();
-                                return [j.subject||'', j.html_body||'', j.text_body||'', j.text||'', j.body||''].join(' ');
-                            } catch (e) { return ''; }
-                        }""", {"id": ctx.get("id"), "mid": mid, "token": ctx.get("token")}) or ""
-                    except Exception:
-                        text = ""
-                    if not text:
-                        try:
-                            text = " ".join(runner._flatten_values(msg))
-                        except Exception:
-                            text = ""
-                    seen[mid] = text
-                try:
-                    code = runner._pick_code(text or "", keyword, set(), prefer_len=prefer_len)
-                except Exception:
-                    code = None
-                if code:
-                    try:
-                        runner.log(f'[📧] fresh {keyword} code: {code} (subject: {subject[:40]})')
-                    except Exception:
-                        pass
-                    return code
-            try:
-                mail.wait_for_timeout(1500)
-            except Exception:
-                time.sleep(1.5)
         return None
     return _fetch
 
@@ -542,7 +486,6 @@ def run_paygo_pool_2fa_opt_cycle_once(slot_id=95, worker_factory=None, is_headle
                 except Exception:
                     pass
                 ctx.add_cookies(_cookies_for_playwright(cand["cookies"]))
-                runner.insta_page = None
                 page = runner._ig_tab()
                 try:
                     page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
@@ -624,10 +567,14 @@ def run_paygo_pool_2fa_opt_cycle_once(slot_id=95, worker_factory=None, is_headle
                                  f"existing message(s) ignored; waiting for a fresh code.")
                 except Exception as exc:
                     log(slot_id, f"[⚠️] HTTP inbox snapshot failed: {exc}")
-                # Password-change OTP goes to the account's EXISTING (old) email
-                # -> read it from the stored inbox, NOT the bot. The bot's Get
-                # code is reserved for the email-link step below.
-                runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
+            else:
+                log(slot_id, "[⚠️] Account has NO stored mail.td token — the AC email "
+                             "OTP cannot be read; the password step will be skipped.")
+            # ALWAYS override fetch_code (even tokenless) so the base
+            # MailboxMixin.fetch_code — which opens a mail.td browser tab — can
+            # never run in the pool drain. Empty tokens make the HTTP path
+            # return None immediately (no tab, no stall).
+            runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
 
             runner.email = pool_acc.get("email")
             runner.new_password = creds.get("password")
@@ -758,7 +705,23 @@ def run_paygo_pool_2fa_opt_cycle_once(slot_id=95, worker_factory=None, is_headle
         else:
             log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
             if not runner.ig_2fa_confirm(code):
-                raise RuntimeError("Instagram rejected the 2FA code")
+                ok2 = False
+                try:
+                    import re as _re
+                    import pyotp
+                    _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
+                    for _t in range(3):
+                        local = pyotp.TOTP(_s).now()
+                        if local != str(code):
+                            log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
+                            if runner.ig_2fa_confirm(local):
+                                ok2 = True
+                                break
+                        time.sleep(31 - (int(time.time()) % 30))
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
+                if not ok2:
+                    raise RuntimeError("Instagram rejected the 2FA code")
             log(slot_id, "✔ 2FA enabled on the pooled account.")
 
 

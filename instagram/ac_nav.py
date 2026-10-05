@@ -79,12 +79,10 @@ class IgAcNavMixin:
                 labels = ["Two-factor authentication", "Login and security", "Password and security"]
             elif "profiles" in section_path.lower():
                 labels = ["Profiles"]
-            elif "contact_points" in (section_path + label).lower() or "personal" in (section_path + label).lower():
-                # The AC home entry is the PROFILE CARD ("Profiles and personal
-                # details" / "<email> N profiles") → opens /profiles/, where the
-                # "Contact info" row then opens the contact_points dialog.
-                labels = ["Profiles and personal details", "Personal details",
-                          "Contact info", "Contact details", "Profiles"]
+            elif "contact_points" in (section_path + label).lower() or "personal" in (section_path + label).lower() or "account_overview" in (section_path + label).lower():
+                # The AC home entry is the ACCOUNT OVERVIEW CARD ("<email> N profiles") -> opens /account_overview/
+                # Do NOT match generic "Profiles" which leads to the Name/Username/Avatar editor.
+                labels = ["Account overview", "Default contact info", "Contact info", "Personal details"]
             else:
                 labels = [label]
             for lbl in labels:
@@ -498,12 +496,10 @@ class IgAcNavMixin:
                 labels = ["Two-factor authentication", "Login and security", "Password and security"]
             elif "profiles" in section_path.lower():
                 labels = ["Profiles"]
-            elif "contact_points" in (section_path + label).lower() or "personal" in (section_path + label).lower():
-                # The AC home entry is the PROFILE CARD ("Profiles and personal
-                # details" / "<email> N profiles") → opens /profiles/, where the
-                # "Contact info" row then opens the contact_points dialog.
-                labels = ["Profiles and personal details", "Personal details",
-                          "Contact info", "Contact details", "Profiles"]
+            elif "contact_points" in (section_path + label).lower() or "personal" in (section_path + label).lower() or "account_overview" in (section_path + label).lower():
+                # The AC home entry is the ACCOUNT OVERVIEW CARD ("<email> N profiles") -> opens /account_overview/
+                # Do NOT match generic "Profiles" which leads to the Name/Username/Avatar editor.
+                labels = ["Account overview", "Default contact info", "Contact info", "Personal details"]
 
             for _ in range(15):
                 cur_path = (p.url or "").split("?")[0].rstrip("/")
@@ -675,55 +671,46 @@ class IgAcNavMixin:
     def _ac_open_contact_points(self, p=None) -> bool:
         """Open Accounts Center → Contact info/points via the REAL in-app path.
 
-        Verified live via MCP 2026-09-20 (fresh account s578dq@nqmo.com): the AC
-        home has **no direct "Contact info" row** — you go through the profile
-        card:
-
-            AC home → profile card (`account_overview`) → "Default contact info"
-            (the email button) → `/account_overview/contact_points/`
-            → "Add or edit contact info" → "Contact info" dialog.
-
-        The old `_ac_section("/personal_info/contact_points/")` searched the AC
-        home for a section row that does not exist → false "AC section
-        unreachable" (the extra-email step then failed and the task was burned).
+        Verified live via MCP 2026-10-04:
+        1. AC Home -> Account overview card (a[href*="/account_overview/"]) -> /account_overview/
+        2. /account_overview/ -> "Default contact info" (email button) -> /account_overview/contact_points/
+        3. STRICTLY avoid /profiles/ or any profile links which open the Name/Username/Avatar editor.
         """
         p = p or self._ig_tab()
         cur = (p.url or "").split("?")[0].rstrip("/")
         if "contact_points" in cur:
             return True
-        if "accountscenter.instagram.com" not in (p.url or ""):
-            self._ac_navigate_in_app(p, section_path="/profiles/", label="Profiles and personal details")
+
+        # Dismiss /profiles/ subpage modal if currently open (Name/Username/Avatar)
+        if "/profiles" in cur or p.locator('div[role="dialog"]:has-text("Avatar")').count() > 0:
+            self.log('[ac] On /profiles/ subpage; closing modal to return to AC overview…')
+            self._ac_leave_subpage(p)
+            p.wait_for_timeout(1000)
             p = self._ig_tab()
             cur = (p.url or "").split("?")[0].rstrip("/")
-        # 0. Return to the AC home list FIRST. After the password change the
-        # page sits on /password_and_security/ (and 2FA on /two_factor/), which
-        # has NO account_overview/profile-card link — clicking the card there
-        # always misses and the email step never starts (observed live
-        # 2026-09-20: stuck on Login and security → task cancelled).
-        if "account_overview" not in cur:
+
+        if "accountscenter.instagram.com" not in (p.url or ""):
+            self._ac_navigate_in_app(p, section_path="/account_overview/", label="Account overview")
+            p = self._ig_tab()
+            cur = (p.url or "").split("?")[0].rstrip("/")
+
+        # 0. Return to the AC home list first if not in account_overview and not contact_points
+        if "account_overview" not in cur and "contact_points" not in cur:
             try:
                 self._ac_leave_subpage(p)
-                p.wait_for_timeout(1200)
+                p.wait_for_timeout(1000)
                 p = self._ig_tab()
+                cur = (p.url or "").split("?")[0].rstrip("/")
             except Exception:
                 pass
-        # 1. AC home -> profile card (account_overview).
-        if "account_overview" not in cur:
-            for sel in ('a[href*="/account_overview/"]', 'a[href*="/profiles/"]'):
-                try:
-                    el = p.locator(sel).first
-                    if el.count() and el.is_visible():
-                        self._tap_or_click(p, el)
-                        p.wait_for_timeout(2500)
-                        break
-                except Exception:
-                    pass
-        # 2. account_overview -> "Default contact info" (email button) -> contact_points.
-        if "contact_points" not in (p.url or ""):
+
+        # 1. AC home -> Account overview card (STRICTLY a[href*="/account_overview/"], NEVER /profiles/!)
+        if "contact_points" not in cur and "account_overview" not in cur:
             for sel in (
-                'a[href*="contact_points"]',
-                'button:has-text("@")',
-                'div[role="button"]:has-text("@")',
+                'a[href*="/account_overview/"]',
+                'div[role="link"][href*="/account_overview/"]',
+                'a:has-text("profiles"):not([href*="/profiles/"])',
+                'a:has-text("profile"):not([href*="/profiles/"])',
             ):
                 try:
                     el = p.locator(sel).first
@@ -733,8 +720,46 @@ class IgAcNavMixin:
                         break
                 except Exception:
                     pass
+            cur = (p.url or "").split("?")[0].rstrip("/")
+
+        # 2. On /account_overview/ -> Click email button under "Default contact info"
+        # STRICTLY ignore profile links (which open Name/Username/Avatar)
+        if "contact_points" not in (p.url or ""):
+            for _try in range(4):
+                tapped = False
+                for sel in (
+                    'a[href*="contact_points"]',
+                    ':is(h2, [role="heading"]):has-text("Default contact info") ~ * button',
+                    ':is(h2, [role="heading"]):has-text("Default contact info") + * button',
+                    'div[role="dialog"] button:has-text("@")',
+                    'button:has-text("@")',
+                    'div[role="button"]:has-text("@")',
+                    '[aria-label*="@"]',
+                    'a:has-text("Default contact info")',
+                    'div[role="button"]:has-text("Default contact info")',
+                ):
+                    try:
+                        el = p.locator(sel).first
+                        if el.count() and el.is_visible():
+                            self._tap_or_click(p, el)
+                            p.wait_for_timeout(2500)
+                            tapped = True
+                            break
+                    except Exception:
+                        pass
+                for page in self.w.context.pages:
+                    if not page.is_closed() and "contact_points" in (page.url or ""):
+                        self.insta_page = page
+                        p = page
+                        break
+                if tapped or "contact_points" in (p.url or ""):
+                    break
+                p.wait_for_timeout(800)
+
         cur = (p.url or "").split("?")[0].rstrip("/")
         ok = "contact_points" in cur
+        if ok:
+            self.insta_page = p
         self.log(f'[ac] contact points open: {ok} ({cur[:90]})')
         return ok
 

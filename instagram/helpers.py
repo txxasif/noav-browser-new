@@ -49,16 +49,69 @@ def select_all_safe(page, locator) -> None:
 class IgHelpersMixin:
     """Tab lifecycle, sheet suppression, render guard, session handshake."""
 
+    def _close_extra_tabs(self, keep_page=None):
+        """Close zombie/orphan tabs, keeping keep_page (or insta_page) + mail."""
+        target = keep_page or getattr(self, "insta_page", None)
+        try:
+            if hasattr(self, "w") and hasattr(self.w, "context"):
+                for p in list(self.w.context.pages):
+                    if target and p == target:
+                        continue
+                    # NEVER close the mail.td tab: lifecycle reads its
+                    # localStorage (tempmail_token / tempmail_account_id) at
+                    # save time to persist `extra.mail_tokens`. Closing it here
+                    # saved `{}` for ~half of new accounts, and the pool drain
+                    # then could not read the password/2FA email OTP at all
+                    # (2026-10-05: 42/83 accounts tokenless).
+                    if p is getattr(self, "mail", None):
+                        continue
+                    # Never close the primary Meta page if in dual-tab meta_insta pipeline
+                    is_meta_runner = getattr(self, "current_mode", "") not in (
+                        "pool_2fa", "paygo_pool_2fa", "fastpay_pool_2fa", "paygo_pool_2fa_opt"
+                    )
+                    if is_meta_runner and p == getattr(self.w, "page", None):
+                        continue
+                    if not p.is_closed():
+                        try:
+                            p.close()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     def _ig_tab(self):
-        """Reuse the Instagram tab, or open it in the SAME context (same session)."""
+        """Reuse the Instagram tab, or open it in the SAME context (same session).
+        Strictly enforce single-tab invariant by reusing existing open pages and closing zombies."""
         page = getattr(self, "insta_page", None)
         try:
             if page is not None and not page.is_closed():
+                self._close_extra_tabs(keep_page=page)
                 return page
         except Exception:
             pass
+
+        # Check existing open pages in the context before opening a new one
+        try:
+            is_pool_mode = getattr(self, "current_mode", "") in (
+                "pool_2fa", "paygo_pool_2fa", "fastpay_pool_2fa", "paygo_pool_2fa_opt"
+            )
+            meta_page = getattr(getattr(self, "w", None), "page", None)
+            open_pages = [p for p in self.w.context.pages if not p.is_closed()]
+            for p in open_pages:
+                # In dual-tab meta runners, the primary Meta page must NEVER be hijacked
+                if not is_pool_mode and p == meta_page:
+                    continue
+                u = p.url or ""
+                if "instagram.com" in u or is_pool_mode:
+                    self.insta_page = p
+                    self._close_extra_tabs(keep_page=p)
+                    return p
+        except Exception:
+            pass
+
         page = self.w.context.new_page()
         self.insta_page = page
+        self._close_extra_tabs(keep_page=page)
         return page
 
     def _page_text(self, p) -> str:

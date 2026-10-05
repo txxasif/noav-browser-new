@@ -247,7 +247,6 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
                 except Exception:
                     pass
                 ctx.add_cookies(_cookies_for_playwright(cand["cookies"]))
-                runner.insta_page = None
                 page = runner._ig_tab()
                 try:
                     page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
@@ -380,7 +379,23 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
         else:
             log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
             if not runner.ig_2fa_confirm(code):
-                raise RuntimeError("Instagram rejected the 2FA code")
+                ok2 = False
+                try:
+                    import re as _re
+                    import pyotp
+                    _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
+                    for _t in range(3):
+                        local = pyotp.TOTP(_s).now()
+                        if local != str(code):
+                            log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
+                            if runner.ig_2fa_confirm(local):
+                                ok2 = True
+                                break
+                        time.sleep(31 - (int(time.time()) % 30))
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
+                if not ok2:
+                    raise RuntimeError("Instagram rejected the 2FA code")
             log(slot_id, "✔ 2FA enabled on the pooled account.")
 
         # 4) password — set the IG password to the bot-issued one.

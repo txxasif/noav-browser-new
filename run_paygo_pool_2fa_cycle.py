@@ -221,8 +221,14 @@ def _make_pool_fetch_code(runner, preexisting_ids, bot=None):
     """A ``fetch_code`` for the pooled flow.
 
     Order: (1) plain-HTTP read of the account's STORED inbox — fastest, no
-    browser tab; (2) the BOT's ``📥 Get code`` (the bot-issued email); (3) the
-    legacy browser-tab read as a last resort.
+    browser tab; (2) the BOT's ``📥 Get code`` (the bot-issued email).
+
+    Deliberately NO browser-tab fallback. ``_ensure_mail_tab`` opened a new
+    mail.td tab (goto ≤45s + reload ≤45s) and, on a stale/expired token, polled
+    an empty inbox until timeout — the "stuck + mail.td opened in a new tab"
+    hang (2026-10-05). The pool account's tokens are already stored, so HTTP is
+    the correct source; if both paths miss, the caller already falls through to
+    the 2FA submit instead of stalling.
     """
     _tokens = {}
     try:
@@ -234,13 +240,19 @@ def _make_pool_fetch_code(runner, preexisting_ids, bot=None):
         # (1) FAST PATH — plain HTTP against the account's stored inbox. The
         #     Accounts-Center challenge mails the account's own address, so this
         #     is both the correct source AND the cheapest read.
-        try:
-            c = _mailtd_http_code(runner, _tokens, preexisting_ids, keyword,
-                                  timeout, subject_hint=subject_hint, prefer_len=prefer_len)
-            if c:
-                return c
-        except Exception:
-            pass
+        if _tokens.get("tempmail_token"):
+            try:
+                c = _mailtd_http_code(runner, _tokens, preexisting_ids, keyword,
+                                      timeout, subject_hint=subject_hint, prefer_len=prefer_len)
+                if c:
+                    return c
+            except Exception:
+                pass
+        else:
+            try:
+                runner.log("[📧] No stored mail.td token — HTTP OTP read skipped.")
+            except Exception:
+                pass
         # (2) BOT Get-code (only useful once the bot email is linked).
         if bot is not None:
             try:
@@ -254,70 +266,10 @@ def _make_pool_fetch_code(runner, preexisting_ids, bot=None):
             except Exception:
                 pass
         try:
-            runner._ensure_mail_tab()
+            runner.log("[📧] No OTP from stored inbox or bot — not opening a mail tab; "
+                       "continuing (the caller falls through to 2FA).")
         except Exception:
             pass
-        mail = getattr(runner, "mail", None)
-        if mail is None:
-            return None
-        try:
-            if mail.is_closed():
-                return None
-        except Exception:
-            pass
-        end = time.time() + max(5, int(timeout or 60))
-        seen = {}
-        while time.time() < end:
-            msgs = [m for m in _mailtd_list(runner) if str(m.get("id")) not in preexisting_ids]
-            try:
-                msgs.sort(key=lambda m: str(m.get("created_at") or m.get("createdAt")
-                                              or m.get("updatedAt") or m.get("id") or ""),
-                          reverse=True)
-            except Exception:
-                pass
-            for msg in msgs:
-                mid = msg.get("id")
-                subject = str(msg.get("subject") or "").lower()
-                sender = str(msg.get("from") or "").lower()
-                if subject_hint:
-                    hints = [h.strip().lower() for h in str(subject_hint).split("|") if h.strip()]
-                    if not any(h in subject or h in sender for h in hints):
-                        continue
-                text = seen.get(mid)
-                if text is None and mid:
-                    try:
-                        ctx = runner._mailtd_api_ctx() or {}
-                        text = mail.evaluate("""async ({id, mid, token}) => {
-                            try {
-                                const r = await fetch('/api/accounts/' + id + '/messages/' + mid,
-                                    {headers: {Authorization: 'Bearer ' + token}});
-                                if (!r.ok) return '';
-                                const j = await r.json();
-                                return [j.subject||'', j.html_body||'', j.text_body||'', j.text||'', j.body||''].join(' ');
-                            } catch (e) { return ''; }
-                        }""", {"id": ctx.get("id"), "mid": mid, "token": ctx.get("token")}) or ""
-                    except Exception:
-                        text = ""
-                    if not text:
-                        try:
-                            text = " ".join(runner._flatten_values(msg))
-                        except Exception:
-                            text = ""
-                    seen[mid] = text
-                try:
-                    code = runner._pick_code(text or "", keyword, set(), prefer_len=prefer_len)
-                except Exception:
-                    code = None
-                if code:
-                    try:
-                        runner.log(f'[📧] fresh {keyword} code: {code} (subject: {subject[:40]})')
-                    except Exception:
-                        pass
-                    return code
-            try:
-                mail.wait_for_timeout(1500)
-            except Exception:
-                time.sleep(1.5)
         return None
     return _fetch
 
@@ -544,7 +496,6 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                 except Exception:
                     pass
                 ctx.add_cookies(_cookies_for_playwright(cand["cookies"]))
-                runner.insta_page = None
                 page = runner._ig_tab()
                 try:
                     page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
@@ -626,13 +577,22 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                                  f"existing message(s) ignored; waiting for a fresh code.")
                 except Exception as exc:
                     log(slot_id, f"[⚠️] HTTP inbox snapshot failed: {exc}")
-                # Password-change OTP goes to the account's EXISTING (old) email
-                # -> read it from the stored inbox, NOT the bot. The bot's Get
-                # code is reserved for the email-link step below.
-                runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
+            else:
+                log(slot_id, "[⚠️] Account has NO stored mail.td token — the AC email "
+                             "OTP cannot be read; the password step will be skipped.")
+            # ALWAYS override fetch_code (even tokenless) so the base
+            # MailboxMixin.fetch_code — which opens a mail.td browser tab — can
+            # never run in the pool drain. Empty tokens make the HTTP path
+            # return None immediately (no tab, no stall).
+            runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
 
             runner.email = pool_acc.get("email")
             runner.new_password = creds.get("password")
+            # The pooled account still logs in with its OWN password until the
+            # password step (now LAST) changes it — pin runner.password to the
+            # real one so any AC password re-auth during email/2FA fills the
+            # correct value (it was briefly the bot password from setup above).
+            runner.password = pool_acc.get("password") or runner.password
 
             # Early dead-session purge (2026-10-04: the pool holds corpses
             # whose cookies pass the claim check but whose browser session is
@@ -653,13 +613,59 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                     pass
                 raise RuntimeError("Pooled IG session dead before password change — purged, retrying with next account")
 
-            # (1) PASSWORD FIRST — authenticate Accounts Center via the account's
-            #     stored mail.td email OTP. This changes the password to PayGo's
-            #     task password AND elevates the session trust so subsequent
-            #     email linking and 2FA open cleanly without challenge.
+            # Pre-fetch the AC password OTP in the BACKGROUND so it is already in
+            # hand when the "Check your email" dialog appears. mail.td's REST list
+            # is ~1.0s + body ~0.4s, so polling from the start of the step hides
+            # that latency behind the AC navigation instead of paying it after
+            # the challenge is detected.
+            _pw_otp = {"code": None, "stop": False}
+            if mail_tokens:
+                def _pw_prefetch():
+                    try:
+                        c = _mailtd_http_code(
+                            runner, mail_tokens, preexisting_mail_ids, "instagram", 60,
+                            subject_hint=("authenticate your profile|authenticate|security "
+                                          "code|meta account code|instagram|security"))
+                        if c and not _pw_otp["stop"]:
+                            _pw_otp["code"] = c
+                            log(slot_id, f"[📧] password OTP pre-fetched ({c[:2]}****) — ready for the challenge.")
+                    except Exception:
+                        pass
+                threading.Thread(target=_pw_prefetch, daemon=True).start()
+                _base_pw_fetch = runner.fetch_code
+
+                def _pw_fetch(keyword="instagram", timeout=60, subject_hint=None,
+                              prefer_len=None, **kw):
+                    # The background prefetch IS the poller — wait on its cache for
+                    # the fetcher's budget (no second concurrent mail.td reader),
+                    # then hand off to the original fetcher for any tail time.
+                    end = time.time() + max(3, int(timeout or 60))
+                    while time.time() < end:
+                        if _pw_otp["code"]:
+                            return _pw_otp["code"]
+                        if _pw_otp["stop"]:
+                            break
+                        time.sleep(0.3)
+                    return _base_pw_fetch(keyword, timeout=5,
+                                          subject_hint=subject_hint, prefer_len=prefer_len, **kw)
+
+                runner.fetch_code = _pw_fetch
+
+            # (1) PASSWORD FIRST — change to the TG task password while the
+            # account STILL has its original mail.td inbox attached.
+            # If Instagram challenges with an email OTP, runner.fetch_code
+            # captures it from the stored mail.td token directly (no bot code-window dependency).
             cur_pw = pool_acc.get("password") or runner.password
             target_pw = (runner.tg_creds or {}).get("password") or runner.new_password
-            if target_pw and target_pw != cur_pw:
+            pw_ok = True
+            if not mail_tokens and target_pw and target_pw != cur_pw:
+                # No stored inbox -> the AC password re-auth OTP can never be
+                # read. Skip the change (it would only stall on the challenge
+                # and burn the bot window) and continue to the email/2FA steps.
+                pw_ok = False
+                log(slot_id, "[🔑] No stored mail.td token — skipping password change "
+                             "(the AC OTP is unfetchable); continuing.")
+            elif target_pw and target_pw != cur_pw:
                 ok_pw = False
                 why = "unknown"
                 for _pw_try in range(2):
@@ -678,21 +684,69 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                     log(slot_id, f"[⚠️] Password change failed (reason={why}) on try {_pw_try + 1}/2.")
                     time.sleep(1.5)
                 if not ok_pw:
+                    pw_ok = False
                     log(slot_id, f"[⚠️] Password change failed (reason={why}) — continuing "
                                  f"(the bot accepts the registration; current pw in store may be stale).")
                     emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                                 "detail": f"Password change failed (reason={why}) — continuing"})
 
+            # Password step done — stop the background inbox poll and restore a
+            # FRESH fetch_code (the cached password OTP must not be reused by a
+            # later AC re-auth during the email/2FA steps).
+            _pw_otp["stop"] = True
+            if mail_tokens:
+                runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids)
+
             # (2) EMAIL LINK SECOND — the bot issues the account email and its
-            #     confirmation code (the "📥 Get code" key). The email MUST be
-            #     linked before the 2FA step: without the bot's email code the
-            #     2FA submit cannot be issued. This is the bot's own process.
+            #     confirmation code (the "📥 Get code" key). This runs right
+            #     after password change: the code only exists after IG's OTP is triggered
+            #     from the email form, and the bot's code window is short (~60s).
+            #     Try to link it, but NEVER let it burn the bot window: on
+            #     miss/fail continue to the 2FA submit regardless (worst case the
+            #     registration still pays).
+            # Parked-seed fast path: this account's 2FA secret is already known,
+            # so the key can jump the queue the instant the email code lands —
+            # no need to wait for the email-confirm UI + 2FA setup nav first.
+            parked_early = (pool_acc.get("twofa_secret") or "").strip()
+            early = {"otp": None}
+
+            def _fetch_and_fast_submit():
+                code = bot.request_email_code(timeout=60)
+                if code and parked_early and not early["otp"]:
+                    try:
+                        otp = bot.submit_2fa_key(parked_early, allow_local_fallback=False)
+                    except Exception as exc:
+                        otp = None
+                        log(slot_id, f"[⚠️] Early 2FA submit missed ({exc}) — normal path will retry.")
+                    if otp:
+                        early["otp"] = otp
+                        log(slot_id, "[⚡] Parked 2FA key submitted early (email code in hand) — "
+                                     "OTP captured before email confirm.")
+                return code
+
             bot_em = (runner.tg_creds or {}).get("email")
-            if bot_em:
+            if not bot_em and hasattr(bot, "creds") and isinstance(bot.creds, dict):
+                bot_em = bot.creds.get("email")
+            if not bot_em and hasattr(bot, "_recent_texts"):
+                try:
+                    for t in bot._recent_texts(6):
+                        m = re.search(r"Email:\s*(\S+)", str(t), re.I)
+                        if m:
+                            bot_em = m.group(1).replace("`", "").strip()
+                            if runner.tg_creds:
+                                runner.tg_creds["email"] = bot_em
+                            break
+                except Exception:
+                    pass
+            log(slot_id, f"[✉️] Bot creds email resolved: {bot_em or 'NONE'}")
+
+            if bot_em and pw_ok:
                 log(slot_id, f"[✉️] Linking bot-issued email {bot_em} via 📥 Get code…")
+                import time as _time
+                _em_t0 = _time.time()
                 try:
                     linked = runner.ig_link_email_to_instagram(
-                        bot_em, code_fetcher=lambda: bot.request_email_code(timeout=45))
+                        bot_em, code_fetcher=_fetch_and_fast_submit)
                 except IGDeadEnd as exc:
                     linked = False
                     log(slot_id, f"[⚠️] Bot email rejected ({exc}) — continuing to 2FA.")
@@ -706,11 +760,23 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                     else:
                         log(slot_id, f"[⚠️] Bot email linkage error ({_em[:120]}) — continuing.")
                     linked = False
-                log(slot_id, f"[✉️] Bot email linkage result: {linked} (continuing to 2FA)")
+                log(slot_id, f"[✉️] Bot email linkage result: {linked} "
+                             f"({int(_time.time() - _em_t0)}s, continuing to 2FA)")
+            elif bot_em and not pw_ok:
+                # Password was NOT changed -> do NOT link the bot email. Adding it
+                # rewrites the account's contact point, so the NEXT password OTP
+                # would go to the bot inbox (unreadable) and the account becomes
+                # permanently un-drainable. Skip the link and go straight to 2FA.
+                log(slot_id, "[✉️] Password not changed — skipping the bot-email link "
+                             "(it would rewrite the account email and break the next OTP).")
+            else:
+                log(slot_id, "[✉️] No bot-issued email provided in task credentials — skipping email link step.")
 
-            # (3) 2FA THIRD — setup + submit the key so the bot issues the one-time
-            #     code, then confirm it on IG. The bot is directly waiting for the
-            #     2FA key since Get code was consumed in step 2.
+            # (2) 2FA SECOND — setup + submit the key so the bot issues the one-time
+            #     code, then confirm it on IG. Runs right after email: whichever
+            #     of 2FA/password runs first pays the one AC email-OTP challenge
+            #     (old stored inbox), the other opens clean. The bot is waiting
+            #     for the 2FA key since Get code was consumed in step 1.
             if mail_tokens:
                 try:
                     preexisting_mail_ids.update(str(m.get("id")) for m in _mailtd_http_list(mail_tokens))
@@ -720,16 +786,23 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
 
             emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                         "detail": f"2FA setup on pooled IG account ({login})…"})
-            try:
-                secret = runner.ig_2fa_begin()
-            except IGDeadEnd as exc:
-                # Genuine dead end (login wall / logged-out / checkpoint): REMOVE
-                # it from the pool so it is never re-claimed. The bot username is
-                # now taken by this account, so fail this cycle — the slot retries
-                # with a fresh PayGo task/login.
-                _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
-                pool_acc = None
-                raise RuntimeError(f"IG dead end after rename ({exc})")
+            if parked_early and early["otp"]:
+                # Already submitted during the email step — skip the whole AC
+                # 2FA nav (20-40s) and the IG confirm (nothing to confirm).
+                secret = parked_early
+                _2fa_already_on = True
+                log(slot_id, "[🔐] 2FA key submitted early — skipping 2FA setup nav entirely.")
+            else:
+                try:
+                    secret = runner.ig_2fa_begin()
+                except IGDeadEnd as exc:
+                    # Genuine dead end (login wall / logged-out / checkpoint): REMOVE
+                    # it from the pool so it is never re-claimed. The bot username is
+                    # now taken by this account, so fail this cycle — the slot retries
+                    # with a fresh PayGo task/login.
+                    _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
+                    pool_acc = None
+                    raise RuntimeError(f"IG dead end after rename ({exc})")
             # 2FA ALREADY ON (account created with the Meta Creator 2FA toggle):
             # ig_2fa_begin returns None because there is no setup dialog, but the
             # seed was parked on the record. Mirror core/lifecycle's "2FA already
@@ -762,10 +835,15 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             raise RuntimeError("Could not reach 2FA setup on any pooled IG account")
 
         acc_id = pool_acc["id"]
-        log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
-        code = bot.submit_2fa_key(secret, allow_local_fallback=False)
-        if not code:
-            raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
+        if early["otp"]:
+            # Key went out during the email step; OTP already captured there.
+            code = early["otp"]
+            log(slot_id, "[🔑] Using early-submitted 2FA OTP — no second submit.")
+        else:
+            log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
+            code = bot.submit_2fa_key(secret, allow_local_fallback=False)
+            if not code:
+                raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
         if _2fa_already_on:
             # 2FA was already enabled with the parked seed — there is no IG setup
             # dialog to confirm. The bot holds the key and derived the code; we
@@ -774,9 +852,30 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
         else:
             log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
             if not runner.ig_2fa_confirm(code):
-                raise RuntimeError("Instagram rejected the 2FA code")
+                # The bot's TOTP was stale/wrong (observed 2026-10-05 01:37 —
+                # the bot returned 524511 in <1s and IG rejected it while the
+                # next cycle's code confirmed fine). We hold the SAME secret, so
+                # compute the code locally and retry; if it is the same 30s
+                # window, wait for the roll, then retry once more.
+                ok2 = False
+                try:
+                    import re as _re
+                    import pyotp
+                    _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
+                    for _t in range(3):
+                        local = pyotp.TOTP(_s).now()
+                        if local != str(code):
+                            log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
+                            if runner.ig_2fa_confirm(local):
+                                ok2 = True
+                                break
+                        # Same window: wait for the next 30s slot.
+                        time.sleep(31 - (int(time.time()) % 30))
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
+                if not ok2:
+                    raise RuntimeError("Instagram rejected the 2FA code")
             log(slot_id, "✔ 2FA enabled on the pooled account.")
-
 
 
         # -- Step: register confirm ------------------------------------------

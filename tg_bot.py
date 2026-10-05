@@ -1197,12 +1197,15 @@ class TelegramTasklyBot:
                             m_login = re.search(r"Login:\s*(.*?)(?=\s*Password:|\n|\r|$)", txt_c)
                             m_pwd = re.search(r"Password:\s*([A-Za-z0-9_!@#$%^&*+=?-]+)", txt_c)
                             m_name = re.search(r"First name:\s*(.*?)(?=\s*Login:|\n|\r|$)", txt_c)
+                            m_email = re.search(r"Email:\s*(\S+)", txt_c)
                             if m_login and m_pwd:
                                 found_creds = {
                                     "first_name": m_name.group(1).strip() if m_name else "",
                                     "login": m_login.group(1).strip(),
                                     "password": m_pwd.group(1).strip(),
                                 }
+                                if m_email:
+                                    found_creds["email"] = m_email.group(1).strip()
                                 break
                         elif res.get("type") == "cancelled":
                             # Cancellation message currently at bottom of chat; keep waiting for Start response
@@ -1230,7 +1233,8 @@ class TelegramTasklyBot:
                         matches = list(re.finditer(
                             r"(?:First name:\s*(?P<name>[^\n\r]+?)\s*)?"
                             r"Login:\s*(?P<login>.*?)\s*"
-                            r"Password:\s*(?P<pwd>[A-Za-z0-9_!@#$%^&*+=?-]+)",
+                            r"Password:\s*(?P<pwd>[A-Za-z0-9_!@#$%^&*+=?-]+)"
+                            r"(?:\s*Email:\s*(?P<email>\S+))?",
                             active_tail
                         ))
                         if matches:
@@ -1238,12 +1242,15 @@ class TelegramTasklyBot:
                             l_name = latest.group("name") or ""
                             l_login = latest.group("login") or ""
                             l_pwd = latest.group("pwd") or ""
+                            l_email = latest.group("email") or ""
                             if l_login and l_pwd:
                                 found_creds = {
                                     "first_name": l_name.strip(),
                                     "login": l_login.strip(),
                                     "password": l_pwd.strip(),
                                 }
+                                if l_email:
+                                    found_creds["email"] = l_email.strip()
                                 break
                     except Exception:
                         pass

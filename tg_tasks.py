@@ -214,7 +214,7 @@ TASKS = {
                 {"all": ["task"], "none": []},                          # 📋 Tasks
                 {"all": ["create inst", "2fa"], "none": ["no mail"]},   # 📱 Create Inst (2FA)
             ],
-            "steps": ["password", "email_link", "2fa", "register"],
+            "steps": ["email_link", "2fa", "password", "register"],
         },
         # EXPERIMENTAL "PayGo 2FA Optimized" panel — SAME bot button/path as
         # PAYGO_2FA_POOL, optimized flow without email_link. Additive only.

@@ -1436,6 +1436,9 @@ class MtprotoTasklyBot:
             return ""
         deadline = time.time() + max(10.0, timeout)
         _beat = time.time()
+        _taps = 1
+        _last_tap = time.time()
+        _last_new = time.time()
         while time.time() < deadline:
             time.sleep(1.5)
             if time.time() - _beat >= 15:
@@ -1447,6 +1450,7 @@ class MtprotoTasklyBot:
                     continue
                 if int(getattr(m, "id", 0) or 0) <= int(before_id or 0):
                     continue
+                _last_new = time.time()
                 txt = (getattr(m, "text", "") or "")
                 if not txt.strip():
                     continue
@@ -1458,6 +1462,41 @@ class MtprotoTasklyBot:
                     code = mm.group(1)
                     self.log(f"[tg] ⚡ email code from bot: ****{code[-2:]}")
                     return code
+                # Bot mailbox still ordering ("Code not found" / "please wait"):
+                # the single Get-code tap is spent — re-tap so the code is
+                # actually issued instead of passively waiting out the clock.
+                # Worst case the loop still ends at `deadline` and the caller
+                # falls through to the 2FA submit.
+                low = txt.lower()
+                if (_taps < 3 and time.time() - _last_tap >= 10.0
+                        and any(k in low for k in ("code not found", "not found",
+                                                   "ordering email", "please wait"))):
+                    try:
+                        btns, _msg = self._buttons(limit=10)
+                    except Exception:
+                        btns = []
+                    hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
+                    if hit:
+                        self._send(hit)
+                        _taps += 1
+                        _last_tap = time.time()
+                        self.log(f"[tg] re-tapped '{hit}' ({_taps}/3 — bot said: {txt.strip()[:60]})")
+            # Silent mailbox (no new bot message at all — cold order takes ~75s
+            # on first tap, re-tap answers in ~1s live 2026-10-04): one scheduled
+            # re-tap instead of waiting out the clock.
+            if (_taps < 3 and time.time() - _last_tap >= 15.0
+                    and time.time() - _last_new >= 15.0
+                    and time.time() + 5.0 < deadline):
+                try:
+                    btns, _msg = self._buttons(limit=10)
+                except Exception:
+                    btns = []
+                hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
+                if hit:
+                    self._send(hit)
+                    _taps += 1
+                    _last_tap = time.time()
+                    self.log(f"[tg] re-tapped '{hit}' ({_taps}/3 — silent wait, nudging the order)")
         self.log("[tg] ❌ bot sent no email code in time")
         return ""
 

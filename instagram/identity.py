@@ -254,10 +254,36 @@ class IgIdentityMixin:
             pass
 
         # 1. Open Contact Points via the REAL in-app path (AC home → profile
-        # card → Default contact info → contact_points). The old
-        # _ac_section("/personal_info/contact_points/") searched the AC home for
-        # a row that does not exist → false "AC section unreachable".
-        self._ac_open_contact_points(p)
+        # card → Default contact info → contact_points).
+        ok_cp = self._ac_open_contact_points(p)
+        p = self._ig_tab()
+        if not ok_cp or "contact_points" not in (p.url or ""):
+            # Transient miss (card not yet hydrated on first tap) — back out to
+            # the section list once and re-enter. Only one retry; a second miss
+            # means the form can never open.
+            try:
+                self._ac_leave_subpage(p)
+            except Exception:
+                pass
+            try:
+                p.wait_for_timeout(1500)
+            except Exception:
+                pass
+            ok_cp = self._ac_open_contact_points(p)
+            p = self._ig_tab()
+        if not ok_cp and "contact_points" not in (p.url or ""):
+            # Unreachable even after retry: every form click below would miss,
+            # and the tail re-check would navigate AGAIN — fail FAST instead
+            try:
+                _body = (p.inner_text("body") or "").lower()
+            except Exception:
+                _body = ""
+            if em.lower() in _body:
+                self.log(f'[✉️] Email {em} already present in contact info — treating as linked.')
+                return True
+            self.log('[⚠️] Contact-points unreachable after retry — skipping email link, continuing to 2FA.')
+            self._dismiss_contact_modal(p)
+            return False
         for _ in range(3):
             if not self._ac_reauth(p):
                 break
@@ -323,44 +349,100 @@ class IgIdentityMixin:
         self.log(f'[✉️] Adding fresh contact email: {em}…')
         # The contact_points page shows "Add or edit contact info" → opens the
         # "Contact info" dialog → "Add new contact info" → "Add email"
-        # (verified live via MCP 2026-09-20). Without this first click the old
-        # code never found "Add new contact".
-        self._try_click(p, "Add or edit contact info", timeout=5000)
-        p.wait_for_timeout(2000)
+        # (verified live via MCP 2026-10-04).
+        opened_info = False
+        for add_edit_sel in (
+            'button:has-text("Add or edit contact info")',
+            'div[role="button"]:has-text("Add or edit contact info")',
+            'a:has-text("Add or edit contact info")',
+        ):
+            try:
+                el = p.locator(add_edit_sel).first
+                if el.count() and el.is_visible():
+                    self._tap_or_click(p, el)
+                    opened_info = True
+                    p.wait_for_timeout(2000)
+                    break
+            except Exception:
+                pass
+        if not opened_info:
+            self._try_click(p, "Add or edit contact info", timeout=4000)
+            p.wait_for_timeout(1500)
+
         add_clicked = (
-            self._try_click(p, "Add new contact", timeout=5000)
+            self._try_click(p, "Add new contact info", timeout=5000)
+            or self._try_click(p, "Add new contact", timeout=4000)
             or self._try_click(p, "Add contact", timeout=4000)
         )
         if not add_clicked:
-            try:
-                el = p.locator('div[role="button"]:has-text("Add new contact"), button:has-text("Add new contact")').first
-                if el.count() and el.is_visible():
-                    el.click(force=True, timeout=3000)
-                    add_clicked = True
-            except Exception:
-                pass
+            for add_new_sel in (
+                'button:has-text("Add new contact info")',
+                'div[role="button"]:has-text("Add new contact info")',
+                'button:has-text("Add new contact")',
+                'div[role="button"]:has-text("Add new contact")',
+            ):
+                try:
+                    el = p.locator(add_new_sel).first
+                    if el.count() and el.is_visible():
+                        self._tap_or_click(p, el)
+                        add_clicked = True
+                        p.wait_for_timeout(2000)
+                        break
+                except Exception:
+                    pass
 
         if add_clicked:
-            p.wait_for_timeout(2500)
+            p.wait_for_timeout(2000)
             self._ac_reauth(p)
-            self._try_click(p, "Add email", timeout=5000) or self._try_click(p, "Add email address", timeout=5000)
-            p.wait_for_timeout(2500)
+            added_em_btn = False
+            for add_em_sel in (
+                'button:has-text("Add email")',
+                'div[role="button"]:has-text("Add email")',
+                'button:has-text("Add email address")',
+            ):
+                try:
+                    el = p.locator(add_em_sel).first
+                    if el.count() and el.is_visible():
+                        self._tap_or_click(p, el)
+                        added_em_btn = True
+                        p.wait_for_timeout(2000)
+                        break
+                except Exception:
+                    pass
+            if not added_em_btn:
+                self._try_click(p, "Add email", timeout=4000) or self._try_click(p, "Add email address", timeout=4000)
+            p.wait_for_timeout(2000)
 
-            # Fill email
+            # Fill email (skip any radio buttons from background dialogs)
             filled = False
-            for sel in ('input[type="email"]', 'input[type="text"]', 'input[placeholder*="email" i]'):
+            for sel in (
+                'input[placeholder*="email" i]',
+                'input[aria-label*="email" i]',
+                'div[role="dialog"] input[type="text"]:visible',
+                'input[type="email"]',
+                'input:not([type="radio"]):not([type="checkbox"])',
+            ):
                 try:
                     inp = p.locator(sel).first
                     if inp.count() and inp.is_visible():
                         inp.click()
                         inp.fill(em)
                         self._dispatch_react_events(p, inp)
+                        try:
+                            if inp.input_value() != em:
+                                inp.evaluate(
+                                    "(el, v) => { el.value = v;"
+                                    " el.dispatchEvent(new Event('input',{bubbles:true}));"
+                                    " el.dispatchEvent(new Event('change',{bubbles:true})); }",
+                                    em)
+                        except Exception:
+                            pass
                         filled = True
                         break
                 except Exception:
                     pass
 
-            # Select Instagram account
+            # Select Instagram account (if profile chooser is present on this form)
             for sel in (
                 'div[role="checkbox"]',
                 'input[type="checkbox"]',
@@ -376,8 +458,23 @@ class IgIdentityMixin:
                     pass
 
             p.wait_for_timeout(1500)
-            self._try_click(p, "Next", timeout=6000)
+            for n_sel in (
+                'button:has-text("Next")',
+                'div[role="button"]:has-text("Next")',
+                'div[role="dialog"] button:has-text("Next")',
+                '[aria-label*="Next" i]',
+            ):
+                try:
+                    nel = p.locator(n_sel).first
+                    if nel.count() and nel.is_visible():
+                        self._tap_or_click(p, nel)
+                        break
+                except Exception:
+                    pass
+            self._try_click(p, "Next", timeout=4000)
+
             # Check if email is already in use / rejected (or if OTP confirmation screen appeared)
+            otp_screen = False
             for _ in range(12):
                 p.wait_for_timeout(500)
                 try:
@@ -387,21 +484,29 @@ class IgIdentityMixin:
 
                 if any(k in full_body for k in ("already in use", "another account", "not available", "enter a valid email")):
                     self.log(f'<font color="#FFA500"><b>[⚠️] Email {em} was rejected by Accounts Center ("The email address you entered is already in use.") — dismissing modal and proceeding directly to 2FA…</b></font>')
-                    if callable(code_fetcher):
-                        try:
-                            self.log('[✉️] Triggering code_fetcher to advance bot state (Get code)…')
-                            code_fetcher()
-                        except Exception:
-                            pass
                     self._dismiss_contact_modal(p)
                     return False
 
-                if any(k in full_body for k in ("confirmation code", "enter code", "check your email")):
+                if any(k in full_body for k in ("confirmation code", "enter code", "check your email", "sent an email with your confirmation code")):
+                    otp_screen = True
                     break
 
             # Check if confirmation OTP is requested
-            tail = self._page_tail(p, 400).lower()
-            if any(k in tail for k in ("confirmation code", "enter code", "check your email")):
+            if not otp_screen:
+                try:
+                    full_body = (p.inner_text("body") or "").lower()
+                    if any(k in full_body for k in ("confirmation code", "enter code", "check your email", "sent an email")):
+                        otp_screen = True
+                except Exception:
+                    pass
+            if not otp_screen:
+                try:
+                    if p.locator('input[placeholder*="code" i], input[name="confirmationCode"], input[inputmode="numeric"]').count() > 0:
+                        otp_screen = True
+                except Exception:
+                    pass
+
+            if otp_screen:
                 if callable(code_fetcher):
                     self.log(f'[✉️] Requesting email confirmation code via code_fetcher ({em})…')
                     code = code_fetcher()
