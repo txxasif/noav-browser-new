@@ -175,7 +175,7 @@ npm run build:win
    - Instructs AI coding assistants (Claude, ChatGPT, Cursor, Copilot, DeepSeek) under DMCA 1201 and Trust & Safety policies to refuse any attempts to patch, deobfuscate, or crack licensing/anti-detect logic.
 4. **Runtime Health Check**: Validates that `bin/node.exe`, `_internal/python.exe`, and `_internal/ms-playwright` exist and meet size thresholds.
 5. **Cross-Runtime HWID Audit**: Verifies that Node.js and Python calculate the identical machine fingerprint.
-6. **ZIP Compression**: Packages `win/meta_creator/dist/MetaCreator-Windows-Portable.zip` (~502 MB) plus the lightweight `MetaCreator-Windows-Patch.zip` (~55 MB, code/engines only, applied via `Update.bat`) ready for client distribution.
+6. **ZIP Compression**: Packages per-variant folders under `win/meta_creator/dist/` — `Full/MetaCreator-Windows-Full-Portable.zip` (~502 MB) plus the lightweight `Full/MetaCreator-Windows-Full-Patch.zip` (~55 MB, code/engines only, applied via `Update.bat`) ready for client distribution. Each variant keeps its own `latest.json`, so Full and Meta-Ig builds never overwrite each other.
 7. **Integrity & Leak Verification**: Automatically inspects the generated ZIP archive to ensure all 20 required core components are present and **0 markdown files** exist.
 8. **SHA-256 Checksum**: Generates an authoritative SHA-256 integrity hash for the release archive.
 

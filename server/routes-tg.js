@@ -621,7 +621,6 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const subFastpay2fa = stats.fastpay2fa || 0;
       const subPaygoPool = stats.paygo_pool || 0;
       const subPaygo2fa = stats.paygo2fa || 0;
-      const subPaygo2faopt = stats.paygo2faopt || 0;
       const subPaygo = stats.paygo || 0;
       const subFastpay = stats.fastpay || 0;
       const submitted = stats.submitted != null ? stats.submitted : (subTaskly + subPaygo + subFastpay);
@@ -657,7 +656,6 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         tg_submitted_fastpay2fa: subFastpay2fa,
         tg_submitted_paygo_pool: subPaygoPool,
         tg_submitted_paygo2fa: subPaygo2fa,
-        tg_submitted_paygo2faopt: subPaygo2faopt,
         tg_submitted_paygo: subPaygo,
         tg_submitted_fastpay: subFastpay,
         tg_total_taskly: subTaskly,
@@ -827,7 +825,6 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
 
       const runRoute = (tgBot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(tgTask)) ? 'taskly2fa'
         : (tgBot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(tgTask)) ? 'fastpay2fa'
-        : (tgBot === 'paygo' && /optim/i.test(tgTask)) ? 'paygo2faopt'
         : (tgBot === 'paygo' && /paygo\s*2fa/i.test(tgTask)) ? 'paygo2fa'
         : (tgBot === 'paygo' && useIgPool) ? 'paygo_pool'
         : tgBot;

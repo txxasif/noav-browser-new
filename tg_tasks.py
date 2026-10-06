@@ -66,9 +66,6 @@ COOKIES = "cookies"      # Create Inst (Cookies) — PayGo only
 # creds (First name/Login/Password/Email via 📥 Get code), identical
 # "Account Registered" confirm — only the bot + price ($0.0220) differ.
 PAYGO_2FA_POOL = "paygo_2fa_pool"
-# EXPERIMENTAL "PayGo 2FA Optimized" panel — same bot button as PAYGO_2FA_POOL
-# but the email_link step is dropped (own flow/runner/counter). Additive only.
-PAYGO_2FA_OPT = "paygo_2fa_opt"
 FASTPAY_2FA = "fastpay_ig_2fa"  # Instagram 2FA payout — FastPay bot (key -> code)
 # FastPay "Instagram 2FA" run as a POOL DRAIN: reuse a pre-created IG account
 # (rename via Web API + 2FA + password) instead of creating Meta→IG.
@@ -86,7 +83,6 @@ LABELS = {
     COOKIES_NOMAIL: "🍪 Create Inst (No mail)",
     COOKIES: "📱 Create Inst (Cookies)",
     PAYGO_2FA_POOL: "📱 Create Inst (2FA)",
-    PAYGO_2FA_OPT: "PayGo 2FA Optimized",
     FASTPAY_2FA: "Instagram 2FA",
     FASTPAY_2FA_POOL: "Instagram 2FA",
 }
@@ -130,10 +126,6 @@ ALIASES = {
     "PayGo 2FA": PAYGO_2FA_POOL,
     "PayGo 2FA (Pool)": PAYGO_2FA_POOL,
     "Paygo 2FA": PAYGO_2FA_POOL,
-    # EXPERIMENTAL optimized panel (same bot button, no email_link step).
-    "PayGo 2FA Optimized": PAYGO_2FA_OPT,
-    "PayGo 2FA Opt": PAYGO_2FA_OPT,
-    "Paygo 2FA Optimized": PAYGO_2FA_OPT,
 }
 
 # Per-bot catalog. ``path`` is ordered button levels from the MAIN menu.
@@ -215,18 +207,6 @@ TASKS = {
                 {"all": ["create inst", "2fa"], "none": ["no mail"]},   # 📱 Create Inst (2FA)
             ],
             "steps": ["email_link", "2fa", "password", "register"],
-        },
-        # EXPERIMENTAL "PayGo 2FA Optimized" panel — SAME bot button/path as
-        # PAYGO_2FA_POOL, optimized flow without email_link. Additive only.
-        PAYGO_2FA_OPT: {
-            "label": LABELS[PAYGO_2FA_OPT],
-            "flow": "paygo_pool_2fa_opt",
-            "price": 0.022,
-            "path": [
-                {"all": ["task"], "none": []},                          # 📋 Tasks
-                {"all": ["create inst", "2fa"], "none": ["no mail"]},   # 📱 Create Inst (2FA)
-            ],
-            "steps": ["password", "2fa", "register"],
         },
     },
     # FastPay2025_bot — Instagram 2FA CREATE task (reverse-engineered live

@@ -6,7 +6,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from typing import Optional
 
-from tg_bot import TelegramTasklyBot, ThreadedTelegramBot  # noqa: E402
+# tg_bot ships only with the TG module. A Meta/IG-only build excludes it, so
+# the import must stay optional — TgMixin methods raise a clear error when
+# called without the TG backend instead of breaking `import runner` at boot.
+try:
+    from tg_bot import TelegramTasklyBot, ThreadedTelegramBot  # noqa: E402
+except ImportError:  # TG module excluded from this build
+    TelegramTasklyBot = None
+    ThreadedTelegramBot = None
 
 
 class TgMixin:
@@ -18,6 +25,8 @@ class TgMixin:
         Raises on any bot failure — the linked flow must not continue blind
         with empty credentials.
         """
+        if ThreadedTelegramBot is None:
+            raise RuntimeError("TG Classic is not included in this build (tg_bot missing).")
         try:
             # TG follows the pipeline Background/Visible switch directly.
             headless = getattr(getattr(self, "w", None), "is_headless", True)

@@ -41,7 +41,9 @@ from ai_config import (
     run,
 )
 import store
-from pipelines.telegram import tg_worker  # coupled cycle (TG Classic)
+# NOTE: no top-level `pipelines.telegram` import on purpose — the TG module
+# (pipelines/ + tg_bot + runners) can be excluded from the Windows build
+# (--modules meta,ig). The coupled cycle imports it lazily at the use site.
 
 # Ensure Playwright browser points at bundled anti-detect browsers
 try:
@@ -111,7 +113,7 @@ def _safe_concurrency(requested: int) -> int:
     ~2 CPUs on weak boxes), hard-capped 1-3 for low-end. Set
     INSTA_NO_CLAMP=1 to keep the exact requested value.
     """
-    req = max(1, min(int(requested), 50))
+    req = max(1, int(requested))
     if not _low_end_enabled():
         return req
     if os.environ.get("INSTA_NO_CLAMP", "0").strip().lower() in ("1", "true", "yes", "on"):
@@ -707,18 +709,13 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     mail_provider=mail_provider, stop_event=_stop,
                     add_email=add_email, tg_task=task, tg_bot=tg_bot,
                     use_ig_pool=True)
-            elif str(_runner) == "run_paygo_pool_2fa_opt_cycle":
-                # EXPERIMENTAL "PayGo 2FA Optimized" panel: same-to-same as
-                # the PayGo pool drain but WITHOUT the email_link step (own
-                # module/counter — the original branch above is untouched).
-                from run_paygo_pool_2fa_opt_cycle import run_paygo_pool_2fa_opt_cycle_once
-                ok, detail = run_paygo_pool_2fa_opt_cycle_once(
-                    slot_id=slot_id, worker_factory=AISlotWorker,
-                    is_headless=is_headless, captcha_mode=captcha_mode,
-                    mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
-                    use_ig_pool=True)
             else:
+                # TG Classic coupled cycle (Meta -> IG -> bot submit). Imported
+                # lazily: pipelines/ is excluded from non-TG builds.
+                try:
+                    from pipelines.telegram import tg_worker
+                except ImportError:
+                    raise RuntimeError("TG Classic is not included in this build (pipelines/telegram missing).")
                 ok, detail = tg_worker.run_tg_coupled_cycle(
                     AISlotWorker, slot_id=slot_id, is_headless=is_headless,
                     tg_task=task, tg_bot=tg_bot,

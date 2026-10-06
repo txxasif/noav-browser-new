@@ -2054,6 +2054,8 @@ body {
 .metainsta-table.hide-col-name [data-col="name"],
 .metainsta-table.hide-col-email [data-col="email"],
 .metainsta-table.hide-col-password [data-col="password"],
+.metainsta-table.hide-col-cookies [data-col="cookies"],
+.metainsta-table.hide-col-health [data-col="health"],
 .metainsta-table.hide-col-created [data-col="created"],
 .metainsta-table.hide-col-cookie [data-col="cookie"],
 .metainsta-table.hide-col-actions [data-col="actions"] {

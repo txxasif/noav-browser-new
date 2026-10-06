@@ -77,18 +77,6 @@ FLOWS = {
         "needs_email": True,
         "needs_2fa": True,
     },
-    # PayGo "PayGo 2FA Optimized" panel — EXPERIMENTAL variant of
-    # paygo_pool_2fa with the email_link step dropped (runner
-    # run_paygo_pool_2fa_opt_cycle skips it: PayGo accepted registration
-    # with linkage False, while the step burns ~60s). Additive only — the
-    # original paygo_pool_2fa flow is untouched.
-    "paygo_pool_2fa_opt": {
-        "label": "Create Inst (2FA) — PayGo OPTIMIZED pooled drain (no email link)",
-        "runner": "run_paygo_pool_2fa_opt_cycle",
-        "steps": ["ig_rename", "password", "2fa", "register"],
-        "needs_email": False,
-        "needs_2fa": True,
-    },
     # FastPay2025_bot "Instagram 2FA" run as a POOL DRAIN (no Meta, no signup):
     # reuse a pre-created IG account — rename to the bot login, capture the 2FA
     # key -> submit to FastPay -> enter the returned CODE on IG, set the IG

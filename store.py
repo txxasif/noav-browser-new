@@ -338,13 +338,32 @@ def restore_ig_creator_account(rec_id: str, rotate: bool = False) -> None:
 
 
 def mark_ig_creator_dead(rec_id: str, reason: str = "checkpoint_required") -> None:
-    """Permanently mark a dead/suspended account so it is never picked again."""
+    """Permanently mark a dead/suspended account so it is never picked again.
+
+    Preserves any existing ``extra`` payload (notably ``mail_tokens``) by
+    merging the dead marker into it instead of overwriting the column — a
+    plain ``UPDATE extra='Dead: …'`` wiped the mail session JSON, so a later
+    full backup of the flagged row lost its inbox. ``is_damaged`` readers
+    accept both the legacy ``'Dead: …'`` string and the merged dict form.
+    """
     conn = db.get_connection()
     with _lock:
         with conn:
+            cur = conn.execute("SELECT extra FROM accounts WHERE id = ?", (rec_id,))
+            row = cur.fetchone()
+            merged: Dict[str, Any] = {}
+            if row and row[0]:
+                try:
+                    obj = json.loads(row[0])
+                    if isinstance(obj, dict):
+                        merged = obj
+                except Exception:
+                    if str(row[0]).startswith("Dead:"):
+                        merged = {"dead_reason": str(row[0])[len("Dead:"):].strip()}
+            merged["dead_reason"] = reason
             conn.execute(
                 "UPDATE accounts SET status = 'Failed', extra = ? WHERE id = ?",
-                (f"Dead: {reason}", rec_id)
+                (json.dumps(merged), rec_id)
             )
         sync_files()
 
@@ -674,6 +693,47 @@ def clear_all() -> None:
         with conn:
             conn.execute("DELETE FROM accounts")
         sync_files()
+
+
+def clear_kind(kind: str) -> int:
+    """Delete only one workspace list: 'meta' (status MetaCreated) or 'ig'
+    (everything else). Telegram pool rows are never touched. Returns the
+    number of deleted rows."""
+    conn = db.get_connection()
+    with _lock:
+        with conn:
+            if kind == "meta":
+                cur = conn.execute(
+                    "DELETE FROM accounts WHERE status = 'MetaCreated'"
+                    " AND (target != 'telegram' OR target IS NULL)")
+            else:
+                cur = conn.execute(
+                    "DELETE FROM accounts WHERE (status IS NULL OR status != 'MetaCreated')"
+                    " AND (target != 'telegram' OR target IS NULL)")
+            removed = cur.rowcount
+        sync_files()
+        return removed
+
+
+def purge_damaged(kind: str = "ig") -> int:
+    """Delete only DAMAGED rows in one workspace list and keep everything
+    healthy. Damaged = status Failed/Banned, a dead-session note, or 3+
+    failed submits (same rule as the Health column and is_damaged()).
+    Telegram pool rows are never touched. Returns the deleted count."""
+    conn = db.get_connection()
+    with _lock:
+        with conn:
+            scope = ("status = 'MetaCreated'" if kind == "meta"
+                     else "(status IS NULL OR status != 'MetaCreated')")
+            cur = conn.execute(
+                f"DELETE FROM accounts WHERE (target != 'telegram' OR target IS NULL)"
+                f" AND {scope}"
+                f" AND (status IN ('Failed', 'Banned')"
+                f" OR attempts >= {MAX_SUBMIT_ATTEMPTS}"
+                f" OR extra LIKE 'Dead:%' OR extra LIKE '%dead_reason%')")
+            removed = cur.rowcount
+        sync_files()
+        return removed
 
 
 def remove_banned_or_failed() -> int:

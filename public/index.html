@@ -81,6 +81,11 @@
           <span>Instagram Creator</span>
           <span id="metainsta-badge-ig" class="nav-pill nav-pill--tool">0</span>
         </button>
+        <button class="nav-item" data-view="view-ig-checker" title="Bulk-check Instagram accounts — live, damaged, flagged">
+          <i class="fa-solid fa-user-check" style="color: #34d399;"></i>
+          <span>IG Checker</span>
+          <span class="nav-pill nav-pill--tool">TOOL</span>
+        </button>
 
         <div class="nav-section-title">TELEGRAM</div>
         <button class="nav-item nav-parent" id="nav-tg-toggle" type="button" aria-expanded="true" title="Telegram bots — pick a submenu item">
@@ -117,11 +122,6 @@
             <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
             <span>PayGo 2FA</span>
             <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-          </button>
-          <button class="nav-item nav-sub" data-view="view-tg-paygo2faopt" title="PayGo 2FA Optimized — pooled IG drain WITHOUT the email_link step (experimental, faster)">
-            <i class="fa-solid fa-forward-fast" style="color: #4ade80;"></i>
-            <span>PayGo 2FA Opt</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL · OPT</span>
           </button>
           <button class="nav-item nav-sub" data-view="view-tg-fastpay2fa" title="FastPay Instagram 2FA — pooled IG drain (no Meta, reuses an existing IG account)">
             <i class="fa-solid fa-sack-dollar" style="color: #4ade80;"></i>
@@ -178,6 +178,145 @@
         <section id="view-ig-creator" class="view-panel">
           <div class="creator-mount" data-kind="ig"></div>
         </section>
+
+        <!-- ================= VIEW: IG CHECKER ================= -->
+        <section id="view-ig-checker" class="view-panel" aria-label="Instagram account checker">
+          <div class="page-title-box">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+              <div>
+                <h2>
+                  <i class="fa-solid fa-user-check" style="color: #34d399;"></i> IG Checker
+                </h2>
+                <p>Bulk-verify Instagram usernames live — active status, followers, bios. Damaged ones can be flagged so the pool and backups skip them.</p>
+              </div>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button type="button" id="btn-igcheck-load-list" class="btn btn-secondary btn-sm" title="Fill the queue with usernames from your saved IG Creator list">
+                  <i class="fa-brands fa-instagram" style="color: #f472b6;"></i> Check my IG list
+                </button>
+                <button type="button" id="btn-igcheck-export-active-csv" class="btn btn-secondary btn-sm" disabled>
+                  <i class="fa-solid fa-file-csv"></i> Export Active CSV
+                </button>
+                <button type="button" id="btn-igcheck-copy-active" class="btn btn-secondary btn-sm" disabled>
+                  <i class="fa-solid fa-copy"></i> Copy Active
+                </button>
+                <button type="button" id="btn-igcheck-mark-dead" class="btn btn-secondary btn-sm" disabled title="Flag damaged results as Failed in the saved list (pool skips them, backups can exclude them)">
+                  <i class="fa-solid fa-triangle-exclamation" style="color: #f87171;"></i> Flag damaged
+                </button>
+                <button type="button" id="btn-igcheck-clear" class="btn btn-secondary btn-sm">
+                  <i class="fa-solid fa-trash-can"></i> Clear
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Stats Row -->
+          <div class="insta-stats-grid">
+            <div class="insta-stat-card">
+              <span class="insta-stat-label">Total Usernames</span>
+              <span class="insta-stat-value" id="igcheck-stat-total">0</span>
+              <span class="insta-stat-sub">in queue / checked</span>
+            </div>
+            <div class="insta-stat-card">
+              <span class="insta-stat-label" style="color: var(--accent-green);">Active Accounts</span>
+              <span class="insta-stat-value" style="color: var(--accent-green);" id="igcheck-stat-active">0</span>
+              <span class="insta-stat-sub">verified working</span>
+            </div>
+            <div class="insta-stat-card">
+              <span class="insta-stat-label" style="color: var(--accent-red);">Damaged / Removed</span>
+              <span class="insta-stat-value" style="color: var(--accent-red);" id="igcheck-stat-notfound">0</span>
+              <span class="insta-stat-sub">inactive or banned</span>
+            </div>
+            <div class="insta-stat-card">
+              <span class="insta-stat-label" style="color: var(--accent-cyan);">Verified VIPs</span>
+              <span class="insta-stat-value" style="color: var(--accent-cyan);" id="igcheck-stat-verified">0</span>
+              <span class="insta-stat-sub">blue badge accounts</span>
+            </div>
+          </div>
+
+          <!-- Main Input & Controls Card -->
+          <div class="card-panel" style="margin-top: 1.25rem;">
+            <div class="insta-input-container">
+              <div style="flex: 1; min-width: 280px;">
+                <label style="display: flex; justify-content: space-between; font-weight: 600; font-size: 0.85rem; margin-bottom: 0.5rem;">
+                  <span>Paste Usernames (one per line)</span>
+                  <span id="igcheck-input-count" style="color: var(--text-muted); font-size: 0.8rem;">0 names</span>
+                </label>
+                <textarea id="igcheck-input-text" class="form-control" rows="5" placeholder="cristiano&#10;leomessi&#10;instagram&#10;sample_username" style="font-family: var(--font-mono); font-size: 0.85rem; resize: vertical;"></textarea>
+              </div>
+
+              <div class="insta-dropzone" id="igcheck-dropzone">
+                <input type="file" id="igcheck-file-input" accept=".csv,.txt" style="display: none;">
+                <div class="insta-dropzone-content">
+                  <i class="fa-solid fa-cloud-arrow-up" style="font-size: 2rem; color: var(--accent-purple); margin-bottom: 0.5rem;"></i>
+                  <strong style="display: block; font-size: 0.85rem; color: var(--text-main);">Drop CSV or TXT here</strong>
+                  <span style="font-size: 0.75rem; color: var(--text-muted);">or click to browse from computer</span>
+                  <div id="igcheck-file-badge" class="insta-file-badge" style="display: none;"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div id="igcheck-progress-box" style="display: none; margin-top: 1.25rem;">
+              <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 0.35rem;">
+                <span id="igcheck-progress-label" style="color: var(--text-dim);">Checking accounts...</span>
+                <span id="igcheck-progress-pct" style="font-weight: 700; color: var(--accent-purple);">0%</span>
+              </div>
+              <div class="insta-progress-track">
+                <div id="igcheck-progress-bar" class="insta-progress-fill" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem; align-items: center; flex-wrap: wrap;">
+              <button type="button" id="btn-igcheck-start" class="btn btn-primary">
+                <i class="fa-solid fa-play"></i> Start Checking
+              </button>
+              <button type="button" id="btn-igcheck-stop" class="btn btn-danger" style="display: none;">
+                <i class="fa-solid fa-stop"></i> Stop
+              </button>
+              <div style="margin-left: auto; display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--text-dim);">
+                <span>Batch Delay:</span>
+                <select id="igcheck-speed-select" class="form-control" style="width: auto; padding: 0.25rem 0.6rem; font-size: 0.8rem;">
+                  <option value="500">Fast (500ms)</option>
+                  <option value="800" selected>Balanced (800ms)</option>
+                  <option value="1500">Safe (1500ms)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Results Section -->
+          <div class="card-panel" style="margin-top: 1.25rem;">
+            <div class="insta-results-header">
+              <div class="insta-tab-row">
+                <button type="button" class="insta-tab active" data-tab="active">
+                  <span>Active Accounts</span>
+                  <span id="igcheck-badge-active" class="badge-pill bg-emerald">0</span>
+                </button>
+                <button type="button" class="insta-tab" data-tab="not_found">
+                  <span>Damaged / Removed</span>
+                  <span id="igcheck-badge-notfound" class="badge-pill bg-rose">0</span>
+                </button>
+                <button type="button" class="insta-tab" data-tab="all">
+                  <span>All Results</span>
+                  <span id="igcheck-badge-all" class="badge-pill bg-muted">0</span>
+                </button>
+              </div>
+
+              <div style="min-width: 220px;">
+                <input type="text" id="igcheck-search-results" class="form-control" placeholder="Filter results..." style="font-size: 0.8rem; padding: 0.35rem 0.75rem;">
+              </div>
+            </div>
+
+            <!-- Results List Container -->
+            <div id="igcheck-results-list" class="insta-results-container">
+              <div class="insta-empty-state">
+                <i class="fa-brands fa-instagram" style="font-size: 3rem; color: var(--text-muted); opacity: 0.4; margin-bottom: 0.75rem;"></i>
+                <p>No results yet. Paste usernames, drop a CSV, or load your IG list and click <strong>Start Checking</strong>.</p>
+              </div>
+            </div>
+          </div>
+        </section>
         <!-- ================= VIEW: TG CLASSIC ================= -->
         <section id="view-tg-classic" class="view-panel">
           <!-- NOT class="creator-mount": nova-meta-insta.js claims every
@@ -204,11 +343,6 @@
         <!-- ================= VIEW: PAYGO 2FA (POOL DRAIN) ================= -->
         <section id="view-tg-paygo2fa" class="view-panel" aria-label="PayGo 2FA pool drain">
           <div id="tg-paygo2fa-root"></div>
-        </section>
-
-        <!-- ================= VIEW: PAYGO 2FA OPTIMIZED (POOL DRAIN, experimental) ================= -->
-        <section id="view-tg-paygo2faopt" class="view-panel" aria-label="PayGo 2FA Optimized pool drain">
-          <div id="tg-paygo2faopt-root"></div>
         </section>
 
         <!-- ================= VIEW: TG MANAGER ================= -->
@@ -365,6 +499,56 @@
           <button type="submit" class="btn btn-primary btn-sm"><i class="fa-solid fa-floppy-disk"></i> Save</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Import / Export accounts (full CSV: cookies + mail session + 2FA) -->
+  <div id="modal-ig-backup" class="modal-overlay">
+    <div class="modal-box modal-box--sm" style="max-width: 560px;">
+      <div class="modal-header">
+        <h3 class="modal-title"><i class="fa-solid fa-right-left" style="color: var(--accent-cyan);"></i> <span id="ig-backup-kind-title">IG</span> <span id="ig-backup-action-title">Export</span></h3>
+        <button type="button" class="close-modal" data-close="modal-ig-backup">&times;</button>
+      </div>
+      <div id="ig-backup-pane-export" style="padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 0.85rem;">
+        <div style="font-size: 0.8rem; color: var(--text-dim); line-height: 1.5;">
+          Save this list to <strong style="color: var(--text-main);">one CSV file</strong> — username, password,
+          email, <strong style="color: var(--text-main);">cookies</strong>, <strong style="color: var(--text-main);">mail session</strong>,
+          2FA secret, device &amp; dates. The same file imports back unchanged on any machine.
+          <div style="margin-top: 0.35rem;"><span id="ig-backup-count" style="color: var(--text-main); font-weight: 700;"></span></div>
+        </div>
+        <label style="display: flex; gap: 0.6rem; align-items: flex-start; font-size: 0.84rem; cursor: pointer; background: var(--bg-input, #0f172a); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 0.7rem 0.9rem;">
+          <input type="checkbox" id="ig-backup-exclude-damaged" checked style="margin-top: 3px; accent-color: var(--accent-green);">
+          <span><strong>Leave out damaged accounts</strong><br>
+          <span style="font-size: 0.76rem; color: var(--text-dim);">Skips rows flagged Failed / Banned / Dead. Applies to export <em>and</em> import.</span></span>
+        </label>
+        <button type="button" id="btn-ig-backup-download" class="btn btn-primary btn-sm" style="justify-content: center;">
+          <i class="fa-solid fa-download"></i> <span id="ig-backup-download-label">Export accounts</span>
+        </button>
+      </div>
+      <div id="ig-backup-pane-import" style="display: none; padding: 1.25rem 1.5rem; flex-direction: column; gap: 0.6rem;">
+        <div style="font-size: 0.8rem; color: var(--text-dim); line-height: 1.5;">
+          Add accounts from a CSV file exported earlier. The whole file imports in one go.
+        </div>
+        <div class="insta-dropzone" id="ig-backup-dropzone" style="min-height: 92px; padding: 1rem;">
+          <input type="file" id="ig-backup-file-input" accept=".csv" style="display: none;">
+          <div style="text-align: center;">
+            <i class="fa-solid fa-cloud-arrow-up" style="font-size: 1.4rem; color: var(--accent-purple); margin-bottom: 0.35rem;"></i>
+            <strong style="display: block; font-size: 0.82rem; color: var(--text-main);">Drop your CSV here or click to browse</strong>
+            <div id="ig-backup-file-badge" class="insta-file-badge" style="display: none; margin-top: 0.5rem;"></div>
+          </div>
+        </div>
+        <div id="ig-backup-preview" style="font-size: 0.78rem; color: var(--text-dim);"></div>
+        <label style="display: flex; gap: 0.5rem; align-items: center; font-size: 0.8rem; cursor: pointer;">
+          <input type="checkbox" id="ig-backup-skip-existing" checked style="accent-color: var(--accent-purple);">
+          Skip accounts already in the list (match by username)
+        </label>
+        <button type="button" id="btn-ig-backup-import" class="btn btn-secondary btn-sm" disabled style="justify-content: center;">
+          <i class="fa-solid fa-upload"></i> <span id="ig-backup-import-label">Import accounts</span>
+        </button>
+      </div>
+      <div class="modal-footer" style="padding: 0.9rem 1.5rem; border-top: 1px solid var(--border-color); display: flex; justify-content: flex-end; gap: 0.75rem; background: rgba(0,0,0,0.15);">
+        <button type="button" class="btn btn-secondary btn-sm" data-close="modal-ig-backup">Close</button>
+      </div>
     </div>
   </div>
 
@@ -548,7 +732,7 @@
   <script src="js/nova-core.js?v=4" defer></script>
   <script src="js/nova-license.js?v=2" defer></script>
   <script src="js/nova-diag.js?v=3" defer></script>
-  <script src="js/nova-meta-insta.js?v=5" defer></script>
+  <script src="js/nova-meta-insta.js?v=6" defer></script>
   <!-- ?v=N cache-busts the dashboard scripts. Without a changing query, a
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
        disagreed with the pool card). Bump these when shipping JS changes. -->
@@ -557,7 +741,7 @@
   <script src="js/nova-fastpay2fa.js?v=4" defer></script>
   <script src="js/nova-paygopool.js?v=6" defer></script>
   <script src="js/nova-paygo2fa.js?v=3" defer></script>
-  <script src="js/nova-paygo2faopt.js?v=1" defer></script>
+  <script src="js/nova-igcheck.js?v=1" defer></script>
   <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:
        FastPay is a TG Classic create bot now. The file is kept on disk. -->
   <script src="js/nova-manager.js?v=12" defer></script>

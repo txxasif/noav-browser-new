@@ -5,6 +5,19 @@ Meta Creator — Automated Windows Distribution & Packaging Script
 Synchronizes Linux development source to Windows distribution tree,
 validates runtime hermetic dependencies, tests license logic,
 and creates the standalone MetaCreator-Windows-Portable.zip package.
+
+Build selection (module/bot subsets ship ONLY the selected code+UI):
+  --modules meta,ig          Meta + Instagram Creator only (no Telegram)
+  --modules meta,ig,tg       Full build (default)
+  --meta-only                Meta Creator only (shorthand for --modules meta)
+  --bots taskly,paygo        Ship only these TG bots (needs the tg module)
+  --no-protect               Readable dev build (skip .pyc + JS obfuscation)
+  -h / --help                Print this help and exit
+
+Examples:
+  python build_windows_dist.py --modules meta,ig
+  python build_windows_dist.py --modules meta,ig,tg --bots taskly
+  python build_windows_dist.py --modules meta --no-protect
 """
 import hashlib
 import json
@@ -90,6 +103,158 @@ def get_dist_tag():
     return "-".join(tag_parts)
 
 
+def validate_selection():
+    """Refuse nonsense selections early: `meta` is the base engine and every
+    valid build contains it (ig/tg are add-ons, never stand-alone)."""
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__ or "")
+        print("Selection flags:\n"
+              "  --modules meta,ig       Meta + Instagram Creator only (no Telegram)\n"
+              "  --modules meta,ig,tg    Full build (default)\n"
+              "  --meta-only             Meta Creator only (shorthand for --modules meta)\n"
+              "  --bots taskly,paygo     Ship only these TG bots (needs the tg module)\n"
+              "  --no-protect            Readable dev build (skip .pyc + JS obfuscation)\n"
+              "Examples:\n"
+              "  python build_windows_dist.py --modules meta,ig\n"
+              "  python build_windows_dist.py --modules meta,ig,tg --bots taskly\n"
+              "  python build_windows_dist.py --modules meta,ig --no-protect\n")
+        raise SystemExit(0)
+    mods = selected_modules()
+    if "meta" not in mods:
+        raise SystemExit(
+            "Invalid --modules selection %r: `meta` is the base engine and "
+            "must be included (valid: meta | meta,ig | meta,tg | meta,ig,tg)."
+            % (mods,))
+    if "tg" not in mods and any(a.startswith("--bots") for a in sys.argv):
+        log("WARN", "--bots is ignored without the tg module.")
+
+
+# ---------------------------------------------------------------------------
+# Build selection maps — module/bot -> files. SINGLE SOURCE OF TRUTH for
+# exclusion: sync_sources(), prune step, dashboard strip and zip validation
+# all derive from these. NOTE: `core/`, `engine/`, `instagram/` always ship —
+# the Meta engine shares them (lifecycle imports instagram helpers lazily).
+# ---------------------------------------------------------------------------
+# Whole directories dropped when the module is excluded.
+MODULE_SYNC_DIRS = {
+    "tg": ["pipelines", "tg",
+           # TG-only dashboard assets (bot logos, MTProto setup guide).
+           # nova-logo.png and shared assets stay.
+           "public/img/bot_logo", "public/guide"],
+}
+# Root .py files dropped when the module is excluded.
+MODULE_ROOT_FILES = {
+    "ig": ["ig_check.py", "ig_backup.py"],
+    "tg": [
+        "tg_bot.py", "tg_accounts.py", "tg_fingerprint.py",
+        "tg_login.py", "tg_login_mtproto.py", "mtproto_bot.py",
+        "tg_balance.py", "tg_toggle.py", "warm_pool.py",
+        "tg_tasks.py", "tg_flows.py", "tg_steps.py",
+        "tg_join_bot.py", "tg_manager_cli.py", "tg_stats.py",
+        "tg_task_probe.py", "tg_withdraw.py",
+        "run_native_cycle.py",  # native flow has no bot task mapping (shared)
+    ],
+}
+# Node route modules dropped when the module is excluded (server.js requires
+# them optionally, so the server boots without them).
+MODULE_SERVER_FILES = {
+    "ig": ["server/routes-igcheck.js"],
+    "tg": ["server/routes-tg.js", "server/paygo-orchestrator.js"],
+}
+# Dashboard scripts dropped when the module is excluded.
+MODULE_PUBLIC_JS = {
+    "ig": ["public/js/nova-igcheck.js"],
+    "tg": ["public/js/nova-tg.js", "public/js/nova-taskly2fa.js",
+           "public/js/nova-fastpay2fa.js", "public/js/nova-paygopool.js",
+           "public/js/nova-paygo2fa.js",
+           "public/js/nova-manager.js", "public/js/nova-fastpay.js"],
+}
+# Per-bot root runners (only when tg ships AND the bot is selected).
+BOT_ROOT_FILES = {
+    "taskly": ["run_pool_2fa_cycle.py"],
+    "paygo": ["run_cookie_cycle.py", "run_paygo_pool_2fa_cycle.py",
+              "tg_paygo_probe.py"],
+    "fastpay": ["run_fastpay_pool_cycle.py", "tg_fastpay.py"],
+}
+# Per-bot dashboard scripts + dashboard view-panel ids (nav uses data-bot /
+# the same data-view, stripped together).
+BOT_PUBLIC_JS = {
+    "taskly": ["public/js/nova-taskly2fa.js"],
+    "paygo": ["public/js/nova-paygopool.js", "public/js/nova-paygo2fa.js"],
+    "fastpay": ["public/js/nova-fastpay2fa.js"],
+}
+BOT_VIEWS = {
+    "taskly": ["view-tg-taskly2fa"],
+    "paygo": ["view-tg-paygopool", "view-tg-paygo2fa"],
+    "fastpay": ["view-tg-fastpay2fa"],
+}
+# Dashboard views removed wholesale when the module is excluded.
+MODULE_VIEWS = {
+    "ig": ["view-ig-creator", "view-ig-checker"],
+    "tg": ["view-tg-classic", "view-tg-taskly2fa", "view-tg-fastpay2fa",
+           "view-tg-paygopool", "view-tg-paygo2fa",
+           "view-tg-manager", "view-guide"],
+}
+
+
+def excluded_relpaths():
+    """Repo-relative paths that must NOT ship for the current --modules/--bots
+    selection. Returns (excluded_dirs, excluded_files); dir entries match by
+    exact name or dir-prefix, files by exact relative path (os.sep-joined)."""
+    mods = set(selected_modules())
+    bots = set(selected_bots()) if "tg" in mods else set()
+    ex_dirs, ex_files = set(), set()
+    for m, dirs in MODULE_SYNC_DIRS.items():
+        if m not in mods:
+            ex_dirs.update(dirs)
+    for m, files in MODULE_ROOT_FILES.items():
+        if m not in mods:
+            ex_files.update(files)
+    for m, files in MODULE_SERVER_FILES.items():
+        if m not in mods:
+            ex_files.update(os.path.join(*f.split("/")) for f in files)
+    for m, files in MODULE_PUBLIC_JS.items():
+        if m not in mods:
+            ex_files.update(os.path.join(*f.split("/")) for f in files)
+    if "tg" in mods:
+        for b, files in BOT_ROOT_FILES.items():
+            if b not in bots:
+                ex_files.update(files)
+        for b, files in BOT_PUBLIC_JS.items():
+            if b not in bots:
+                ex_files.update(os.path.join(*f.split("/")) for f in files)
+        for b in ALL_BOTS:
+            if b not in bots:
+                ex_files.add(os.path.join("tg", "bots", b + ".py"))
+    else:
+        # Whole TG module out: every bot file is out too (the tg/ dir itself
+        # is already covered via ex_dirs; list files explicitly so the
+        # exclusion set is complete for validation).
+        for files in BOT_ROOT_FILES.values():
+            ex_files.update(files)
+        for files in BOT_PUBLIC_JS.values():
+            ex_files.update(os.path.join(*f.split("/")) for f in files)
+        for b in ALL_BOTS:
+            ex_files.add(os.path.join("tg", "bots", b + ".py"))
+    return ex_dirs, ex_files
+
+
+def is_excluded(rel, ex_dirs, ex_files):
+    """True when repo-relative path `rel` (os.sep-joined) is excluded."""
+    rel = rel.replace("/", os.path.sep)
+    if rel in ex_files:
+        return True
+    return any(rel == d or rel.startswith(d + os.path.sep) for d in ex_dirs)
+
+
+def selection_summary():
+    mods = selected_modules()
+    bots = selected_bots() if "tg" in mods else []
+    return "modules=[%s] bots=[%s] tag=%s" % (
+        ",".join(mods), ",".join(bots) if bots else ("-" if "tg" not in mods else "all"),
+        get_dist_tag())
+
+
 # Root files to synchronize
 SYNC_ROOT_FILES = [
     "server.js",
@@ -120,7 +285,6 @@ SYNC_ROOT_FILES = [
     "run_native_cycle.py",  # one-shot Taskly 2FA native cycle (lease -> bot email+code -> IG signup -> register)
     "run_pool_2fa_cycle.py",  # one-shot Taskly 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + register)
     "run_paygo_pool_2fa_cycle.py",  # one-shot PayGo 2FA POOL DRAIN (same-to-same as Taskly pool, bot paygo)
-    "run_paygo_pool_2fa_opt_cycle.py",  # EXPERIMENTAL PayGo 2FA Optimized POOL DRAIN (no email_link; own counter)
     "run_fastpay_pool_cycle.py",  # one-shot FastPay 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + password + Confirm)
     "tg_fastpay.py",        # FastPay2025 IG-2FA payout runner (key -> code -> Confirm)
     "tg_join_bot.py",       # /start (or --gate: join channels + Verify + language) on pooled accounts
@@ -129,6 +293,9 @@ SYNC_ROOT_FILES = [
     "tg_paygo_probe.py",    # fast non-blocking PayGo stock probe & countdown
     "tg_task_probe.py",     # single-lease task-availability probe (all bots)
     "tg_withdraw.py",       # USDT (BEP-20) withdrawal (Taskly/PayGo) + TG freeze
+    "ig_check.py",          # Instagram account checker (IG Checker page; stdlib-only)
+    "ig_backup.py",         # IG Creator full backup/restore CSV (cookies + mail session + 2FA)
+    ".env.example",         # engine tuning template (user copies to .env.local; never auto-loaded)
 ]
 
 ANTI_AI_JS = """/**
@@ -185,13 +352,120 @@ def compute_sha256(filepath):
     return h.hexdigest()
 
 
+def strip_dashboard_selection():
+    """Remove excluded modules/bots from the shipped dashboard (index.html).
+
+    The runtime also hides missing modules via /api/build-mode, but a subset
+    build should not SHIP the panels, nav items and script tags at all —
+    otherwise the tree still contains the "removed" feature's UI.
+    Operates on the synced copy in the Windows tree; dev source is untouched.
+    """
+    mods = set(selected_modules())
+    bots = set(selected_bots()) if "tg" in mods else set()
+    idx = os.path.join(ROOT_WIN, "public", "index.html")
+    if not os.path.isfile(idx):
+        return
+    with open(idx, encoding="utf-8") as fh:
+        html = fh.read()
+    removed = []
+
+    def drop_script_tag(js_rel):
+        # <script src="js/nova-tg.js?v=16" defer></script>
+        nonlocal html, removed
+        name = js_rel.split("/")[-1]
+        pat = re.compile(r'<script\s+src="js/%s(\?[^"]*)?"[^>]*>\s*</script>\s*\n?'
+                         % re.escape(name))
+        html, n = pat.subn("", html)
+        if n:
+            removed.append("script:" + name)
+
+    def drop_view(section_id):
+        nonlocal html, removed
+        pat = re.compile(r'<section\b[^>]*\bid="%s"[^>]*>.*?</section>\s*'
+                         % re.escape(section_id), re.DOTALL)
+        html, n = pat.subn("", html)
+        if n:
+            removed.append("view:" + section_id)
+
+    def drop_nav_button(attr, value):
+        # <button ... data-bot="paygo" ...>...</button> (may span lines)
+        nonlocal html, removed
+        pat = re.compile(r'<button\b[^>]*%s="%s"[^>]*>.*?</button>\s*'
+                         % (re.escape(attr), re.escape(value)), re.DOTALL)
+        html, n = pat.subn("", html)
+        if n:
+            removed.append("nav:%s=%s" % (attr, value))
+
+    def drop_nav_range(start_marker, end_view_attr):
+        # Remove a whole sidebar block, e.g. TELEGRAM title .. TG Manager btn.
+        nonlocal html, removed
+        s = html.find(start_marker)
+        if s == -1:
+            return
+        b = html.find(end_view_attr, s)
+        if b == -1:
+            return
+        e = html.find("</button>", b)
+        if e == -1:
+            return
+        e += len("</button>")
+        html = html[:s] + html[e:]
+        removed.append("nav-range:" + start_marker.strip()[:40])
+
+    # 1. Excluded bots (classic nav item + pool nav item/view + scripts).
+    if "tg" in mods:
+        for b in ALL_BOTS:
+            if b in bots:
+                continue
+            drop_nav_button("data-bot", b)
+            for v in BOT_VIEWS.get(b, []):
+                drop_nav_button("data-view", v)
+                drop_view(v)
+            for js in BOT_PUBLIC_JS.get(b, []):
+                drop_script_tag(js)
+
+    # 2. Excluded modules: nav ranges, views, scripts.
+    if "tg" not in mods:
+        drop_nav_range('<div class="nav-section-title">TELEGRAM</div>',
+                       'data-view="view-tg-manager"')
+        drop_nav_range('<div class="nav-section-title">HELP</div>',
+                       'data-view="view-guide"')
+        for v in MODULE_VIEWS["tg"]:
+            drop_view(v)
+        for js in MODULE_PUBLIC_JS["tg"]:
+            drop_script_tag(js)
+        # Stale dev comments documenting removed TG views (e.g. the FastPay
+        # payout note referencing view-tg-classic) — not functionality, but a
+        # subset build should not document features it does not ship.
+        html, n = re.subn(r'<!--(?:(?!<!--).)*?view-tg-.*?-->',
+                          '', html, flags=re.DOTALL)
+        if n:
+            removed.append("tg-comments:%d" % n)
+    if "ig" not in mods:
+        drop_nav_button("data-view", "view-ig-creator")
+        for v in MODULE_VIEWS["ig"]:
+            drop_view(v)
+        for js in MODULE_PUBLIC_JS["ig"]:
+            drop_script_tag(js)
+
+    with open(idx, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    if removed:
+        log("STRIP", "dashboard: removed %d element(s): %s"
+            % (len(removed), ", ".join(sorted(removed))))
+
+
 def sync_sources():
     log("SYNC", f"Synchronizing source code from {ROOT_LIN} -> {ROOT_WIN}...")
+    log("SYNC", "Selection: " + selection_summary())
     os.makedirs(ROOT_WIN, exist_ok=True)
     synced_count = 0
+    ex_dirs, ex_files = excluded_relpaths()
 
     # 1. Sync root files
     for f in SYNC_ROOT_FILES:
+        if is_excluded(f, ex_dirs, ex_files):
+            continue
         s = os.path.join(ROOT_LIN, f)
         d = os.path.join(ROOT_WIN, f)
         if os.path.isfile(s):
@@ -200,6 +474,8 @@ def sync_sources():
 
     # 2. Sync directories
     for dname in SYNC_DIRS:
+        if dname in ex_dirs:
+            continue
         s_dir = os.path.join(ROOT_LIN, dname)
         d_dir = os.path.join(ROOT_WIN, dname)
         if not os.path.isdir(s_dir):
@@ -222,13 +498,9 @@ def sync_sources():
                     continue
                 s_file = os.path.join(root, f)
                 d_file = os.path.join(target_sub, f)
-                # --bots X,Y: ship only the selected tg/bots/<id>.py modules.
-                if dname == "tg" and f.endswith(".py"):
-                    rel_f = os.path.relpath(s_file, s_dir)
-                    if rel_f.startswith("bots" + os.sep):
-                        bid = f[:-3]
-                        if bid != "__init__" and bid not in selected_bots():
-                            continue
+                rel_f = os.path.relpath(s_file, ROOT_LIN)
+                if is_excluded(rel_f, ex_dirs, ex_files):
+                    continue
                 # Skip symlinks that point to linux-specific paths
                 if os.path.islink(s_file):
                     continue
@@ -266,28 +538,38 @@ def sync_sources():
                 shutil.copy2(os.path.join(root, item), os.path.join(target_sub, item))
                 synced_count += 1
 
-    # Remove EXCLUDED bots from a previous build (source + stale bytecode), or
-    # a `--bots taskly` build would still import an old fastpay.pyc that lingered.
-    for _bid in ALL_BOTS:
-        if _bid in selected_bots():
-            continue
-        for _ext in (".py", ".pyc"):
-            _p = os.path.join(ROOT_WIN, "tg", "bots", _bid + _ext)
+    # Remove files excluded by THIS selection that a previous build may have
+    # left behind (whole dirs like pipelines//tg/, stale .py/.pyc twins).
+    # Without this, rebuilding a subset into the same tree would still ship
+    # the previous Full build's TG code.
+    for _rel in sorted(ex_files):
+        for _p in (os.path.join(ROOT_WIN, _rel), os.path.join(ROOT_WIN, _rel) + "c"
+                   if _rel.endswith(".py") else None):
+            if _p is None:
+                continue
             try:
-                if os.path.isfile(_p):
+                if os.path.isfile(_p) or os.path.islink(_p):
                     os.remove(_p)
             except OSError:
                 pass
+    for _d in sorted(ex_dirs):
+        _dp = os.path.join(ROOT_WIN, _d)
+        if os.path.isdir(_dp) and not os.path.islink(_dp):
+            shutil.rmtree(_dp, ignore_errors=True)
 
-    # Build-selection manifest: which bots this build ships. The dashboard
-    # reads it (via tg.registry) to hide the bots that were not built.
-    try:
-        tg_dir = os.path.join(ROOT_WIN, "tg")
-        os.makedirs(tg_dir, exist_ok=True)
-        with open(os.path.join(tg_dir, "enabled_bots.json"), "w", encoding="utf-8") as fh:
-            json.dump({"bots": selected_bots()}, fh, indent=2)
-    except Exception as exc:
-        log("WARN", f"could not write tg/enabled_bots.json: {exc}")
+    strip_dashboard_selection()
+
+    # Build-selection manifest for a TG build: which bots shipped. The
+    # dashboard reads it (via tg.registry) to hide the bots that were not
+    # built. TG-less builds have no tg/ dir at all.
+    if "tg" in selected_modules():
+        try:
+            tg_dir = os.path.join(ROOT_WIN, "tg")
+            os.makedirs(tg_dir, exist_ok=True)
+            with open(os.path.join(tg_dir, "enabled_bots.json"), "w", encoding="utf-8") as fh:
+                json.dump({"bots": selected_bots()}, fh, indent=2)
+        except Exception as exc:
+            log("WARN", f"could not write tg/enabled_bots.json: {exc}")
 
     # Build-mode manifest: modules and bots for dashboard UI adaptation
     try:
@@ -462,17 +744,145 @@ def validate_license_parity():
         raise RuntimeError("HWID parity check failed.")
 
 
+# ---------------------------------------------------------------------------
+# Zip validation sets (mirror the selection maps above; "MetaCreator/" prefix
+# is the archive root). REQUIRED_BASE always ships; the rest is conditional.
+# ---------------------------------------------------------------------------
+REQUIRED_BASE = [
+    "MetaCreator/server.js",
+    "MetaCreator/build_mode.json",
+    "MetaCreator/ai_config.py",
+    "MetaCreator/server/context.js",
+    "MetaCreator/server/routes-license.js",
+    "MetaCreator/server/routes-updates.js",
+    "MetaCreator/server/routes-meta.js",
+    "MetaCreator/server/routes-diag.js",
+    "MetaCreator/server/diag.js",
+    "MetaCreator/server/runlog.js",
+    "MetaCreator/server/routes-static.js",
+    "MetaCreator/worker.py",
+    "MetaCreator/runner.py",
+    "MetaCreator/store.py",
+    "MetaCreator/db.py",
+    "MetaCreator/ig_flow.py",
+    "MetaCreator/engine/resource_runtime.py",
+    "MetaCreator/Run.bat",
+    "MetaCreator/Run-Console.bat",
+    "MetaCreator/Stop.bat",
+    "MetaCreator/start.bat",
+    "MetaCreator/Update.bat",
+    "MetaCreator/Update.ps1",
+    "MetaCreator/core/licenseManager.js",
+    "MetaCreator/core/license_mgr.py",
+    "MetaCreator/core/licenseConfig.js",
+    "MetaCreator/core/updateManager.js",
+    "MetaCreator/instagram/__init__.py",
+    "MetaCreator/instagram/helpers.py",
+    "MetaCreator/public/index.html",
+    "MetaCreator/public/js/nova-core.js",
+    "MetaCreator/public/js/nova-license.js",
+    "MetaCreator/public/js/nova-diag.js",
+    "MetaCreator/public/js/nova-meta-insta.js",
+    "MetaCreator/bin/node.exe",
+    "MetaCreator/_internal/python.exe",
+    "MetaCreator/extensions/Captcha/manifest.json",
+    "MetaCreator/extensions/Captcha/recaptcha.js",
+    "MetaCreator/extensions/Captcha/dist/ort-wasm-simd.wasm",
+    "MetaCreator/extensions/Captcha/models/yolov5-seg.ort",
+]
+REQUIRED_IG = [
+    "MetaCreator/ig_check.py",
+    "MetaCreator/ig_backup.py",
+    "MetaCreator/server/routes-igcheck.js",
+    "MetaCreator/public/js/nova-igcheck.js",
+]
+REQUIRED_TG = [
+    "MetaCreator/server/routes-tg.js",
+    "MetaCreator/server/paygo-orchestrator.js",
+    "MetaCreator/tg_bot.py",
+    "MetaCreator/tg_accounts.py",
+    "MetaCreator/tg_fingerprint.py",
+    "MetaCreator/tg_login.py",
+    "MetaCreator/tg_login_mtproto.py",
+    "MetaCreator/mtproto_bot.py",
+    "MetaCreator/tg_balance.py",
+    "MetaCreator/tg_toggle.py",
+    "MetaCreator/warm_pool.py",
+    "MetaCreator/tg_tasks.py",
+    "MetaCreator/tg_flows.py",
+    "MetaCreator/tg_steps.py",
+    "MetaCreator/tg_join_bot.py",
+    "MetaCreator/tg_manager_cli.py",
+    "MetaCreator/tg_stats.py",
+    "MetaCreator/tg_task_probe.py",
+    "MetaCreator/tg_withdraw.py",
+    "MetaCreator/run_native_cycle.py",
+    "MetaCreator/tg/enabled_bots.json",
+    "MetaCreator/tg/__init__.py",
+    "MetaCreator/tg/common.py",
+    "MetaCreator/tg/manager.py",
+    "MetaCreator/tg/registry.py",
+    "MetaCreator/tg/bots/__init__.py",
+    "MetaCreator/pipelines/__init__.py",
+    "MetaCreator/pipelines/telegram/__init__.py",
+    "MetaCreator/pipelines/telegram/tg_coupled.py",
+    "MetaCreator/pipelines/telegram/tg_cycles.py",
+    "MetaCreator/pipelines/telegram/tg_support.py",
+    "MetaCreator/pipelines/telegram/tg_worker.py",
+    "MetaCreator/public/js/nova-tg.js",
+    "MetaCreator/public/js/nova-manager.js",
+]
+REQUIRED_BOT = {
+    "taskly": [
+        "MetaCreator/run_pool_2fa_cycle.py",
+        "MetaCreator/tg/bots/taskly.py",
+        "MetaCreator/public/js/nova-taskly2fa.js",
+    ],
+    "paygo": [
+        "MetaCreator/run_cookie_cycle.py",
+        "MetaCreator/run_paygo_pool_2fa_cycle.py",
+        "MetaCreator/tg_paygo_probe.py",
+        "MetaCreator/tg/bots/paygo.py",
+        "MetaCreator/public/js/nova-paygopool.js",
+        "MetaCreator/public/js/nova-paygo2fa.js",
+    ],
+    "fastpay": [
+        "MetaCreator/run_fastpay_pool_cycle.py",
+        "MetaCreator/tg_fastpay.py",
+        "MetaCreator/tg/bots/fastpay.py",
+        "MetaCreator/public/js/nova-fastpay2fa.js",
+    ],
+}
+
+
+def variant_dist_dir() -> str:
+    """Per-variant output folder (dist/Full, dist/Meta-Ig, ...) so different
+    selections never clobber each other's ZIPs or latest.json."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", get_dist_tag())
+    d = os.path.join(DIST_DIR, safe)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def build_portable_zip(protect_mode: bool = True):
     tag = get_dist_tag()
+    out_dir = variant_dist_dir()
     zip_name = f"MetaCreator-Windows-{tag}-Portable.zip"
     log("ZIP", f"Building {zip_name}...")
-    os.makedirs(DIST_DIR, exist_ok=True)
-    zip_path = os.path.join(DIST_DIR, zip_name)
+    zip_path = os.path.join(out_dir, zip_name)
 
     if os.path.exists(zip_path):
         os.remove(zip_path)
 
     total_files = 0
+    # TG-less builds: the Telethon MTProto stack (telethon + pyaes, ~14MB) is
+    # only ever imported by tg_bot/mtproto_bot, so it stays out of the zip.
+    # rsa stays: core/license_mgr.py verifies licenses with it. The win tree
+    # itself is untouched — this prune applies to the shipped archive only.
+    ship_tg = "tg" in selected_modules()
+
+    def _is_tg_runtime_dir(d):
+        return d in ("telethon", "pyaes") or d.startswith(("telethon-", "pyaes-"))
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for root, dirs, files in os.walk(ROOT_WIN):
             rel_root = os.path.relpath(root, ROOT_WIN)
@@ -489,6 +899,8 @@ def build_portable_zip(protect_mode: bool = True):
                     "__pycache__", ".git", ".pytest_cache", "tests", "test",
                     "idlelib", "turtledemo", "greenlet-3.5.6.data"
                 )]
+                if not ship_tg:
+                    dirs[:] = [d for d in dirs if not _is_tg_runtime_dir(d)]
 
             for file in files:
                 if file.endswith((".pyo", ".log", ".DS_Store", ".md", ".markdown", ".c", ".cpp", ".h", ".rst", ".zip")):
@@ -519,97 +931,28 @@ def build_portable_zip(protect_mode: bool = True):
                 zf.write(abs_path, arc_name)
                 total_files += 1
 
-    # Post-build archive verification
+    # Post-build archive verification. Required sets derive from the same
+    # selection maps as sync (never hand-edited per variant).
     with zipfile.ZipFile(zip_path, "r") as zf:
         names = set(zf.namelist())
-        required_in_zip = [
-            "MetaCreator/server.js",
-            "MetaCreator/server/context.js",
-            "MetaCreator/server/routes-license.js",
-            "MetaCreator/server/routes-updates.js",
-            "MetaCreator/server/routes-meta.js",
-            "MetaCreator/server/routes-tg.js",
-            "MetaCreator/server/routes-diag.js",
-            "MetaCreator/server/diag.js",
-            "MetaCreator/server/runlog.js",
-            "MetaCreator/server/routes-static.js",
-            "MetaCreator/worker.py",
-            "MetaCreator/engine/resource_runtime.py",
-            "MetaCreator/Run.bat",
-            "MetaCreator/Run-Console.bat",
-            "MetaCreator/Stop.bat",
-            "MetaCreator/start.bat",
-            "MetaCreator/Update.bat",
-            "MetaCreator/Update.ps1",
-            "MetaCreator/core/licenseManager.js",
-            "MetaCreator/core/license_mgr.py",
-            "MetaCreator/core/licenseConfig.js",
-            "MetaCreator/core/updateManager.js",
-            "MetaCreator/server/paygo-orchestrator.js",
-            "MetaCreator/tg_tasks.py",
-            "MetaCreator/tg_flows.py",
-            "MetaCreator/tg_steps.py",
-            "MetaCreator/tg_paygo_probe.py",
-            "MetaCreator/tg_task_probe.py",
-            "MetaCreator/tg_withdraw.py",
-            "MetaCreator/run_cookie_cycle.py",
-            "MetaCreator/run_native_cycle.py",
-            "MetaCreator/run_pool_2fa_cycle.py",
-            "MetaCreator/run_paygo_pool_2fa_cycle.py",
-            "MetaCreator/run_paygo_pool_2fa_opt_cycle.py",
-            "MetaCreator/run_fastpay_pool_cycle.py",
-            "MetaCreator/tg_fastpay.py",
-            "MetaCreator/tg_manager_cli.py",
-            "MetaCreator/tg_join_bot.py",
-            "MetaCreator/tg_stats.py",
-            "MetaCreator/instagram/__init__.py",
-            "MetaCreator/instagram/helpers.py",
-            "MetaCreator/public/index.html",
-            "MetaCreator/public/js/nova-core.js",
-            "MetaCreator/public/js/nova-license.js",
-            "MetaCreator/public/js/nova-meta-insta.js",
-            "MetaCreator/public/js/nova-tg.js",
-            "MetaCreator/public/js/nova-taskly2fa.js",
-            "MetaCreator/public/js/nova-fastpay2fa.js",
-            "MetaCreator/public/js/nova-paygopool.js",
-            "MetaCreator/public/js/nova-paygo2fa.js",
-            "MetaCreator/public/js/nova-paygo2faopt.js",
-            "MetaCreator/bin/node.exe",
-            "MetaCreator/_internal/python.exe",
-            "MetaCreator/extensions/Captcha/manifest.json",
-            "MetaCreator/extensions/Captcha/recaptcha.js",
-            "MetaCreator/extensions/Captcha/dist/ort-wasm-simd.wasm",
-            "MetaCreator/extensions/Captcha/models/yolov5-seg.ort",
-        ]
         mods = selected_modules()
-        if "tg" not in mods:
-            # If TG module is not included, exclude TG runner files from zip requirements
-            tg_patterns = (
-                "server/paygo-orchestrator.js", "tg_tasks.py", "tg_flows.py",
-                "tg_steps.py", "tg_paygo_probe.py", "tg_task_probe.py",
-                "tg_withdraw.py", "run_cookie_cycle.py", "run_native_cycle.py",
-                "run_pool_2fa_cycle.py", "run_paygo_pool_2fa_cycle.py",
-                "run_paygo_pool_2fa_opt_cycle.py", "run_fastpay_pool_cycle.py",
-                "tg_fastpay.py", "tg_manager_cli.py", "tg_join_bot.py", "tg_stats.py",
-                "public/js/nova-tg.js", "public/js/nova-taskly2fa.js",
-                "public/js/nova-fastpay2fa.js", "public/js/nova-paygopool.js",
-                "public/js/nova-paygo2fa.js", "public/js/nova-paygo2faopt.js",
-            )
-            required_in_zip = [f for f in required_in_zip if not any(p in f for p in tg_patterns)]
-        else:
-            # If only specific bots are selected, remove runners of excluded bots
-            bots = selected_bots()
-            if "taskly" not in bots:
-                required_in_zip = [f for f in required_in_zip if "run_pool_2fa_cycle.py" not in f and "nova-taskly2fa.js" not in f]
-            if "paygo" not in bots:
-                required_in_zip = [f for f in required_in_zip if "paygo" not in f]
-            if "fastpay" not in bots:
-                required_in_zip = [f for f in required_in_zip if "fastpay" not in f]
+        bots = selected_bots() if "tg" in mods else []
+        required_in_zip = list(REQUIRED_BASE)
+        if "ig" in mods:
+            required_in_zip += REQUIRED_IG
+        if "tg" in mods:
+            required_in_zip += REQUIRED_TG
+            for b in bots:
+                required_in_zip += REQUIRED_BOT.get(b, [])
 
         if protect_mode:
-            # Protected build ships sourceless bytecode, not .py.
-            required_in_zip = [n[:-3] + ".pyc" if n.endswith(".py") else n
-                                for n in required_in_zip]
+            # Protected build ships sourceless bytecode, not .py — except
+            # KEEP_SOURCE files (ai_config.py), which stay plaintext.
+            required_in_zip = [
+                n[:-3] + ".pyc"
+                if (n.endswith(".py") and os.path.basename(n) != "ai_config.py")
+                else n
+                for n in required_in_zip]
         forbidden_provider_files = [
             n for n in names
             if n in ("MetaCreator/mail_providers.py", "MetaCreator/mem_guard.py", "MetaCreator/core/mail_fish.py")
@@ -622,29 +965,44 @@ def build_portable_zip(protect_mode: bool = True):
         missing_in_zip = [f for f in required_in_zip if f not in names]
         if missing_in_zip:
             raise RuntimeError(f"Portable ZIP validation failed! Missing files: {missing_in_zip}")
+        # Negative validation: excluded modules/bots must be ABSENT, not just
+        # unrequired. A file that should have been stripped but leaked in
+        # (stale tree, new file not added to the selection maps) fails here.
+        ex_dirs, ex_files = excluded_relpaths()
+        leaked = []
+        for n in names:
+            if not n.startswith("MetaCreator/"):
+                continue
+            rel = n[len("MetaCreator/"):].replace("/", os.path.sep)
+            if is_excluded(rel, ex_dirs, ex_files):
+                leaked.append(n)
+            elif not ship_tg and "/site-packages/" in n.replace("\\", "/"):
+                rn = n.replace("\\", "/").split("/site-packages/")[-1]
+                if rn == "telethon" or rn.startswith(("telethon/", "telethon-", "pyaes/", "pyaes-")):
+                    leaked.append(n)
+        if leaked:
+            raise RuntimeError(
+                f"Subset ZIP validation failed! {len(leaked)} excluded file(s) leaked in: {leaked[:10]}")
         # Verify NO user data, accounts, or markdown files leaked into the zip
         forbidden_in_zip = [f for f in names if f.startswith("MetaCreator/data/") or f in ("MetaCreator/accounts.txt", "MetaCreator/data") or f.lower().endswith(".md")]
         if forbidden_in_zip:
             raise RuntimeError(f"Forbidden user data or markdown leaked into release ZIP: {forbidden_in_zip}")
-        log("OK", f"Portable ZIP verified: all {len(required_in_zip)} required core components present, 0 user data files.")
+        log("OK", f"Portable ZIP verified: all {len(required_in_zip)} required core components present, 0 excluded/user-data files.")
 
     size_mb = os.path.getsize(zip_path) / (1024 * 1024)
     sha256 = compute_sha256(zip_path)
     log("OK", f"Created {zip_path}")
     log("INFO", f"Package Size: {size_mb:.2f} MB ({total_files} files packaged)")
     log("INFO", f"SHA-256: {sha256}")
-    if tag == "Full":
-        default_zip = os.path.join(DIST_DIR, "MetaCreator-Windows-Portable.zip")
-        shutil.copy2(zip_path, default_zip)
     return zip_path, size_mb, sha256
 
 
 def build_patch_zip():
     tag = get_dist_tag()
+    out_dir = variant_dist_dir()
     patch_name = f"MetaCreator-Windows-{tag}-Patch.zip"
     log("ZIP", f"Building lightweight {patch_name} (Code & Engines only)...")
-    os.makedirs(DIST_DIR, exist_ok=True)
-    patch_path = os.path.join(DIST_DIR, patch_name)
+    patch_path = os.path.join(out_dir, patch_name)
 
     if os.path.exists(patch_path):
         os.remove(patch_path)
@@ -716,9 +1074,6 @@ def build_patch_zip():
     log("OK", f"Created {patch_path}")
     log("INFO", f"Patch Size: {size_mb:.2f} MB ({total_files} files packaged)")
     log("INFO", f"SHA-256: {sha256}")
-    if tag == "Full":
-        default_patch = os.path.join(DIST_DIR, "MetaCreator-Windows-Patch.zip")
-        shutil.copy2(patch_path, default_patch)
     return patch_path, size_mb, sha256
 
 
@@ -786,7 +1141,7 @@ def update_dist_manifest(zip_path, zip_sha256, patch_path=None, patch_sha256=Non
             "sha256": patch_sha256,
             "size": os.path.getsize(patch_path),
         }
-    manifest_path = os.path.join(DIST_DIR, "latest.json")
+    manifest_path = os.path.join(variant_dist_dir(), "latest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
     log("OK", f"Updated dist manifest: {manifest_path}")
@@ -798,6 +1153,8 @@ def main():
     print(f"  Timestamp: {datetime.now().isoformat()}")
     print("=" * 70)
 
+    validate_selection()
+    print(f"[BUILD] Selection: {selection_summary()}")
     sync_sources()
     print(f"[BUILD] Modules in this build: {', '.join(selected_modules())}")
     if "tg" in selected_modules():

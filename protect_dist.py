@@ -55,6 +55,7 @@ SERVER_JS = ["server.js", "server/context.js", "server/routes-license.js",
              "server/routes-updates.js", "server/routes-meta.js",
              "server/routes-tg.js", "server/routes-diag.js", "server/diag.js",
              "server/runlog.js", "server/routes-static.js",
+             "server/routes-igcheck.js",
              "server/paygo-orchestrator.js"]
 
 # Node scripts carrying commercial logic.
@@ -62,6 +63,7 @@ JS_SENSITIVE = ["server.js", "server/context.js", "server/routes-license.js",
                 "server/routes-updates.js", "server/routes-meta.js",
                 "server/routes-tg.js", "server/routes-diag.js", "server/diag.js",
                 "server/runlog.js", "server/routes-static.js",
+                "server/routes-igcheck.js",
                 "server/paygo-orchestrator.js",
                 "core/licenseManager.js", "core/updateManager.js", "core/licenseConfig.js"]
 
@@ -77,6 +79,7 @@ UI_JS = [
     "public/js/nova-license.js",
     "public/js/nova-diag.js",
     "public/js/nova-meta-insta.js",
+    "public/js/nova-igcheck.js",
     "public/js/nova-tg.js",
     "public/js/nova-taskly2fa.js",
     "public/js/nova-fastpay2fa.js",
@@ -138,6 +141,19 @@ def compile_python(root: str) -> int:
             raise SystemExit(f"[protect] could not remove source {src}: {exc}")
         count += 1
     return count
+
+
+def _present_entry_scripts(root: str):
+    """ENTRY_SCRIPTS that actually exist in this tree. A subset build
+    (--modules/--bots) excludes files, so the rewrite floor must only count
+    scripts that shipped — otherwise protection would fail closed on a
+    correct subset build."""
+    out = []
+    for n in ENTRY_SCRIPTS:
+        if os.path.isfile(os.path.join(root, n + ".py")) \
+                or os.path.isfile(os.path.join(root, n + ".pyc")):
+            out.append(n)
+    return out
 
 
 def rewrite_entry_scripts(root: str) -> int:
@@ -257,17 +273,21 @@ def verify(root: str) -> None:
     leftovers = [os.path.relpath(p, root) for p in _app_py_files(root)]
     if leftovers:
         problems.append(f"{len(leftovers)} application .py still present (e.g. {leftovers[:5]})")
-    # 2. Key compiled modules exist.
-    for rel in ("worker.pyc", "tg_accounts.pyc", "core/lifecycle.pyc",
-                "pipelines/telegram/tg_coupled.pyc", "ai_config.py"):
+    # 2. Key compiled modules exist (TG entries only when the module shipped).
+    key_mods = ["worker.pyc", "core/lifecycle.pyc", "ai_config.py"]
+    if os.path.isfile(os.path.join(root, "server", "routes-tg.js")):
+        key_mods += ["tg_accounts.pyc", "pipelines/telegram/tg_coupled.pyc"]
+    if os.path.isfile(os.path.join(root, "server", "routes-igcheck.js")):
+        key_mods += ["ig_check.pyc", "ig_backup.pyc"]
+    for rel in key_mods:
         if not os.path.isfile(os.path.join(root, rel)):
             problems.append(f"expected file missing: {rel}")
-    # 3. All server JS is valid JavaScript (obfuscator output must still parse).
+    # 3. All SHIPPED server JS is valid JavaScript (subset builds exclude
+    #    files; only check what is actually in the tree).
     bad_server = []
     for rel in SERVER_JS:
         server = os.path.join(root, rel)
         if not os.path.isfile(server):
-            bad_server.append(rel + " (missing)")
             continue
         chk = subprocess.run(["node", "--check", server], cwd=root,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -275,12 +295,11 @@ def verify(root: str) -> None:
             bad_server.append(rel)
     if bad_server:
         problems.append(f"node --check failed for server JS: {bad_server}")
-    # 3b. Dashboard JS must still parse after obfuscation.
+    # 3b. Dashboard JS must still parse after obfuscation (subset-safe).
     bad_ui = []
     for rel in UI_JS:
         p = os.path.join(root, rel)
         if not os.path.isfile(p):
-            bad_ui.append(rel + " (missing)")
             continue
         c = subprocess.run(["node", "--check", p], cwd=root,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -317,9 +336,10 @@ def protect(root: str, project_root: str, do_python: bool = True, do_js: bool = 
     if n is not None:
         print(f"[protect] compiled {n} modules to sourceless .pyc")
     rw = rewrite_entry_scripts(root)
-    if rw < len(ENTRY_SCRIPTS):
-        raise SystemExit(f"[protect] expected {len(ENTRY_SCRIPTS)} entry-script references "
-                         f"in server.js, rewrote {rw}")
+    expected = _present_entry_scripts(root)
+    if rw < len(expected):
+        raise SystemExit(f"[protect] expected ≥{len(expected)} entry-script references "
+                         f"({', '.join(expected)}) in server JS, rewrote {rw}")
     print(f"[protect] rewrote {rw} entry-script references in server JS")
     if do_js:
         js = obfuscate_javascript(root, project_root, JS_SENSITIVE, _OBF_NODE_SERVER, decorate=True)

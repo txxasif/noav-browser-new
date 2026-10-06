@@ -146,7 +146,7 @@ function buildXlsx(rows, zlibMod) {
 
 /** Nova Browser Meta APIs (/api/meta-insta/*) + TG Classic start runs here. */
 module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
-  const { fs, path, zlib, spawn, execSync, ROOT_DIR, ACCOUNTS_JSON, ACCOUNTS_CSV, ACCOUNTS_TXT, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, loadAccounts, getAccounts, storeDbExists, runPython, syncFilesFromStore, cookieFileFor, readSettings, writeSettings, storedGlobalPassword, killProcessGroup, sseClients, recentLogs, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, backupUserData } = ctx;
+  const { fs, path, zlib, spawn, execSync, ROOT_DIR, ACCOUNTS_JSON, ACCOUNTS_CSV, ACCOUNTS_TXT, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, loadAccounts, getAccounts, storeDbExists, runPython, runPythonJson, syncFilesFromStore, cookieFileFor, readSettings, writeSettings, storedGlobalPassword, killProcessGroup, sseClients, recentLogs, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, backupUserData } = ctx;
 
   // =========================================================================
   // Nova Browser Meta APIs (/api/meta-insta/*)
@@ -419,11 +419,11 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       // automatic reduction, or watchdog in the creator runtime: the user
       // explicitly controls the number of browser slots.
       const requestedConcurrency = Number(opts.concurrency);
-      if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1 || requestedConcurrency > 50) {
+      if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           status: 'ERROR',
-          error: 'Parallel must be a whole number from 1 to 50. No automatic RAM reduction is applied.'
+          error: 'Parallel must be a whole number of 1 or more. No automatic RAM reduction is applied.'
         }));
         releaseStart();
         return;
@@ -650,6 +650,92 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
         message: 'Accounts database reset to 0.',
         backup: backupDir || null
       }));
+    });
+    return true;
+  }
+
+  // 6b. POST /api/meta-insta/purge-damaged {kind: 'meta'|'ig', confirm:'CLEAR'}
+  // Deletes only DAMAGED rows in one workspace list (Failed/Banned, dead
+  // session, or 3+ failed submits). Healthy rows and Telegram pool rows are
+  // never touched.
+  if (pathname === '/api/meta-insta/purge-damaged' && req.method === 'POST') {
+    let purgeBody = '';
+    req.on('data', c => { purgeBody += c; });
+    req.on('end', async () => {
+      let kind = 'ig';
+      let confirm = '';
+      try {
+        const parsed = JSON.parse(purgeBody || '{}');
+        if (parsed.kind === 'meta') kind = 'meta';
+        confirm = String(parsed.confirm || '');
+      } catch (e) {}
+      if (confirm !== 'CLEAR') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'Confirmation required: POST {"kind":"ig"|"meta","confirm":"CLEAR"}.' }));
+        return;
+      }
+      const backupDir = backupUserData('purge-damaged-' + kind);
+      if (storeDbExists()) {
+        const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'ig_backup.py', ['purge-damaged', '--kind', kind], 120000);
+        if (!r || !r.ok) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ERROR', error: 'Could not remove damaged accounts: ' + ((r && r.error) || 'no output') }));
+          return;
+        }
+        broadcastEvent({ type: 'accounts_reset' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'SUCCESS',
+          kind,
+          removed: r.removed || 0,
+          backup: backupDir || null
+        }));
+        return;
+      }
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ERROR', error: 'Account database not found.' }));
+    });
+    return true;
+  }
+  // 6c. POST /api/meta-insta/clear-kind {kind: 'meta'|'ig', confirm:'CLEAR'}
+  // Deletes only one workspace list (Meta-only rows or IG-joined rows).
+  // Telegram pool rows are never touched.
+  if (pathname === '/api/meta-insta/clear-kind' && req.method === 'POST') {
+    let clearBody = '';
+    req.on('data', c => { clearBody += c; });
+    req.on('end', async () => {
+      let kind = 'ig';
+      let confirm = '';
+      try {
+        const parsed = JSON.parse(clearBody || '{}');
+        if (parsed.kind === 'meta') kind = 'meta';
+        confirm = String(parsed.confirm || '');
+      } catch (e) {}
+      if (confirm !== 'CLEAR') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'Confirmation required: POST {"kind":"ig"|"meta","confirm":"CLEAR"}.' }));
+        return;
+      }
+      const backupDir = backupUserData('clear-' + kind);
+      if (storeDbExists()) {
+        const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'ig_backup.py', ['clear-kind', '--kind', kind], 120000);
+        if (!r || !r.ok) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ERROR', error: 'Could not clear the list: ' + ((r && r.error) || 'no output') }));
+          return;
+        }
+        broadcastEvent({ type: 'accounts_reset' });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: 'SUCCESS',
+          kind,
+          deleted: r.deleted || 0,
+          backup: backupDir || null
+        }));
+        return;
+      }
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ERROR', error: 'Account database not found.' }));
     });
     return true;
   }

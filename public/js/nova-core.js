@@ -88,13 +88,13 @@ function initThemeNav() {
   const VIEW_ROUTES = {
     'view-meta-creator': '#/meta',
     'view-ig-creator': '#/ig',
+    'view-ig-checker': '#/igcheck',
     'view-tg-manager': '#/manager',
     'view-guide': '#/guide',
     'view-tg-taskly2fa': '#/taskly2fa',
     'view-tg-fastpay2fa': '#/fastpay2fa',
     'view-tg-paygopool': '#/paygopool',
     'view-tg-paygo2fa': '#/paygo2fa',
-    'view-tg-paygo2faopt': '#/paygo2faopt',
   };
 
   function routeForItem(item) {
@@ -225,6 +225,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!mods.includes('ig')) {
           const igTab = document.querySelector('button[data-view="view-ig-creator"]');
           if (igTab) igTab.style.display = 'none';
+          const igCheckTab = document.querySelector('button[data-view="view-ig-checker"]');
+          if (igCheckTab) igCheckTab.style.display = 'none';
         }
         if (!mods.includes('tg')) {
           const tgToggle = document.getElementById('nav-tg-toggle');
@@ -245,6 +247,14 @@ document.addEventListener('DOMContentLoaded', () => {
       initMetaInsta();
     } catch (e) {
       console.error('[initMetaInsta error]', e);
+    }
+  }
+
+  if (typeof initIgChecker === 'function') {
+    try {
+      initIgChecker();
+    } catch (e) {
+      console.error('[initIgChecker error]', e);
     }
   }
 });

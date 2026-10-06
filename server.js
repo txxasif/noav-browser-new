@@ -9,10 +9,29 @@
 const http = require('http');
 const ctx = require('./server/context');
 ctx.loadLocalEnv();
+
+// Optional route modules: a subset build (--modules meta,ig / --bots …)
+// excludes these files from the tree, so require them only when present.
+// (A plain require would crash the whole server on a TG-less build.)
+function optionalRoute(rel) {
+  try {
+    const base = require('path').join(__dirname, rel);
+    const fs0 = require('fs');
+    const file = fs0.existsSync(base + '.js') ? base + '.js'
+      : (fs0.existsSync(base) ? base : null);
+    if (file) return require(file);
+    console.log(`[routes] optional module missing, skipping: ${rel}`);
+  } catch (e) {
+    console.error(`[routes] optional module failed, skipping: ${rel} (${e.message})`);
+  }
+  return () => false;
+}
+const handleIgCheck = optionalRoute('./server/routes-igcheck');
+const handleTg = optionalRoute('./server/routes-tg');
+
 const handleLicense = require('./server/routes-license');
 const handleUpdates = require('./server/routes-updates');
 const handleMeta = require('./server/routes-meta');
-const handleTg = require('./server/routes-tg');
 const handleDiag = require('./server/routes-diag');
 const handleStatic = require('./server/routes-static');
 
@@ -47,6 +66,11 @@ const server = http.createServer((req, res) => {
   if (handleLicense(req, res, urlObj, pathname, ctx)) return;
   if (res.headersSent) return;
   if (handleUpdates(req, res, urlObj, pathname, ctx)) return;
+  if (res.headersSent) return;
+  // IG Checker + full backup BEFORE routes-meta: its generic
+  // `/api/meta-insta/export…` prefix route would otherwise swallow
+  // `/api/meta-insta/export-full`. This module only claims exact paths.
+  if (handleIgCheck(req, res, urlObj, pathname, ctx)) return;
   if (res.headersSent) return;
   if (handleMeta(req, res, urlObj, pathname, ctx)) return;
   if (res.headersSent) return;

@@ -40,6 +40,9 @@ LOW-RESOURCE / PROFILE SETTINGS (optional):
      single-process Chromium flags.
    - Parallel is never silently reduced. Use Headless and measure before
      selecting a high slot count on a small Windows device.
+   - Engine tuning (.env.example ships in the MetaCreator folder): copy it to
+     ".env.local" in the same folder to apply the tuned values (V8 heap,
+     image cache, captcha waits). Restart the app after editing .env.local.
 
 --------------------------------------------------------------------------------
 HOW TO UPDATE WITHOUT REMOVING FILES OR LOSING DATA:

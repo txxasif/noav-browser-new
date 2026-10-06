@@ -46,7 +46,81 @@ const MI_MAIL_PROVIDERS = [
   { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td', hint: '(only provider)' },
 ];
 
-const MI_ALL_COLS = ['id', 'uname', 'name', 'email', 'password', 'cookies', 'created', 'actions'];
+const MI_ALL_COLS = ['id', 'uname', 'name', 'email', 'password', 'cookies', 'health', 'created', 'actions'];
+
+// Health pill for one account row. Mirrors ig_backup.is_damaged()
+// (Failed/Banned, 'Dead:…' note, or 3+ failed submits) so the list shows
+// exactly what "Leave out damaged" will skip.
+function miIsDamaged(a) {
+  const status = String((a && a.status) || '');
+  const extra = String((a && a.extra) || '');
+  const deadReason = (a && (a.dead_reason || (a.extra && a.extra.dead_reason))) || '';
+  const attempts = parseInt((a && a.attempts) || 0, 10) || 0;
+  return status === 'Failed' || status === 'Banned' || extra.indexOf('Dead:') === 0 || Boolean(deadReason) || attempts >= 3;
+}
+
+function miHealthBadge(a) {
+  const status = String((a && a.status) || '');
+  if (miIsDamaged(a)) {
+    return '<span class="badge-pill bg-rose" title="Failed / banned / dead session — skipped by “Leave out damaged”">Damaged</span>';
+  }
+  if (status.indexOf('Submitting') === 0) {
+    return '<span class="badge-pill" style="background: rgba(245,158,11,.15); color: #fbbf24;" title="Claimed by a running drain">Busy</span>';
+  }
+  if (status.indexOf('Submitted') === 0 || (a && (a.tg_submitted || a.nitro_submitted || a.coinsta_submitted))) {
+    return '<span class="badge-pill" style="background: rgba(56,189,248,.15); color: #38bdf8;" title="Already submitted to a bot">Used</span>';
+  }
+  if (status === 'MetaCreated') {
+    return '<span class="badge-pill bg-muted" title="Meta-only (no Instagram joined)">Meta</span>';
+  }
+  return '<span class="badge-pill bg-emerald" title="Healthy">OK</span>';
+}
+
+// Minimal CSV parser (quoted commas + escaped quotes) for the import preview.
+function miParseCsvPreview(text) {
+  const rows = [];
+  let cur = [''];
+  let inQ = false;
+  const s = String(text || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inQ) {
+      if (c === '"') {
+        if (s[i + 1] === '"') { cur[cur.length - 1] += '"'; i++; }
+        else inQ = false;
+      } else {
+        cur[cur.length - 1] += c;
+      }
+    } else if (c === '"') {
+      inQ = true;
+    } else if (c === ',') {
+      cur.push('');
+    } else if (c === '\n' || c === '\r') {
+      if (c === '\r' && s[i + 1] === '\n') i++;
+      rows.push(cur);
+      cur = [''];
+    } else {
+      cur[cur.length - 1] += c;
+    }
+  }
+  if (cur.length > 1 || (cur.length === 1 && cur[0] !== '')) rows.push(cur);
+  if (!rows.length) return { header: [], rows: [] };
+  const header = rows[0].map((h) => h.trim());
+  return { header, rows: rows.slice(1).filter((r) => r.some((cell) => String(cell).trim() !== '')) };
+}
+
+function miRowIsDamaged(header, row) {
+  const idx = (name) => header.indexOf(name);
+  const at = (name) => {
+    const i = idx(name);
+    return i === -1 ? '' : String(row[i] == null ? '' : row[i]);
+  };
+  const status = at('status');
+  if (status === 'Failed' || status === 'Banned') return true;
+  const attempts = parseInt(at('attempts') || '0', 10) || 0;
+  if (attempts >= 3) return true;
+  return false;
+}
 
 // =============================================================================
 // 2. TEMPLATE BUILDERS (HTML GENERATORS)
@@ -64,7 +138,7 @@ function miCreatorPanelHtml(def) {
   const k = def.kind;
   const cols = [
     ['id', '# (Index)'], ['uname', 'Username'], ['name', 'Name'], ['email', 'Email'],
-    ['password', 'Password'], ['cookies', 'Cookies'], ['created', 'Created'], ['actions', 'Actions'],
+    ['password', 'Password'], ['cookies', 'Cookies'], ['health', 'Health'], ['created', 'Created'], ['actions', 'Actions'],
   ];
   const colMenu = cols.map(([col, label]) => `
     <label class="creator-col-option">
@@ -79,11 +153,12 @@ function miCreatorPanelHtml(def) {
         <p>${def.subtitle}</p>
       </div>
       <div class="page-title-actions">
-        <button type="button" class="btn btn-secondary btn-sm" data-role="export-csv"><i class="fa-solid fa-file-csv"></i> Export CSV</button>
-        <button type="button" class="btn btn-secondary btn-sm" data-role="export-txt"><i class="fa-solid fa-file-lines"></i> Export TXT</button>
-        ${k === 'ig' ? `<button type="button" class="btn btn-secondary btn-sm" data-role="export-xlsx" title="Export accounts with 2FA Key to XLSX (Bot format: Username, Password, 2FA Key)"><i class="fa-solid fa-file-excel" style="color: #107c41;"></i> Export XLSX (2FA)</button>` : ''}
-        <button type="button" class="btn btn-secondary btn-sm" data-role="clear"><i class="fa-solid fa-trash-can"></i> Clear</button>
-        <button type="button" class="btn btn-secondary btn-sm" data-role="deep-clean" title="Delete orphaned session files, cookies and dead creator profiles (keeps saved accounts)"><i class="fa-solid fa-broom"></i> Deep Clean</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-role="export-full" title="Save this list to a CSV file (passwords, cookies, mail sessions, 2FA)"><i class="fa-solid fa-download"></i> Export</button>
+        <button type="button" class="btn btn-sm" data-role="import-open" title="Add accounts from a CSV file exported earlier" style="background: transparent; border: 1px solid transparent; color: var(--text-dim);"><i class="fa-solid fa-upload"></i> Import</button>
+        ${k === 'ig' ? `<button type="button" class="btn btn-secondary btn-sm" data-role="check-health" title="Live-check saved Instagram accounts now (public profile lookup, no login) — dead ones get flagged Damaged after your OK"><i class="fa-solid fa-heart-pulse" style="color: var(--accent-green);"></i> Check health</button>` : ''}
+        ${k === 'ig' ? `<button type="button" class="btn btn-secondary btn-sm" data-role="purge-damaged" title="Delete only the damaged rows (Failed / Banned / dead session / 3+ failed submits) — healthy accounts stay"><i class="fa-solid fa-user-slash" style="color: #f87171;"></i> Remove damaged</button>` : ''}
+        <button type="button" class="btn btn-secondary btn-sm" data-role="clear" title="Delete EVERY account in THIS list — saved data is gone (files on disk stay)"><i class="fa-solid fa-trash-can"></i> Clear list</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-role="deep-clean" title="Delete orphaned session files, cookies and dead browser profiles from DISK — your saved account list is NOT touched. Stop the engine first."><i class="fa-solid fa-broom"></i> Clean files</button>
       </div>
     </div>
   </div>
@@ -110,7 +185,7 @@ function miCreatorPanelHtml(def) {
     <div class="creator-grid">
       <div class="creator-field">
         <label>Parallel</label>
-        <input type="number" class="form-control" data-role="concurrency" min="1" max="50" value="1">
+        <input type="number" class="form-control" data-role="concurrency" min="1" value="1">
       </div>
       <div class="creator-field">
         <label>Target (0 = ∞)</label>
@@ -244,6 +319,7 @@ function miCreatorPanelHtml(def) {
             <th style="cursor: pointer; user-select: none;" data-role="th" data-sort="email_asc" data-col="email" title="Click to sort by Email">Email <span data-role="sort-icon-email" style="font-size: 0.72rem; opacity: 0.4; margin-left: 2px;">⇅</span></th>
             <th data-col="password">Password</th>
             <th data-col="cookies">Cookies</th>
+            <th data-col="health" title="OK = healthy · Damaged = Failed/Banned/dead session (skipped by “Leave out damaged”) · Busy = claimed by a running drain · Used = already submitted">Health</th>
             <th style="cursor: pointer; user-select: none;" data-role="th" data-sort="newest" data-col="created" title="Click to sort by Creation Time">Created <span data-role="sort-icon-created" style="font-size: 0.72rem; opacity: 0.4; margin-left: 2px;">⇅</span></th>
             <th data-col="actions" style="text-align: right;">Actions</th>
           </tr>
@@ -537,9 +613,10 @@ function createCreatorWorkspace(root, def, state, shared) {
     username: q('username'),
     btnStart: q('start'),
     btnStop: q('stop'),
-    btnExportCsv: q('export-csv'),
-    btnExportTxt: q('export-txt'),
-    btnExportXlsx: q('export-xlsx'),
+    btnExportFull: q('export-full'),
+    btnImportOpen: q('import-open'),
+    btnPurge: q('purge-damaged'),
+    btnCheckHealth: q('check-health'),
     btnClear: q('clear'),
     btnDeepClean: q('deep-clean'),
     statTotal: q('stat-total'),
@@ -717,6 +794,7 @@ function createCreatorWorkspace(root, def, state, shared) {
           <td data-col="email" class="mono"><span>${escapeHtml(a.email || '—')}</span> <button type="button" class="btn btn-secondary btn-sm" data-copyemail="${a.id}" title="Copy email" style="padding: 0.15rem 0.45rem;"><i class="fa-solid fa-copy"></i></button></td>
           <td data-col="password" class="mono"><span title="Use Copy for the full combo">${escapeHtml(masked || '—')}</span> <button type="button" class="btn btn-secondary btn-sm" data-copypass="${a.id}" title="Copy password" style="padding: 0.15rem 0.45rem;"><i class="fa-solid fa-copy"></i></button></td>
           <td data-col="cookies" class="mono"><span title="${escapeHtml(cVal || '—')}">${escapeHtml(cVal.slice(0, 20) + (cVal.length > 20 ? '…' : '') || '—')}</span> <button type="button" class="btn btn-secondary btn-sm" data-copyrawcookie="${a.id}" title="Copy cookies string" style="padding: 0.15rem 0.45rem;"><i class="fa-solid fa-cookie"></i></button></td>
+          <td data-col="health">${miHealthBadge(a)}</td>
           <td data-col="created" style="color: var(--text-muted); font-size: 0.78rem; white-space: nowrap;">${escapeHtml(a.created_at || '—')}</td>
           <td data-col="actions"><div class="metainsta-actions">
             <button type="button" class="btn btn-primary btn-sm" data-open-meta="${a.id}" title="Open persisted Meta session (auth.meta.com)${a.metaPersisted === false ? ' — no persisted profile, cookies only' : ''}"><i class="fa-brands fa-meta"></i> Meta</button>
@@ -964,28 +1042,363 @@ function createCreatorWorkspace(root, def, state, shared) {
   });
 
   // --- Export and Utility Actions ---
-  if (els.btnExportCsv) els.btnExportCsv.addEventListener('click', () => { window.location = `/api/meta-insta/export?format=csv&kind=${def.kind}`; });
-  if (els.btnExportTxt) els.btnExportTxt.addEventListener('click', () => { window.location = `/api/meta-insta/export?format=txt&kind=${def.kind}`; });
-  if (els.btnExportXlsx) els.btnExportXlsx.addEventListener('click', () => { window.location = `/api/meta-insta/export-xlsx?kind=${def.kind}`; });
+  // NOTE: legacy per-format exports (CSV/TXT/XLSX buttons) were removed from
+  // the UI — Export (full backup) + Import is the only path. Backend routes stay.
+
+  // --- Import / Export (Meta + IG): one CSV both ways, cookies + mail
+  // session + 2FA included, "leave out damaged" for both directions, plus
+  // import how-many / newest-or-oldest. The modal lives once in index.html
+  // and is wired once; each panel's button selects the active kind (export
+  // scope + preview scope) before opening it.
+  window.__miLoggers = window.__miLoggers || {};
+  window.__miLoggers[def.kind] = logger;
+
+  if (els.btnExportFull || els.btnImportOpen) {
+    const openBackupModal = (tab) => {
+      window.__miBackupKind = def.kind;
+      const showImport = tab === 'import';
+      const title = document.getElementById('ig-backup-kind-title');
+      if (title) title.textContent = def.kind === 'meta' ? 'Meta' : 'IG';
+      const action = document.getElementById('ig-backup-action-title');
+      if (action) action.textContent = showImport ? 'Import' : 'Export';
+      const pe = document.getElementById('ig-backup-pane-export');
+      const pi = document.getElementById('ig-backup-pane-import');
+      if (pe) pe.style.display = showImport ? 'none' : 'flex';
+      if (pi) pi.style.display = showImport ? 'flex' : 'none';
+      const list = state.accounts.filter((a) => (a.target || '') !== 'telegram' && ((def.kind === 'ig') === shared.isIgAccount(a)));
+      const cnt = document.getElementById('ig-backup-count');
+      if (cnt) cnt.textContent = `${list.length} account(s) in this list right now`;
+      const dlbl = document.getElementById('ig-backup-download-label');
+      if (dlbl) dlbl.textContent = `Export ${list.length} account(s)`;
+      window.__miStagedText = '';
+      const fi = document.getElementById('ig-backup-file-input');
+      if (fi) fi.value = '';
+      const badge = document.getElementById('ig-backup-file-badge');
+      if (badge) { badge.style.display = 'none'; badge.innerHTML = ''; }
+      const pv = document.getElementById('ig-backup-preview');
+      if (pv) pv.textContent = '';
+      const bi = document.getElementById('btn-ig-backup-import');
+      if (bi) bi.disabled = true;
+      openModal(document.getElementById('modal-ig-backup'));
+    };
+    if (els.btnExportFull) els.btnExportFull.addEventListener('click', () => openBackupModal('export'));
+    if (els.btnImportOpen) els.btnImportOpen.addEventListener('click', () => openBackupModal('import'));
+  }
+
+  if (!window.__miBackupWired) {
+    window.__miBackupWired = true;
+    window.__miBackupKind = window.__miBackupKind || 'ig';
+    window.__miStagedText = '';
+    const modal = () => document.getElementById('modal-ig-backup');
+    const cbExclude = () => document.getElementById('ig-backup-exclude-damaged');
+    const btnDownload = () => document.getElementById('btn-ig-backup-download');
+    const fileInput = () => document.getElementById('ig-backup-file-input');
+    const preview = () => document.getElementById('ig-backup-preview');
+    const cbSkip = () => document.getElementById('ig-backup-skip-existing');
+    const btnImport = () => document.getElementById('btn-ig-backup-import');
+    const miKindLabel = () => ((window.__miBackupKind || 'ig') === 'meta' ? 'Meta' : 'Instagram');
+    const miBackupSay = (msg) => {
+      const L = window.__miLoggers[window.__miBackupKind || 'ig'];
+      if (L) L.append(msg);
+    };
+
+    if (btnDownload()) {
+      btnDownload().addEventListener('click', () => {
+        const k = window.__miBackupKind || 'ig';
+        const ex = cbExclude() && cbExclude().checked ? '1' : '0';
+        window.location = `/api/meta-insta/export-full?kind=${k}&exclude_damaged=${ex}`;
+        showToast(ex === '1' ? `Exporting your ${miKindLabel()} accounts (damaged left out)…` : `Exporting your ${miKindLabel()} accounts…`, 'success');
+      });
+    }
+
+    const refreshBackupPreview = () => {
+      const pv = preview();
+      const bi = btnImport();
+      const staged = window.__miStagedText || '';
+      if (!staged) {
+        if (pv) pv.textContent = '';
+        if (bi) bi.disabled = true;
+        return;
+      }
+      try {
+        const parsed = miParseCsvPreview(staged);
+        const hasUser = parsed.header.includes('username') || parsed.header.includes('instagram_username');
+        if (!hasUser) {
+          if (pv) pv.innerHTML = '<span style="color: #f87171;">Not a Meta Creator backup — username columns missing.</span>';
+          window.__miStagedText = '';
+          if (bi) bi.disabled = true;
+          return;
+        }
+        const rows = parsed.rows;
+        const damaged = rows.filter((r) => miRowIsDamaged(parsed.header, r)).length;
+        const k = window.__miBackupKind || 'ig';
+        const mine = new Set(state.accounts
+          .filter((a) => (a.target || '') !== 'telegram' && ((k === 'ig') === shared.isIgAccount(a)))
+          .map((a) => String(a.instagram_username || a.username || '').toLowerCase()));
+        const ui = parsed.header.indexOf('instagram_username') !== -1 ? 'instagram_username' : 'username';
+        const uidx = parsed.header.indexOf(ui);
+        const dup = rows.filter((r) => mine.has(String(r[uidx] || '').toLowerCase())).length;
+        const names = rows.slice(0, 5)
+          .map((r) => String(r[uidx] || '').trim()).filter(Boolean);
+        const chips = names.map((n) => `<span class="badge-pill bg-muted" style="margin: 0 2px;">${escapeHtml(n)}</span>`).join('') +
+          (rows.length > 5 ? ` <span style="color: var(--text-dim);">+${rows.length - 5} more</span>` : '');
+        if (pv) {
+          pv.innerHTML =
+            `<strong style="color: var(--text-main);">${rows.length} row(s)</strong>` +
+            ` · <span style="color: #f87171;">${damaged} damaged</span>` +
+            ` · <span style="color: #a5b4fc;">${dup} already in list</span>` +
+            (chips ? `<br><span style="color: var(--text-dim);">Starts with:</span> ${chips}` : '') +
+            ((cbExclude() && cbExclude().checked && damaged)
+              ? `<br>“Leave out damaged” is ON — ~${rows.length - damaged} will import.` : '');
+        }
+        if (bi) bi.disabled = false;
+      } catch (e) {
+        if (pv) pv.textContent = 'Could not read this file: ' + e.message;
+        window.__miStagedText = '';
+        if (bi) bi.disabled = true;
+      }
+    };
+
+    const stageBackupFile = (f) => {
+      window.__miStagedText = '';
+      if (btnImport()) btnImport().disabled = true;
+      const badge = document.getElementById('ig-backup-file-badge');
+      if (!f) {
+        if (preview()) preview().textContent = '';
+        if (badge) { badge.style.display = 'none'; badge.innerHTML = ''; }
+        return;
+      }
+      if (badge) {
+        badge.style.display = 'inline-flex';
+        badge.innerHTML = `<span><i class="fa-solid fa-file-csv"></i> ${escapeHtml(f.name)}</span>`;
+      }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        window.__miStagedText = String(ev.target.result || '');
+        refreshBackupPreview();
+      };
+      reader.readAsText(f);
+    };
+
+    if (fileInput()) {
+      fileInput().addEventListener('change', () => {
+        stageBackupFile(fileInput().files && fileInput().files[0]);
+      });
+    }
+
+    const dz = document.getElementById('ig-backup-dropzone');
+    if (dz) {
+      dz.addEventListener('click', () => { if (fileInput()) fileInput().click(); });
+      ['dragover', 'dragenter'].forEach((evName) => {
+        dz.addEventListener(evName, (e) => { e.preventDefault(); dz.classList.add('dragover'); });
+      });
+      ['dragleave', 'drop'].forEach((evName) => {
+        dz.addEventListener(evName, (e) => { e.preventDefault(); dz.classList.remove('dragover'); });
+      });
+      dz.addEventListener('drop', (e) => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) stageBackupFile(f);
+      });
+    }
+
+    const rePreview = () => refreshBackupPreview();
+    if (cbExclude()) cbExclude().addEventListener('change', rePreview);
+
+    if (btnImport()) {
+      btnImport().addEventListener('click', async () => {
+        if (!window.__miStagedText) return;
+        const btn = btnImport();
+        const idleHtml = '<i class="fa-solid fa-upload"></i> <span id="ig-backup-import-label">Import accounts</span>';
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Importing…';
+        try {
+          const r = await (await fetch('/api/meta-insta/import-full', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              csv_text: window.__miStagedText,
+              exclude_damaged: Boolean(cbExclude() && cbExclude().checked),
+              skip_existing: Boolean(cbSkip() && cbSkip().checked),
+            }),
+          })).json();
+          if (r.status === 'SUCCESS') {
+            const parts = [];
+            if (r.imported) parts.push(`${r.imported} imported`);
+            if (r.updated) parts.push(`${r.updated} updated`);
+            if (r.skipped_existing) parts.push(`${r.skipped_existing} already in list`);
+            if (r.skipped_damaged) parts.push(`${r.skipped_damaged} damaged skipped`);
+            showToast(`Import done — ${parts.join(' · ') || 'nothing to import'}.`, 'success');
+            miBackupSay(`[import] ${miKindLabel()}: ${parts.join(', ') || 'no changes'}.`);
+            closeModal(modal());
+          } else {
+            showToast(r.error || 'Import failed.', 'error');
+          }
+        } catch (e) {
+          showToast('Import failed: ' + e.message, 'error');
+        } finally {
+          btn.innerHTML = idleHtml;
+          btn.disabled = !window.__miStagedText;
+        }
+        await shared.refreshShared();
+      });
+    }
+  }
 
   if (els.btnClear) {
     els.btnClear.addEventListener('click', async () => {
-      const count = state.accounts.length;
+      const kindName = def.kind === 'meta' ? 'Meta' : 'Instagram';
+      const count = myAccounts().length;
       const confirmed = await MiModals.confirmDelete({
-        title: 'Clear All Accounts',
-        message: `Are you sure you want to clear ALL ${count} accounts?`,
-        subtext: 'This affects both the Meta and Instagram workspaces. A snapshot is saved in backups/ first.',
-        targetHtml: count > 0 ? `<div><strong style="color: #f87171;">Warning:</strong> You are about to clear <strong style="color:#fff;">${count}</strong> registered account(s).</div>` : '',
-        confirmText: 'Clear All Accounts',
+        title: `Clear ${kindName} Accounts`,
+        message: `Are you sure you want to clear ${count} ${kindName} account(s)?`,
+        subtext: 'Only this workspace\u2019s list will be deleted. A snapshot is saved in backups/ first.',
+        targetHtml: (count > 0
+          ? `<div style="margin-bottom: 0.6rem;"><strong style="color: #f87171;">Warning:</strong> You are about to clear <strong style="color:#fff;">${count}</strong> ${kindName} account(s).</div>`
+          : '') +
+          `<label style="display: flex; gap: 0.5rem; align-items: center; font-size: 0.82rem; cursor: pointer; color: var(--text-main);">
+            <input type="checkbox" id="mi-clear-also-all" style="accent-color: #dc2626;">
+            Also wipe the other workspace (delete EVERYTHING)
+          </label>`,
+        confirmText: `Clear ${kindName} Accounts`,
       });
       if (!confirmed) return;
-      await fetch('/api/meta-insta/reset', {
+      const wipeAll = Boolean(document.getElementById('mi-clear-also-all') && document.getElementById('mi-clear-also-all').checked);
+      if (wipeAll) {
+        await fetch('/api/meta-insta/reset', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: 'CLEAR' }),
+        });
+        showToast('All accounts cleared', 'info');
+        logger.append('[tracking] All accounts cleared (both workspaces).');
+      } else {
+        const r = await (await fetch('/api/meta-insta/clear-kind', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: def.kind, confirm: 'CLEAR' }),
+        })).json();
+        if (r.status === 'SUCCESS') {
+          showToast(`Cleared ${r.deleted} ${kindName} account(s)`, 'info');
+          logger.append(`[tracking] Cleared ${r.deleted} ${kindName} account(s).`);
+        } else {
+          showToast(r.error || 'Clear failed.', 'error');
+          logger.append('[tracking] Clear failed: ' + (r.error || 'unknown error'));
+        }
+      }
+      page = 1;
+      await shared.refreshShared();
+    });
+  }
+
+  if (els.btnCheckHealth) {
+    let checking = false;
+    els.btnCheckHealth.addEventListener('click', async () => {
+      if (checking) return;
+      const rows = myAccounts().filter((a) => String(a.instagram_username || a.username || '').trim());
+      if (!rows.length) {
+        showToast('No Instagram accounts to check.', 'info');
+        return;
+      }
+      const names = [...new Set(rows.map((a) => String(a.instagram_username || a.username).trim().replace(/^@+/, '').toLowerCase()))];
+      const go = await MiModals.confirmDelete({
+        title: 'Check Account Health',
+        message: `Live-check ${names.length} Instagram account(s) now?`,
+        subtext: 'Public profile lookup, no login — safe while the engine runs. Dead ones are flagged Damaged (pool skips them) after your OK. Roughly 1 min per 70 accounts; progress shows in the log.',
+        confirmText: 'Check now',
+      });
+      if (!go) return;
+      checking = true;
+      els.btnCheckHealth.disabled = true;
+      const dead = [];
+      let blocked = 0, errors = 0, done = 0;
+      try {
+        for (let i = 0; i < names.length; i += 50) {
+          const batch = names.slice(i, i + 50);
+          let r = null;
+          try {
+            r = await (await fetch('/api/ig-check', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ usernames: batch, delay_ms: 600 }),
+            })).json();
+          } catch (e) { errors += batch.length; continue; }
+          if (!r || r.status !== 'SUCCESS' || !Array.isArray(r.results)) { errors += batch.length; continue; }
+          for (const res of r.results) {
+            if (res.status === 'not_found') dead.push(res.username);
+            else if (res.status === 'blocked') blocked++;
+            else if (res.status !== 'active') errors++;
+          }
+          done += batch.length;
+          logger.append(`[health] Checked ${done}/${names.length}… ${dead.length} dead so far.`);
+        }
+      } finally {
+        checking = false;
+        els.btnCheckHealth.disabled = false;
+      }
+      logger.append(`[health] Done: ${done} checked, ${dead.length} dead, ${blocked} rate-limited, ${errors} errors.`);
+      if (blocked && !dead.length && !errors) {
+        showToast('Instagram rate-limited the check — wait a few minutes and retry.', 'error');
+        return;
+      }
+      if (!dead.length) {
+        showToast(done ? `All ${done} checked accounts are alive${blocked || errors ? ` (${blocked} limited, ${errors} errors)` : ''}.` : 'Check finished with no results.', done ? 'success' : 'info');
+        return;
+      }
+      const sample = dead.slice(0, 8).map((u) => `@${u}`).join(', ') + (dead.length > 8 ? `, +${dead.length - 8} more` : '');
+      const flag = await MiModals.confirmDelete({
+        title: 'Flag Dead Accounts',
+        message: `Flag ${dead.length} dead account(s) as Damaged?`,
+        subtext: 'Pool drains skip them and backups can exclude them. A snapshot is saved in backups/ first.',
+        targetHtml: `<div style="font-size: 0.8rem; color: var(--text-dim); word-break: break-all;">${escapeHtml(sample)}</div>`,
+        confirmText: 'Flag damaged',
+      });
+      if (!flag) return;
+      const m = await (await fetch('/api/ig-mark-dead', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirm: 'CLEAR' }),
+        body: JSON.stringify({ usernames: dead }),
+      })).json();
+      if (m.status === 'SUCCESS') {
+        showToast(`Flagged ${(m.marked || []).length} dead account(s)`, 'success');
+        logger.append(`[health] Flagged ${(m.marked || []).length} dead account(s).`);
+      } else {
+        showToast(m.error || 'Flag failed.', 'error');
+        logger.append('[health] Flag failed: ' + (m.error || 'unknown error'));
+      }
+      page = 1;
+      await shared.refreshShared();
+    });
+  }
+
+  if (els.btnPurge) {
+    els.btnPurge.addEventListener('click', async () => {
+      const bad = myAccounts().filter((a) => miIsDamaged(a));
+      if (!bad.length) {
+        showToast('No damaged accounts — this list is already clean.', 'success');
+        return;
+      }
+      const names = bad.slice(0, 8).map((a) => `@${a.instagram_username || a.username || '?'}`).join(', ') +
+        (bad.length > 8 ? `, +${bad.length - 8} more` : '');
+      const confirmed = await MiModals.confirmDelete({
+        title: 'Remove Damaged Accounts',
+        message: `Delete ${bad.length} damaged Instagram account(s)?`,
+        subtext: 'Only rows marked Damaged in the Health column (Failed / Banned / dead session / 3+ failed submits). Healthy accounts stay. A snapshot is saved in backups/ first.',
+        targetHtml: `<div style="font-size: 0.8rem; color: var(--text-dim); word-break: break-all;">${escapeHtml(names)}</div>`,
+        confirmText: 'Remove Damaged',
       });
-      showToast('All accounts cleared', 'info');
-      logger.append('[tracking] All accounts cleared.');
+      if (!confirmed) return;
+      const r = await (await fetch('/api/meta-insta/purge-damaged', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'ig', confirm: 'CLEAR' }),
+      })).json();
+      if (r.status === 'SUCCESS') {
+        showToast(r.removed ? `Removed ${r.removed} damaged account(s)` : 'Nothing to remove — list is clean', r.removed ? 'success' : 'info');
+        logger.append(`[tracking] Removed ${r.removed || 0} damaged account(s).`);
+      } else {
+        showToast(r.error || 'Remove failed.', 'error');
+        logger.append('[tracking] Remove damaged failed: ' + (r.error || 'unknown error'));
+      }
       page = 1;
       await shared.refreshShared();
     });
@@ -1006,11 +1419,11 @@ function createCreatorWorkspace(root, def, state, shared) {
         return;
       }
       const confirmed = await MiModals.confirmDelete({
-        title: 'Deep Clean',
-        message: 'Remove orphaned sessions, cookies and dead creator profiles?',
-        subtext: 'Keeps all saved accounts and their files. Nova browser profiles are never touched.',
+        title: 'Clean files',
+        message: 'Remove orphaned sessions, cookies and dead creator profiles from disk?',
+        subtext: 'Your saved account list is NOT touched. Nova browser profiles are never touched.',
         targetHtml: '',
-        confirmText: 'Deep Clean',
+        confirmText: 'Clean files',
       });
       if (!confirmed) return;
       try {

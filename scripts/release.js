@@ -110,9 +110,9 @@ function main() {
     fail('build_windows_dist.py failed with non-zero exit status');
   }
 
-  // 4. Verify distribution artifact
-  const distDir = path.join(ROOT, '..', '..', 'win', 'meta_creator', 'dist');
-  const zipName = 'MetaCreator-Windows-Portable.zip';
+  // 4. Verify distribution artifact (per-variant folder: dist/Full)
+  const distDir = path.join(ROOT, '..', '..', 'win', 'meta_creator', 'dist', 'Full');
+  const zipName = 'MetaCreator-Windows-Full-Portable.zip';
   const zipPath = path.join(distDir, zipName);
   if (!fs.existsSync(zipPath)) {
     fail(`Distribution artifact not found at ${zipPath}`);

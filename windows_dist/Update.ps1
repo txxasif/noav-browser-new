@@ -67,7 +67,7 @@ function Find-UpdatePackage {
     # A stale update.zip (e.g. a previous release left in the install root)
     # used to shadow the fresh patch forever because of a fixed name order.
     # Pick the NEWEST archive by mtime so the latest downloaded build wins.
-    $candidates = @('update.zip', 'MetaCreator-Windows-Patch.zip', 'MetaCreator-Windows-Full-Patch.zip', 'MetaCreator-Windows-Portable.zip', 'MetaCreator-Windows-Full-Portable.zip')
+    $candidates = @('update.zip', 'MetaCreator-Windows-Patch.zip', 'MetaCreator-Windows-Full-Patch.zip', 'MetaCreator-Windows-Meta-Ig-Patch.zip', 'MetaCreator-Windows-Portable.zip', 'MetaCreator-Windows-Full-Portable.zip', 'MetaCreator-Windows-Meta-Ig-Portable.zip')
     $best = $null
     foreach ($name in $candidates) {
         $candidate = Join-Path $root $name
