@@ -618,6 +618,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const stats = readTgStats();
       const subTaskly = stats.taskly || 0;
       const subTaskly2fa = stats.taskly2fa || 0;
+      const subTasklyCookiePool = stats.taskly_cookie_pool || 0;
       const subFastpay2fa = stats.fastpay2fa || 0;
       const subPaygoPool = stats.paygo_pool || 0;
       const subPaygo2fa = stats.paygo2fa || 0;
@@ -653,6 +654,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         // Per-bot breakdown (independent counters)
         tg_submitted_taskly: subTaskly,
         tg_submitted_taskly2fa: subTaskly2fa,
+        tg_submitted_taskly_cookie_pool: subTasklyCookiePool,
         tg_submitted_fastpay2fa: subFastpay2fa,
         tg_submitted_paygo_pool: subPaygoPool,
         tg_submitted_paygo2fa: subPaygo2fa,
@@ -763,11 +765,15 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         console.warn('[tg:start] availability probe failed open:', (e && e.message) || e);
       }
 
-      const useIgPool = (tgBot === 'paygo') && (opts.use_ig_pool === true || opts.use_ig_pool === 'true');
+      const useIgPool = (tgBot === 'paygo' || tgBot === 'taskly') && (opts.use_ig_pool === true || opts.use_ig_pool === 'true');
+      // NEW PayGo cookies protocol toggle. DEFAULT OFF = legacy browserless
+      // drain (rename + submit cookie). Only an EXPLICIT true enables 2FA+follow.
+      const cookie2fa = useIgPool && (opts.cookie_2fa === true || opts.cookie_2fa === 'true');
 
       slot().config = { concurrency, headless, target, delay, captcha,
                         coupled: true, tg_task: tgTask, tg_bot: tgBot,
-                        twofa: opts.twofa !== false, use_ig_pool: useIgPool };
+                        twofa: opts.twofa !== false, use_ig_pool: useIgPool,
+                        cookie_2fa: cookie2fa };
 
       const args = [
         resolveScript('worker.py'),
@@ -794,6 +800,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       // TG creds -> IG join + follow -> cookie export -> cookie submit).
       if (/cookie/i.test(tgTask)) args.push('--cookie');
       if (useIgPool) args.push('--use-ig-pool');
+      if (cookie2fa) args.push('--cookie-2fa');
       if (headless) args.push('--headless');
 
       console.log(`[MetaCreator] Starting TG Classic: ${PYTHON_BIN} ${args.join(' ')}`);
@@ -824,8 +831,10 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       }
 
       const runRoute = (tgBot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(tgTask)) ? 'taskly2fa'
+        : (tgBot === 'taskly' && /taskly cookie/i.test(tgTask)) ? 'tasklycookie'
         : (tgBot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(tgTask)) ? 'fastpay2fa'
-        : (tgBot === 'paygo' && /paygo\s*2fa/i.test(tgTask)) ? 'paygo2fa'
+        : (tgBot === 'paygo' && /paygo\s*2fa/i.test(tgTask) && !/normal/i.test(tgTask)) ? 'paygo2fa'
+        : (tgBot === 'paygo' && /paygo cookie/i.test(tgTask)) ? 'paygocookie'
         : (tgBot === 'paygo' && useIgPool) ? 'paygo_pool'
         : tgBot;
       const rlHandle = ctx.runlog ? ctx.runlog.start('telegram', { argv: args, route: runRoute }) : null;

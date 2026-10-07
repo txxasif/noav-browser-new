@@ -319,6 +319,8 @@ class IgIdentityMixin:
                 # If Instagram is already associated
                 if "instagram" in tail and (not ig_name or ig_name in tail):
                     self.log('<font color="#00FF00"><b>[✔] Email is confirmed & linked to Instagram profile.</b></font>')
+                    self._dismiss_contact_modal(p)
+                    self._ac_leave_subpage(p)
                     return True
 
                 # If Instagram is not yet associated, look for option to add/toggle Instagram
@@ -482,9 +484,10 @@ class IgIdentityMixin:
                 except Exception:
                     full_body = self._page_tail(p, 600).lower()
 
-                if any(k in full_body for k in ("already in use", "another account", "not available", "enter a valid email")):
-                    self.log(f'<font color="#FFA500"><b>[⚠️] Email {em} was rejected by Accounts Center ("The email address you entered is already in use.") — dismissing modal and proceeding directly to 2FA…</b></font>')
+                if any(k in full_body for k in ("already in use", "already linked", "already associated", "already added", "already registered", "another account", "not available", "enter a valid email", "being used")):
+                    self.log(f'<font color="#FFA500"><b>[⚠️] Email {em} is already linked/in use by Accounts Center — dismissing modal and proceeding directly to 2FA…</b></font>')
                     self._dismiss_contact_modal(p)
+                    self._ac_leave_subpage(p)
                     return False
 
                 if any(k in full_body for k in ("confirmation code", "enter code", "check your email", "sent an email with your confirmation code")):
@@ -508,7 +511,7 @@ class IgIdentityMixin:
 
             if otp_screen:
                 if callable(code_fetcher):
-                    self.log(f'[✉️] Requesting email confirmation code via code_fetcher ({em})…')
+                    self.log(f'[✉️] Accounts Center email verification code requested ({em}). Waiting for code…')
                     code = code_fetcher()
                 else:
                     self.log('[✉️] Accounts Center email verification code requested. Polling temp mail…')
@@ -540,7 +543,9 @@ class IgIdentityMixin:
                         except Exception:
                             pass
                     if not filled:
-                        self.log('[⚠️] Email confirmation-code input not found.')
+                        self.log('[⚠️] Email confirmation-code input not found — dismissing modal.')
+                        self._dismiss_contact_modal(p)
+                        self._ac_leave_subpage(p)
                         return False
                     self._try_click(p, "Next", timeout=6000)
                     # Poll for the app's "Email added" toast (definitive) or an
@@ -561,14 +566,25 @@ class IgIdentityMixin:
                                                    "already in use", "another account")):
                             self.log(f'<font color="#FFA500"><b>[⚠️] Email code rejected or email in use ("{body[:60]}") — dismissing modal and proceeding directly to 2FA…</b></font>')
                             self._dismiss_contact_modal(p)
+                            self._ac_leave_subpage(p)
                             return False
                     if confirmed:
                         self.log(f'<font color="#00FF00"><b>[✔] Email {em} added (toast confirmed).</b></font>')
+                        self._dismiss_contact_modal(p)
+                        self._ac_leave_subpage(p)
                         return True
                     self._try_click(p, "Close", timeout=4000)
+                    self._dismiss_contact_modal(p)
+                    self._ac_leave_subpage(p)
                     return self._email_confirmed(p, em)
+                else:
+                    self.log(f'<font color="#FFA500"><b>[⚠️] No confirmation code received for {em} (timed out) — dismissing modal and proceeding directly to 2FA…</b></font>')
+                    self._dismiss_contact_modal(p)
+                    self._ac_leave_subpage(p)
+                    return False
 
         self._dismiss_contact_modal(p)
+        self._ac_leave_subpage(p)
         self.log('[ℹ️] Email linking flow finished.')
         return self._email_confirmed(p, em)
 

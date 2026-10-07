@@ -21,6 +21,7 @@
   var state = {
     running: false,
     headless: true,
+    cookie2fa: false,
     pool: 0,
     submitted: 0,
     stock: null,
@@ -157,6 +158,8 @@
             '<input id="pgp-target" class="form-control" type="number" min="0" value="0"></div>' +
           '<div class="creator-field creator-field--switch"><label>Headless</label>' +
             '<label class="switch" title="Run browsers headless (recommended)"><input type="checkbox" id="pgp-headless" checked><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch"><label>2FA + Cookie</label>' +
+            '<label class="switch" title="OFF (default) = legacy browserless drain: rename the pooled account via the IG Web API and submit its cookie — no browser, no 2FA, no follow. ON = new protocol: open the browser, follow 5, enable 2FA (wait for the email OTP), submit the key, confirm the code, THEN submit the cookie."><input type="checkbox" id="pgp-cookie2fa"><span class="slider"></span></label></div>' +
           '<div class="creator-field creator-field--switch"><label>Auto-consume</label>' +
             '<label class="switch" title="Always on: a used pooled account is removed after submit"><input type="checkbox" checked disabled><span class="slider"></span></label></div>' +
         '</div>' +
@@ -261,9 +264,12 @@
         if (!avail) { toast('IG Creator pool is empty — nothing to drain.', 'error', 14000); return; }
         var conc = parseInt(($('pgp-conc') || {}).value || 1, 10);
         var target = parseInt(($('pgp-target') || {}).value || 0, 10);
+        var c2fa = $('pgp-cookie2fa') ? $('pgp-cookie2fa').checked : false;
+        state.cookie2fa = c2fa;
         append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
-               ', ' + (state.headless ? 'headless' : 'visible') + ')');
+               ', ' + (state.headless ? 'headless' : 'visible') +
+               ', 2fa+cookie=' + (c2fa ? 'ON' : 'OFF') + ')');
         var _doPost = function () { post('/api/tg/start', {
           concurrency: conc,
           target: target,
@@ -272,7 +278,8 @@
           tg_task: TASK,
           tg_bot: BOT_ID,
           add_email: false,
-          use_ig_pool: true
+          use_ig_pool: true,
+          cookie_2fa: c2fa
         }); };
         if (typeof window.__tgTaskCheck === 'function') {
           window.__tgTaskCheck(BOT_ID, TASK, append).then(function (pre) {
@@ -441,6 +448,13 @@
     if ($('pgp-start')) $('pgp-start').addEventListener('click', start);
     if ($('pgp-stop')) $('pgp-stop').addEventListener('click', stop);
     if ($('pgp-headless')) $('pgp-headless').addEventListener('change', function () { state.headless = this.checked; });
+    if ($('pgp-cookie2fa')) {
+      try { if (localStorage.getItem('nova_pgp_cookie2fa') === '1') { $('pgp-cookie2fa').checked = true; state.cookie2fa = true; } } catch (e) {}
+      $('pgp-cookie2fa').addEventListener('change', function () {
+        state.cookie2fa = this.checked;
+        try { localStorage.setItem('nova_pgp_cookie2fa', this.checked ? '1' : '0'); } catch (e) {}
+      });
+    }
     if ($('pgp-conc')) {
       try { var saved = localStorage.getItem('nova_pgp_parallel'); if (saved) $('pgp-conc').value = saved; } catch (e) {}
       $('pgp-conc').addEventListener('change', function () {

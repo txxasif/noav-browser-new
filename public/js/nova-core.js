@@ -92,8 +92,10 @@ function initThemeNav() {
     'view-tg-manager': '#/manager',
     'view-guide': '#/guide',
     'view-tg-taskly2fa': '#/taskly2fa',
+    'view-tg-tasklycookie': '#/tasklycookie',
     'view-tg-fastpay2fa': '#/fastpay2fa',
     'view-tg-paygopool': '#/paygopool',
+    'view-tg-paygocookie': '#/paygocookie',
     'view-tg-paygo2fa': '#/paygo2fa',
   };
 

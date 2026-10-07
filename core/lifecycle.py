@@ -483,6 +483,10 @@ class LifecycleMixin:
             "platform": "Meta" if is_meta_only else "Meta+Instagram",
             "cookies": cookie_str,
             "cookie": cookie_str,
+            # How many suggested profiles this account followed at creation.
+            # The PayGo cookie POOL drain reads this and skips its own follow
+            # step when >= 5 (the bot's mandatory subscriptions).
+            "followed": int(getattr(self, "ig_followed_count", 0) or 0),
         }
 
         # 1. JSON & SQLite (dashboard) — thread-safe store insert

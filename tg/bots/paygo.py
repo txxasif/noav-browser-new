@@ -10,7 +10,7 @@ register({
     "kind": "mtproto+web",
     "runner": "run_cookie_cycle",   # cookies drain; 2FA pool drain: run_paygo_pool_2fa_cycle
     "gate": "none",
-    "flows": ["cookie", "paygo_pool_2fa"],
+    "flows": ["cookie", "paygo_pool_2fa", "2fa"],
     "tasks": ["📱 Create Inst (Cookies)", "📱 Create Inst (2FA)"],
     "creates_accounts": True,
     "balance": True,

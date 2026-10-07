@@ -615,11 +615,17 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             #     linked before the 2FA step: without the bot's email code the
             #     2FA submit cannot be issued. This is the bot's own process.
             bot_em = (runner.tg_creds or {}).get("email")
+            _get_code_pressed = {"v": False}
+
+            def _fetch_bot_email_code():
+                _get_code_pressed["v"] = True
+                return bot.request_email_code(timeout=45)
+
             if bot_em:
                 log(slot_id, f"[✉️] Linking bot-issued email {bot_em} via 📥 Get code…")
                 try:
                     linked = runner.ig_link_email_to_instagram(
-                        bot_em, code_fetcher=lambda: bot.request_email_code(timeout=45))
+                        bot_em, code_fetcher=_fetch_bot_email_code)
                 except IGDeadEnd as exc:
                     linked = False
                     log(slot_id, f"[⚠️] Bot email rejected ({exc}) — continuing to 2FA.")
@@ -634,6 +640,23 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                         log(slot_id, f"[⚠️] Bot email linkage error ({_em[:120]}) — continuing.")
                     linked = False
                 log(slot_id, f"[✉️] Bot email linkage result: {linked} (continuing to 2FA)")
+
+            # The bot's 2FA task only opens its "send the 2FA Key" prompt AFTER
+            # 📥 Get code is pressed for the bot-issued email. When IG reports
+            # that email is ALREADY linked/in use, ig_link_email_to_instagram
+            # never calls the code fetcher above — so the press never happened and
+            # submit_2fa_key later came back with no one-time code ("Telegram bot
+            # did not return a one-time code"). Always advance the bot past the
+            # email step before the 2FA submit.
+            if not _get_code_pressed["v"]:
+                try:
+                    _adv = getattr(bot, "press_get_code", None)
+                    if callable(_adv):
+                        _adv()
+                    elif bot_em and callable(getattr(bot, "request_email_code", None)):
+                        bot.request_email_code(timeout=10)
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] Get-code advance failed ({exc}) — continuing to 2FA.")
 
             # (3) 2FA THIRD — setup + submit the key so the bot issues the one-time
             #     code, then confirm it on IG. The bot is directly waiting for the

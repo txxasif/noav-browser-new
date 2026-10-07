@@ -3,7 +3,8 @@
  *
  * Fed from every python engine stdout line by server/context.js
  * (consumeWorkerLine), which passes a `route` derived from the engine slot:
- *   meta | ig | taskly | paygo | fastpay | taskly2fa | fastpay2fa
+ *   meta | ig | taskly | paygo | fastpay | taskly2fa | fastpay2fa | paygo_pool
+ *   | paygo2fa | paygocookie
  * Normalizes free-text failures into a small fixed set of categories.
  * Pure in-memory counters: nothing is persisted, nothing is spawned or killed.
  */
@@ -17,7 +18,15 @@ const CATEGORIES = [
   { key: 'could not select task', test: [/Could not select task/i, /task .* not found/i] },
   { key: 'could not retrieve 2fa secret key', test: [/could not retrieve 2fa secret key/i, /2fa secret key/i] },
   { key: 'rendered blank', test: [/rendered blank/i, /rate-limited/i, /rate limited/i] },
+  // --- dead ends introduced with the PayGo cookie 2FA/follow work ---
+  // Order matters (first match wins): the specific toast/gate first, then the
+  // session-dead probes, then the generic pooled dead-end wrapper.
+  { key: 'follow dead end (failed to load)', test: [/Failed to Load/i, /follow .*dead end/i] },
+  { key: 'email risky contactpoint (dead end)', test: [/email_risky_contactpoint/i, /email may not be secure/i] },
+  { key: 'IG session dead (login wall / visitor)', test: [/login wall\/chooser/i, /visitor view/i, /public visitor profile/i, /visitor moderation sheet/i, /session is logged out/i, /saved-account chooser/i] },
+  { key: 'pooled IG dead end', test: [/pooled IG dead end/i, /DEAD END \(/i, /\bdead end\b/i] },
 ];
+
 
 const STRICT_RE = /STRICT stop/i;
 const REASON_CODE_RE = /\breason\s*=\s*([A-Za-z0-9_.-]+)/gi;

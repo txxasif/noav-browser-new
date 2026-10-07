@@ -343,17 +343,17 @@ class IgPasswordMixin:
                 p.wait_for_timeout(300)
                 el.fill("")
                 p.wait_for_timeout(200)
-                el.press_sequentially(val, delay=45)
-                p.wait_for_timeout(300)
-                if el.input_value() != val:
-                    self._react_set_value(el, val)
-                    p.wait_for_timeout(200)
+                el.press_sequentially(val, delay=35)
+                p.wait_for_timeout(200)
+                # Unconditionally invoke React native setter so synthetic state always updates
+                self._react_set_value(el, val)
+                p.wait_for_timeout(200)
                 el.evaluate("""e => {
                     e.dispatchEvent(new Event('input', {bubbles: true}));
                     e.dispatchEvent(new Event('change', {bubbles: true}));
                     e.dispatchEvent(new Event('blur', {bubbles: true}));
                 }""")
-                p.wait_for_timeout(300)
+                p.wait_for_timeout(200)
                 matched = (el.input_value() == val)
                 self.log(f"[🔑] {name} typed (len={len(val)}, match={matched})")
                 return matched

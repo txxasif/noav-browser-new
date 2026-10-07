@@ -621,9 +621,15 @@ class PayGoOrchestrator {
       return;
     }
 
-    // A genuine NEW preempt: reset, then (re)save the previous job if it was a
-    // DIFFERENT bot.
-    this.savedJob = null;
+    // A genuine NEW preempt: (re)save the previous job if a DIFFERENT bot is
+    // running. Do NOT clobber an EXISTING savedJob when nothing is running —
+    // that lost the preempted bot forever: the PayGo drain exits with 0 tasks
+    // inside the :00–:05 grace window, notifyLoopStopped() returns early WITHOUT
+    // restoring (rapid-probe mode), and the next re-probe landed here with no
+    // running proc and wiped savedJob. The bot was then never restored.
+    if (runningProc && runningConfig) {
+      this.savedJob = null;
+    }
 
     if (runningProc && runningConfig) {
       // Only save if it was genuinely a DIFFERENT bot (e.g. Taskly or FastPay).
@@ -659,6 +665,7 @@ class PayGoOrchestrator {
       tg_bot: 'paygo',
       tg_task: '📱 Create Inst (Cookies)',
       use_ig_pool: true,
+      cookie_2fa: false,
       concurrency: conc,
       headless: headless,
       target: 0,
@@ -742,6 +749,11 @@ class PayGoOrchestrator {
 
     if (/cookie/i.test(cfg.tg_task)) args.push('--cookie');
     if (cfg.use_ig_pool) args.push('--use-ig-pool');
+    // NEW PayGo cookies protocol: only when EXPLICITLY enabled (default = legacy
+    // browserless drain).
+    if (cfg.use_ig_pool && /cookie/i.test(cfg.tg_task) && cfg.cookie_2fa === true) {
+      args.push('--cookie-2fa');
+    }
     if (cfg.headless) args.push('--headless');
 
     slot.config = cfg;

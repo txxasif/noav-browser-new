@@ -602,7 +602,7 @@ def _is_no_task_error(err_text: str) -> bool:
 
 def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
                  tg_bot="taskly", captcha_mode="extension", mail_provider="mailtd",
-                 add_email=False, cookie=False, use_ig_pool=False):
+                 add_email=False, cookie=False, use_ig_pool=False, cookie_2fa=False):
     """Coupled per-task loop: ONE browser does Meta → TG task → IG → submit.
 
     N slots run in parallel (each opens its own Meta/IG browser up front);
@@ -664,7 +664,7 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     is_headless=is_headless, captcha_mode=captcha_mode,
                     mail_provider=mail_provider, stop_event=_stop,
                     add_email=add_email, tg_task=task, tg_bot=tg_bot,
-                    use_ig_pool=use_ig_pool)
+                    use_ig_pool=use_ig_pool, cookie_2fa=cookie_2fa)
             elif str(_runner) == "run_native_cycle":
                 # Taskly 2FA native task: NO Meta, NO mailbox — lease TG,
                 # Start, bot email+code, IG native signup, Account Registered.
@@ -881,6 +881,9 @@ def main():
                              "Takes precedence over --tg-task/--tg-bot.")
     parser.add_argument("--use-ig-pool", action="store_true",
                         help="PayGo Cookies task: drain pre-created accounts from the IG Creator pool")
+    parser.add_argument("--cookie-2fa", action="store_true",
+                        help="PayGo Cookies task: NEW protocol — submit the 2FA key "
+                             "(waiting for the email OTP) BEFORE the cookie submit.")
     parser.add_argument("--start-stagger-ms", type=int, default=None,
                         help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
 
@@ -996,7 +999,8 @@ def main():
         # from the leased profile, and there is no fixed username/password.
         _shared.update(task=args.tg_task, tg_bot=args.tg_bot, add_email=args.add_email,
                        cookie=bool(getattr(args, "cookie", False)),
-                       use_ig_pool=bool(getattr(args, "use_ig_pool", False)))
+                       use_ig_pool=bool(getattr(args, "use_ig_pool", False)),
+                       cookie_2fa=bool(getattr(args, "cookie_2fa", False)))
     # Self-heal TG leases. The Windows Stop button kills the worker with
     # TerminateProcess, so the coupled cycle's `finally: tg_manager.release`
     # never runs and the profile stays `busy` until LEASE_TTL (20 min). Reset

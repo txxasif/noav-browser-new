@@ -207,8 +207,8 @@ function miCreatorPanelHtml(def) {
         </label>
       </div>
       <div class="creator-field creator-field--switch">
-        <label>Follow</label>
-        <label class="switch" title="Follow ~2 suggested profiles after creating the account. Off = the follow step is skipped entirely.">
+        <label>Follow (5)</label>
+        <label class="switch" title="Follow 5 suggested profiles after creating the account (required by the PayGo cookie task). The count is saved on the account, so the PayGo cookie pool drain skips its own follow step for accounts that already followed 5. Off = the follow step is skipped entirely.">
           <input type="checkbox" data-role="follow" checked>
           <span class="slider"></span>
         </label>

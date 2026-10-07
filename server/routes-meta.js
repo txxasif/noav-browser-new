@@ -451,7 +451,8 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       const workerMode = (mode === 'meta-ig') ? 'meta-ig' : 'meta-only';
       // 2FA Key extraction: strictly enabled only for IG Creator when explicitly checked
       const twofa = (mode === 'meta-ig') && Boolean(opts.twofa);
-      // Follow step: the account follows ~2 suggested profiles after joining.
+      // Follow step: the account follows 5 suggested profiles after joining
+      // (recorded as `followed` on the account so the PayGo pool can skip it).
       // Dashboard switch; default ON (unchanged behaviour for older clients).
       const follow = opts.follow !== false;
       // Global password: request override, else the saved dashboard setting.
@@ -492,9 +493,11 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
             PYTHONUTF8: '1',
             PYTHONIOENCODING: 'utf-8',
             PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || defaultBrowsersPath,
-            // Follow switch -> the engine's documented follow tunable. "0"
-            // makes ig_follow_suggested() a no-op (step skipped entirely).
+            // Follow switch -> the engine's documented follow tunables. "0"
+            // makes ig_follow_suggested() a no-op (step skipped entirely);
+            // otherwise it follows 5 (the count PayGo's cookie task mandates).
             INSTA_FOLLOW_AFTER_LOGIN: follow ? '1' : '0',
+            INSTA_FOLLOW_COUNT: follow ? '5' : '0',
             ...(newPassword ? { META_NEW_PASSWORD: newPassword } : {}),
             ...(newUsername ? { META_NEW_USERNAME: newUsername } : {})
           })

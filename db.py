@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     cookies TEXT,
     fastpay_paid INTEGER DEFAULT 0,
     fastpay_paid_at TEXT,
+    followed INTEGER DEFAULT 0,
     extra TEXT
 );
 
@@ -72,7 +73,7 @@ COLUMNS = [
     "nitro_device", "nitro_submitted", "nitro_submitted_at",
     "coinsta_device", "coinsta_submitted", "coinsta_submitted_at",
     "dob", "mail_provider", "created_at", "claimed_at", "attempts", "platform", "cookies",
-    "fastpay_paid", "fastpay_paid_at", "extra"
+    "fastpay_paid", "fastpay_paid_at", "followed", "extra"
 ]
 
 
@@ -153,6 +154,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE accounts ADD COLUMN fastpay_paid_at TEXT;")
     except Exception:
         pass
+    # Follow-warmup count: how many suggested accounts this account followed at
+    # creation (IG Creator). The PayGo cookie POOL drain skips the follow step
+    # when this already >= 5, else it follows 5 itself.
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN followed INTEGER DEFAULT 0;")
+    except Exception:
+        pass
     # Index after the columns exist (safe on both fresh and migrated tables).
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acc_pending_coinsta ON accounts(target, status, coinsta_submitted);")
@@ -202,7 +210,7 @@ def row_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
 
     for k, v in d.items():
         if k in COLUMNS and k != "extra":
-            if k in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid"):
+            if k in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid", "followed"):
                 row[k] = 1 if v else 0
             elif k == "attempts":
                 row[k] = int(v) if v is not None else 0

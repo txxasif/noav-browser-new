@@ -63,6 +63,18 @@ FLOWS = {
         "needs_email": True,
         "needs_2fa": True,
     },
+    # Taskly "🍪 Create Inst (No mail)" run as a POOL DRAIN (new "Taskly Cookie"
+    # panel): reuse a pre-created IG account — rename via the direct Web API,
+    # enable 2FA from the account's STORED mail.td inbox (wait the email OTP),
+    # submit the key to Taskly, confirm the returned code, export the IG cookie,
+    # submit it, register. Runner is the cookie pool path (run_cookie_cycle).
+    "pool_cookie_2fa": {
+        "label": "Create Inst (No mail) — pooled drain (2FA then cookie)",
+        "runner": "run_cookie_cycle",
+        "steps": ["ig_rename", "2fa", "cookie_export", "submit_cookie", "register"],
+        "needs_email": False,
+        "needs_2fa": True,
+    },
     # PayGo "📱 Create Inst (2FA)" run as a POOL DRAIN (no Meta, no signup):
     # same-to-same as Taskly's pool_2fa — reuse a pre-created IG account from
     # the IG Creator pool: rename to the bot login via the direct Web API,

@@ -220,8 +220,316 @@ def _sleep_until(when, stop_event=None, chunk=30.0):
         time.sleep(min(chunk, left))
 
 
+def _click_reload_if_unavailable(p) -> bool:
+    """Click IG/Accounts-Center 'Reload Page' on the transient error screen.
+
+    Operator instruction 2026-10-07: on accountscenter.instagram.com
+    "This page isn't available right now" (technical error + Reload Page),
+    CLICK RELOAD PAGE. The generic ``_recover_something_went_wrong`` deliberately
+    avoids reloading AC routes (it takes a Way Out), so this explicit reload is
+    applied where the operator wants it. Returns True when it clicked.
+    """
+    try:
+        tail = (p.inner_text("body") or "").lower()
+    except Exception:
+        tail = ""
+    if not any(k in tail for k in ("isn't available right now", "isn’t available right now",
+                                   "reload page", "something went wrong", "technical error")):
+        return False
+    clicked = False
+    try:
+        btn = p.locator('button:has-text("Reload page"), div[role="button"]:has-text("Reload page"), '
+                        'a:has-text("Reload page")').first
+        if btn.count() > 0 and btn.is_visible():
+            try:
+                btn.click(timeout=3000)
+            except Exception:
+                btn.click(force=True, timeout=2000)
+            clicked = True
+    except Exception:
+        pass
+    if not clicked:
+        try:
+            clicked = bool(p.evaluate("""() => {
+                for (const el of document.querySelectorAll('button, div[role="button"], a, span')) {
+                    if ((el.innerText || el.textContent || '').trim().toLowerCase() === 'reload page') {
+                        el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                        el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }"""))
+        except Exception:
+            pass
+    if clicked:
+        try:
+            p.wait_for_timeout(3500)
+        except Exception:
+            pass
+    return clicked
+
+
+def _pool_enable_2fa_and_export_cookie(slot_id, bot, bot_id, pool_acc, login,
+                                       is_headless, worker_factory, follow_count=5):
+    """Browser 2FA enable on a renamed pooled account + fresh cookie export.
+
+    The NEW PayGo "📱 Create Inst (Cookies)" protocol (2026-10-07) asks for the
+    account's 2FA key BEFORE the cookie. This mirrors ``run_paygo_pool_2fa_cycle``:
+    inject the pooled session, WAIT FOR THE EMAIL OTP (the Accounts-Center re-auth
+    challenge is solved from the account's own stored mail.td inbox) while 2FA is
+    enabled, submit the key to the bot, confirm the returned code, then export a
+    fresh IG cookie header. Returns the cookie string. Raises on failure so the
+    caller can purge/restore the account. Used only when the 2FA toggle is ON.
+    """
+    # Local imports — avoid an import cycle (run_paygo_pool_2fa_cycle imports
+    # helpers FROM this module at module load time).
+    from run_paygo_pool_2fa_cycle import (
+        _cookies_for_playwright, _mail_tokens_from_extra, _make_pool_fetch_code,
+        _browser_logged_in, _mailtd_http_list,
+    )
+    from runner import MetaInstaRunner
+    from ai_config import SELFIE_PATH
+
+    if worker_factory is None:
+        from worker import AISlotWorker as _W
+        worker_factory = _W
+
+    worker = worker_factory(slot_id=slot_id, is_headless=is_headless)
+    runner = MetaInstaRunner(
+        worker, twofa=True, telegram=False, tg_task=COOKIE_TASK,
+        captcha_mode="none", mail_provider="mailtd", target="telegram")
+    if os.path.exists(SELFIE_PATH):
+        runner.selfie_path = SELFIE_PATH
+    try:
+        runner._install_screenshot_hooks()
+    except Exception:
+        pass
+    try:
+        runner._launch()
+        ctx = getattr(getattr(runner, "w", None), "context", None)
+        if ctx is None:
+            raise RuntimeError("browser context unavailable after launch")
+        try:
+            ctx.clear_cookies()
+        except Exception:
+            pass
+        ctx.add_cookies(_cookies_for_playwright(pool_acc["cookies"]))
+        page = runner._ig_tab()
+        # Verify the session on the account's OWN profile. The HOME feed can be a
+        # public/visitor feed that still renders Follow buttons, so following
+        # there is fake and the Accounts-Center nav then taps the Profile tab and
+        # lands on a feed account (Block/Restrict → dead end). A visitor profile /
+        # login wall HERE is a genuine dead end (purge + next).
+        try:
+            page.goto(f"https://www.instagram.com/{login}/", wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_selector('[role="dialog"], div[aria-modal="true"]', timeout=3000)
+            except Exception:
+                pass
+            runner._dismiss_ig_sheets(page)
+        except Exception as exc:
+            log(slot_id, f"[⚠️] IG profile load note: {exc}")
+        if not _browser_logged_in(page):
+            raise RuntimeError("pooled IG session not logged in (own profile)")
+        try:
+            if runner._walled_or_chooser(page):
+                raise IGDeadEnd("visitor/login wall on the account's own profile — dead end")
+        except IGDeadEnd:
+            raise
+        except Exception:
+            pass
+
+        # Logged-OUT visitor view of the account's OWN profile (the #1 pool
+        # failure, 2026-10-07): it shows a "Log in"/"Sign up" prompt but NEVER the
+        # owner-only "Edit profile" control, so the checks above let it through —
+        # we then ran a FAKE follow on the visitor feed and only died later at
+        # Accounts Center. Catch it HERE and purge before wasting a cycle.
+        try:
+            page.wait_for_timeout(1500)
+            _pt = (page.inner_text("body") or "").lower()
+        except Exception:
+            _pt = ""
+        if _pt:
+            _owner = any(m in _pt for m in (
+                "edit profile", "professional dashboard", "share profile",
+                "add bio", "your story"))
+            if (not _owner) and ("log in" in _pt or "sign up" in _pt):
+                raise IGDeadEnd("logged-out visitor view on own profile "
+                                "(login/signup prompt, no owner controls) — dead end")
+
+        # Dead-end guard (operator 2026-10-07): IG's "Your email may not be
+        # secure" / update_risky_contactpoint gate has NO skip — jump to the
+        # NEXT pooled account instead of stalling. The caller purges on IGDeadEnd.
+        try:
+            if runner._is_email_risky_screen(page):
+                raise IGDeadEnd("email_risky_contactpoint — 'Your email may not be secure' gate")
+        except IGDeadEnd:
+            raise
+        except Exception:
+            pass
+
+        for _attr in ("new_username", "username", "ig_username"):
+            try:
+                setattr(runner, _attr, login)
+            except Exception:
+                pass
+        runner.password = pool_acc.get("password") or getattr(runner, "password", None)
+        runner.new_password = pool_acc.get("password")
+
+        # Follow warm-up (bot: "Did you make 5 subscriptions after registration?
+        # … mandatory …"). The count is PER-TASK: PayGo cookie = 5; Taskly cookie
+        # = 0 → skip entirely (operator 2026-10-07). Also SKIP when the IG Creator
+        # already followed >= the count at creation.
+        if follow_count <= 0:
+            log(slot_id, "[👥] Follow step skipped — this task does not require follows.")
+            emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
+                        "detail": "Follow step skipped (not required for this task)."})
+        else:
+            try:
+                already_followed = int(pool_acc.get("followed") or 0)
+            except Exception:
+                already_followed = 0
+            if already_followed >= follow_count:
+                log(slot_id, f"[👥] Account already followed {already_followed} in the IG Creator — "
+                             f"skipping the follow step (bot's {follow_count}-subscription rule satisfied).")
+                emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
+                            "detail": f"Follow skipped — already followed {already_followed} at creation."})
+            else:
+                try:
+                    emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
+                                "detail": f"Following suggested accounts on {login} (bot requires {follow_count})…"})
+                    page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                    try:
+                        page.wait_for_selector('[role="dialog"], div[aria-modal="true"]', timeout=3000)
+                    except Exception:
+                        pass
+                    runner._dismiss_ig_sheets(page)
+                    runner._ig_follow_done = False
+                    n_followed = runner.ig_follow_suggested(max_follows=follow_count, humanize=True)
+                    log(slot_id, f"[👥] Followed {n_followed}/{follow_count} suggested account(s) on the pooled account.")
+                except IGDeadEnd:
+                    raise
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] follow step note (continuing): {exc}")
+
+        # Settle back on the account's OWN profile so the Accounts-Center nav
+        # starts FROM the profile and SKIPS the fragile bottom-nav profile tap
+        # (which can land on a feed account → Block/Restrict visitor dead end).
+        try:
+            page.goto(f"https://www.instagram.com/{login}/", wait_until="domcontentloaded", timeout=45000)
+            try:
+                page.wait_for_selector('[role="dialog"], div[aria-modal="true"]', timeout=3000)
+            except Exception:
+                pass
+            runner._dismiss_ig_sheets(page)
+        except Exception as exc:
+            log(slot_id, f"[⚠️] pre-2FA profile settle note: {exc}")
+
+        # WAIT FOR OTP: the Accounts-Center re-auth challenge is solved from the
+        # account's OWN mail.td inbox (stored tokens) BEFORE 2FA can be enabled.
+        mail_tokens = _mail_tokens_from_extra(pool_acc.get("extra"))
+        runner.mail = None
+        runner.mail_tokens = mail_tokens
+        preexisting = set()
+        if mail_tokens:
+            try:
+                preexisting = {str(m.get("id")) for m in _mailtd_http_list(mail_tokens) if m.get("id")}
+                log(slot_id, f"[📧] 2FA: stored inbox snapshotted — {len(preexisting)} existing "
+                             f"message(s) ignored; waiting for a fresh OTP…")
+            except Exception:
+                pass
+        else:
+            log(slot_id, "[⚠️] 2FA: account has NO stored mail.td token — the email OTP "
+                         "cannot be read (2FA setup may still proceed).")
+        runner.fetch_code = _make_pool_fetch_code(runner, preexisting)
+
+        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
+                    "detail": f"2FA setup on pooled IG account ({login}) — waiting for email OTP…"})
+        secret = None
+        already = False
+        for _2fa_try in range(2):
+            try:
+                secret = runner.ig_2fa_begin()
+            except IGDeadEnd as exc:
+                raise IGDeadEnd(f"IG dead end during 2FA: {exc}")
+            if secret:
+                break
+            # Transient AC error ("This page isn't available right now" with a
+            # Reload Page button): CLICK RELOAD and retry the setup ONCE
+            # (operator instruction 2026-10-07).
+            try:
+                if _click_reload_if_unavailable(runner._ig_tab()):
+                    log(slot_id, "[🔄] Accounts Center 'page isn't available' — clicked Reload "
+                                 "Page; retrying 2FA setup…")
+                    continue
+            except Exception:
+                pass
+            break
+        if not secret:
+            parked = str(pool_acc.get("twofa_secret") or "").strip()
+            if parked:
+                secret = parked
+                already = True
+                log(slot_id, f"[🔐] 2FA already enabled — using parked seed ({parked[:4]}****).")
+        if not secret:
+            raise RuntimeError("Could not retrieve 2FA secret key from Instagram")
+
+        log(slot_id, "[🔑] 2FA key captured; submitting to the bot…")
+        code = bot.submit_2fa_key(secret, allow_local_fallback=False)
+        if not code:
+            raise RuntimeError(f"{bot_id} did not return a one-time code for the 2FA key")
+        if already:
+            log(slot_id, "✔ 2FA already enabled (parked seed) — no IG confirm needed.")
+        else:
+            if not runner.ig_2fa_confirm(code):
+                ok2 = False
+                try:
+                    import re as _re
+                    import pyotp
+                    _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
+                    for _t in range(3):
+                        local = pyotp.TOTP(_s).now()
+                        if local != str(code):
+                            log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
+                            if runner.ig_2fa_confirm(local):
+                                ok2 = True
+                                break
+                        time.sleep(31 - (int(time.time()) % 30))
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
+                if not ok2:
+                    raise RuntimeError("Instagram rejected the 2FA code")
+            log(slot_id, "✔ 2FA enabled on the pooled account.")
+
+        # Fresh cookie header from the now-2FA-enabled session.
+        jar = ctx.cookies()
+        ig_cookies = [c for c in jar if "instagram.com" in str(c.get("domain", ""))]
+        names = {c.get("name") for c in ig_cookies}
+        if "sessionid" not in names:
+            raise RuntimeError(f"no IG sessionid after 2FA (have: {sorted(names)})")
+        cookie_str = "; ".join(
+            f"{c['name']}={c['value']}" for c in ig_cookies
+            if c.get("name") and c.get("value") is not None)
+        if len(cookie_str) < 100:
+            raise RuntimeError("cookie string too short (<100 chars) after 2FA")
+        log(slot_id, f"[🍪] Fresh cookie exported after 2FA ({len(cookie_str)} chars).")
+        return cookie_str
+    finally:
+        try:
+            runner.finish()
+        except Exception:
+            pass
+        try:
+            worker._cleanup_browser_resources()
+        except Exception:
+            pass
+
+
 def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
-                          tg_task=COOKIE_TASK, tg_bot="paygo"):
+                          tg_task=COOKIE_TASK, tg_bot="paygo",
+                          cookie_2fa=False, worker_factory=None):
     """Run ONE PayGo drain cycle using pre-created accounts from data/accounts.json.
 
     1. Checks for available accounts in IG Creator pool.
@@ -460,11 +768,34 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
 
         acc_id = pool_acc["id"]
 
+        # NEW PayGo cookies protocol (2026-10-07, toggle): submit the 2FA key
+        # FIRST (wait for the email OTP while enabling it), let the bot return a
+        # code, confirm it, THEN submit the cookie. Toggle OFF = legacy path
+        # (stored cookie straight to the bot).
+        submit_cookie_str = pool_acc["cookies"]
+        if cookie_2fa:
+            log(slot_id, "[🔐] 2FA+Cookie mode ON — enabling 2FA and waiting for OTP before cookie submit…")
+            try:
+                submit_cookie_str = _pool_enable_2fa_and_export_cookie(
+                    slot_id, bot, bot_id, pool_acc, login, is_headless, worker_factory,
+                    follow_count=_follow_count(bot_id, task, default=5))
+            except IGDeadEnd as _de:
+                # Browser 2FA dead-ended. Do NOT cancel the live task — fall back
+                # to the STORED cookie so the submit still happens; the bot's own
+                # verdict then decides accept/reject (and purges dead accounts).
+                log(slot_id, f"⚠️ [pool] 2FA dead end ({_de}) — submitting the STORED cookie instead.")
+                emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
+                            "detail": "2FA dead end — submitting the stored cookie instead."})
+            except Exception as _exc:
+                log(slot_id, f"⚠️ [pool] 2FA/browser step failed ({_exc}) — submitting the STORED cookie instead.")
+                emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
+                            "detail": "2FA step failed — submitting the stored cookie instead."})
+
         # Submit cookie to PayGo
-        log(slot_id, f"[submit] Submitting {len(pool_acc['cookies'])} chars IG cookie string to {bot_id}…")
+        log(slot_id, f"[submit] Submitting {len(submit_cookie_str)} chars IG cookie string to {bot_id}…")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                     "detail": "Submitting IG cookie to PayGoBot…"})
-        ok_cookie, reply = bot.submit_cookie(pool_acc["cookies"], timeout=25)
+        ok_cookie, reply = bot.submit_cookie(submit_cookie_str, timeout=25)
         if not ok_cookie:
             if _is_account_dead_error(reply):
                 log(slot_id, f"⚠️ [pool] PayGo rejected dead/banned account {acc_id} ({reply[:100]}) — permanently removing from accounts list.")
@@ -509,8 +840,12 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         from tg_stats import record_submission
         rec_id = f"tg_{int(time.time()*1000)}"
         # POOL DRAIN gets its OWN counter so it never inflates the normal
-        # `paygo` (browser-creator) number — mirrors taskly2fa / fastpay2fa.
-        record_submission("paygo_pool" if (bot_id or "paygo").lower() == "paygo" else (bot_id or "paygo"))
+        # `paygo`/`taskly` (browser-creator) number — mirrors taskly2fa/fastpay2fa.
+        _b = (bot_id or "paygo").lower()
+        _counter = ("paygo_pool" if _b == "paygo"
+                    else "taskly_cookie_pool" if _b == "taskly"
+                    else _b)
+        record_submission(_counter)
         emit_event({"type": "account_submitted", "pipeline": "telegram",
                     "tg_account": tg_acct["id"], "tg_bot": bot_id or "paygo",
                     "account_id": rec_id})
@@ -649,10 +984,26 @@ def _flow_tag(bot_target, task):
     return None
 
 
+def _follow_count(bot_target, task, default=2):
+    """Per-task suggested-follow count (bot mandate); default 2."""
+    try:
+        import tg_tasks
+        tid, _ = tg_tasks.resolve(bot_target, task)
+        if tid:
+            spec = (tg_tasks.TASKS.get(str(bot_target), {}) or {}).get(tid) or {}
+            n = spec.get("follow")
+            if n is not None:
+                return max(0, int(n))
+    except Exception:
+        pass
+    return default
+
+
 def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
                           captcha_mode="extension", mail_provider="mailtd",
                           stop_event=None, add_email=False,
-                          tg_task=None, tg_bot="paygo", use_ig_pool=False):
+                          tg_task=None, tg_bot="paygo", use_ig_pool=False,
+                          cookie_2fa=False):
     """Run ONE cookie-family task cycle. Returns ``(ok, detail)``.
 
     Parametrized so it serves BOTH cookie flows:
@@ -673,7 +1024,8 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
     if use_ig_pool:
         return _run_pool_drain_cycle(
             slot_id=slot_id, is_headless=is_headless,
-            stop_event=stop_event, tg_task=task, tg_bot=bot_id
+            stop_event=stop_event, tg_task=task, tg_bot=bot_id,
+            cookie_2fa=cookie_2fa, worker_factory=worker_factory
         )
     try:
         from tg_flows import resolve_steps as _resolve_steps, needs_2fa as _needs_2fa
@@ -800,7 +1152,13 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
             runner.ig_complete_join()
             if runner.ig_username:
                 runner.new_username = runner.ig_username
-            runner.ig_dismiss_onboarding()  # Back-out + follow ~2 suggested
+            # Follow count is DATA (per task): PayGo's cookie task mandates 5
+            # subscriptions; Taskly's cookie_2fa keeps the default 2. A count >2
+            # is done human-like (random target, scrolls, jittered pauses).
+            follow_n = _follow_count(bot_id, task)
+            runner.ig_dismiss_onboarding(follow=(follow_n <= 2))
+            if follow_n > 0:
+                runner.ig_follow_suggested(max_follows=follow_n, humanize=(follow_n > 2))
             ig_page = runner._ig_tab()
             if runner._has_human_check(ig_page):
                 raise RuntimeError("Instagram human checkpoint on fresh account — dead end")
@@ -933,11 +1291,14 @@ def main():
     ap.add_argument("--bot", default="paygo", help="bot id: paygo | taskly")
     ap.add_argument("--use-ig-pool", action="store_true",
                     help="Drain pre-created accounts from the IG Creator pool")
+    ap.add_argument("--cookie-2fa", action="store_true",
+                    help="NEW PayGo cookies protocol: submit 2FA (wait OTP) then cookie")
     args = ap.parse_args()
     ok, _detail = run_cookie_cycle_once(
         slot_id=args.slot, is_headless=args.headless,
         captcha_mode=args.captcha, mail_provider=args.mail,
-        tg_task=args.task, tg_bot=args.bot, use_ig_pool=args.use_ig_pool)
+        tg_task=args.task, tg_bot=args.bot, use_ig_pool=args.use_ig_pool,
+        cookie_2fa=args.cookie_2fa)
     return ok
 
 

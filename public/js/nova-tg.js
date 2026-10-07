@@ -45,7 +45,8 @@
               ['🍪 Create Inst (No mail)', '🍪 Create Inst (No mail) — 2FA + cookie flow'],
               ['🔥 Create Inst (No mail)', '🔥 Create Inst (No mail) — 2FA flow']] },
     paygo: { name: 'PayGo Bot', logo: 'paygo',
-      tasks: [['📱 Create Inst (Cookies)', '📱 Create Inst (Cookies) — cookie flow']] },
+      tasks: [['📱 Create Inst (Cookies)', '📱 Create Inst (Cookies) — cookie flow'],
+              ['PayGo 2FA (Normal)', '📱 Create Inst (2FA) — 2FA flow (normal browser)']] },
     fastpay: { name: 'FastPay Bot', logo: 'fastpay',
       tasks: [['Instagram 2FA', 'Instagram 2FA — create + payout']] },
   };
@@ -55,6 +56,7 @@
     '🍪 Create Inst (No mail)': 'Taskly Cookie + 2FA task — creates account, sets 2FA, and exports session cookie for verification.',
     '🔥 Create Inst (No mail)': 'Taskly No-mail task — 2FA flow with direct password setting.',
     '📱 Create Inst (Cookies)': 'PayGo cookie task — registers via Meta, joins Instagram, and submits exported session cookie.',
+    'PayGo 2FA (Normal)': 'PayGo normal 2FA task — Meta + IG browser creation with bot email/code; same flow as Taskly 2FA, not the pooled drain.',
     'Instagram 2FA': 'FastPay task — creates account with bot-issued credentials and submits 2FA key for payout.'
   };
 
@@ -1315,7 +1317,7 @@
     if (d && d.pipeline && d.pipeline !== 'telegram') return;
     // Pool-drain routes have their OWN panels (Taskly 2FA / PayGo Cookie /
     // FastPay 2FA / PayGo 2FA). Never let their lines bleed into the regular bot log.
-    if (d.route && (d.route === 'taskly2fa' || d.route === 'fastpay2fa' || d.route === 'paygo_pool' || d.route === 'paygo2fa')) return;
+    if (d.route && (d.route === 'taskly2fa' || d.route === 'fastpay2fa' || d.route === 'paygo_pool' || d.route === 'paygo2fa' || d.route === 'paygocookie' || d.route === 'tasklycookie')) return;
     if (d && d.type === 'throttle') {
       hideThrottleBanner();
       return;

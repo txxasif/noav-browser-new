@@ -1193,7 +1193,7 @@ class IgJoinMixin:
                 self.log(f'[⚠️] Note on feed warm-up: {exc}')
         self.log('[🏠] Instagram session ready.')
 
-    def ig_follow_suggested(self, max_follows: int = 2):
+    def ig_follow_suggested(self, max_follows: int = 2, humanize: bool = False):
         """Follow ~2 suggested accounts on the home feed, right after login.
 
         ── CURRENTLY DISABLED (2026-09-28, operator request) ─────────────────
@@ -1256,6 +1256,7 @@ class IgJoinMixin:
                 self.log(f'[👥] Not on Instagram ({p.url}) — skipping the follow pass.')
                 return 0
             self._ig_follow_done = True
+            self.ig_followed_count = 0
             p.wait_for_timeout(1500)
 
             # Any lingering "Add to Home screen"-style dialog goes first.
@@ -1272,10 +1273,18 @@ class IgJoinMixin:
                     pass
 
             followed = 0
-            for _ in range(3):
+            # Light warm-up only — a real user pauses a beat. NO big scrolls:
+            # follow from the FIRST suggested profile and continue to the next.
+            if humanize:
+                self._human_pause(0.6, 1.6)
+            for _ in range(12):
                 if followed >= max_follows:
                     break
                 tapped = False
+                # Collect visible EXACT-"Follow" buttons IN ORDER. Playwright's
+                # :has-text is a substring match, so "Follow" also selects
+                # "Following" / "Follow back" — the exact-label test is the filter.
+                cands = []
                 for sel in ('button:has-text("Follow"):not(:has-text("Following"))',
                             'div[role="button"]:has-text("Follow"):not(:has-text("Following"))',
                             'a[role="button"]:has-text("Follow"):not(:has-text("Following"))'):
@@ -1285,38 +1294,64 @@ class IgJoinMixin:
                     except Exception:
                         continue
                     for i in range(cnt):
-                        if followed >= max_follows:
-                            break
                         try:
                             btn = btns.nth(i)
                             if not btn.is_visible():
                                 continue
-                            # The exact-label test is the real filter: Playwright's
-                            # :has-text is a substring match, so "Follow" also
-                            # selects "Following"/"Follow back".
                             if (btn.inner_text() or "").strip() != "Follow":
                                 continue
-                            btn.scroll_into_view_if_needed(timeout=2000)
-                            if not self._tap_or_click(p, btn):
-                                continue
-                            tapped = True
-                            followed += 1
-                            self.log(f'[👥] Followed suggested profile ({followed}/{max_follows}).')
-                            # Human cadence — not machine-stepped, and long enough
-                            # that IG flips the button to "Following" server-side
-                            # before the next tap.
-                            p.wait_for_timeout(random.uniform(1500, 2500))
-                            break
+                            cands.append(btn)
                         except Exception:
                             pass
-                    if tapped:
+                for btn in cands:
+                    if followed >= max_follows:
                         break
+                    try:
+                        if not btn.is_visible():
+                            continue
+                        btn.scroll_into_view_if_needed(timeout=2000)
+                        if not self._tap_or_click(p, btn):
+                            continue
+                        # Dead-end guard: a "Failed to Load." toast right after a
+                        # Follow tap means the account is broken — abort and let
+                        # the caller jump to the NEXT account.
+                        p.wait_for_timeout(random.uniform(700, 1300))
+                        try:
+                            _tail = (p.inner_text("body") or "").lower()
+                        except Exception:
+                            _tail = ""
+                        if "failed to load" in _tail:
+                            raise IGDeadEnd("follow 'Failed to Load' toast — dead end")
+                        tapped = True
+                        followed += 1
+                        self.log(f'[👥] Followed suggested profile ({followed}/{max_follows}).')
+                        # Short pause only — enough for IG to flip the button to
+                        # "Following" server-side — then continue to the next.
+                        p.wait_for_timeout(random.uniform(1000, 1800))
+                        break
+                    except IGDeadEnd:
+                        raise
+                    except Exception:
+                        pass
                 if not tapped:
-                    # The suggested rail can render a beat after the feed does.
-                    p.wait_for_timeout(1500)
+                    # Next row may be just below the fold: ONE small nudge, then
+                    # re-collect. No big scrolling.
+                    try:
+                        self._touch_scroll(p, dy=random.randint(160, 340))
+                    except Exception:
+                        pass
+                    p.wait_for_timeout(random.uniform(700, 1400))
 
             self.log(f'[👥] Follow pass complete: followed {followed} suggested account(s).')
+            try:
+                self.ig_followed_count = int(followed)
+            except Exception:
+                pass
             return followed
+        except IGDeadEnd:
+            # A "Failed to Load." toast is a genuine dead end — let the caller
+            # close/purge and move to the next account. Do NOT swallow it.
+            raise
         except Exception as exc:
             self.log(f'[⚠️] Note on follow suggested: {exc}')
             return 0

@@ -103,6 +103,10 @@
             <i class="fa-solid fa-cookie-bite" style="color: #f59e0b;"></i>
             <span>PayGo Bot</span>
           </button>
+          <button class="nav-item nav-sub" data-view="view-tg-paygocookie" title="PayGo Create Inst (Cookies) — Meta → Instagram → 2FA → cookie submit (classic: creates the account from scratch)">
+            <i class="fa-solid fa-cookie-bite" style="color: #fbbf24;"></i>
+            <span>PayGo Cookie</span>
+          </button>
           <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="fastpay" title="Meta → Instagram → FastPay 2FA create + payout">
             <i class="fa-solid fa-sack-dollar" style="color: #22c55e;"></i>
             <span>FastPay Bot</span>
@@ -111,6 +115,11 @@
           <button class="nav-item nav-sub" data-view="view-tg-taskly2fa" title="Taskly Create Inst (2FA) — pooled IG drain (no Meta, reuses an existing IG account)">
             <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
             <span>Taskly 2FA</span>
+            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+          </button>
+          <button class="nav-item nav-sub" data-view="view-tg-tasklycookie" title="Taskly Create Inst (No mail) — pooled IG drain: rename + 2FA (stored inbox OTP) + cookie submit (no Meta, reuses an existing IG account)">
+            <i class="fa-solid fa-cookie-bite" style="color: #4ade80;"></i>
+            <span>Taskly Cookie</span>
             <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
           </button>
           <button class="nav-item nav-sub" data-view="view-tg-paygopool" title="PayGo Create Inst (Cookies) — pooled IG drain (no Meta, reuses an existing IG account)">
@@ -330,6 +339,11 @@
           <div id="tg-taskly2fa-root"></div>
         </section>
 
+        <!-- ================= VIEW: TASKLY COOKIE (POOL DRAIN) ================= -->
+        <section id="view-tg-tasklycookie" class="view-panel" aria-label="Taskly Cookie pool drain">
+          <div id="tg-tasklycookie-root"></div>
+        </section>
+
         <!-- ================= VIEW: FASTPAY 2FA (POOL DRAIN) ================= -->
         <section id="view-tg-fastpay2fa" class="view-panel" aria-label="FastPay 2FA pool drain">
           <div id="tg-fastpay2fa-root"></div>
@@ -338,6 +352,11 @@
         <!-- ================= VIEW: PAYGO POOL (POOL DRAIN) ================= -->
         <section id="view-tg-paygopool" class="view-panel" aria-label="PayGo Cookie drain">
           <div id="tg-paygopool-root"></div>
+        </section>
+
+        <!-- ================= VIEW: PAYGO COOKIE (CLASSIC, Meta → IG) ================= -->
+        <section id="view-tg-paygocookie" class="view-panel" aria-label="PayGo Cookie classic">
+          <div id="tg-paygocookie-root"></div>
         </section>
 
         <!-- ================= VIEW: PAYGO 2FA (POOL DRAIN) ================= -->
@@ -738,8 +757,10 @@
        disagreed with the pool card). Bump these when shipping JS changes. -->
   <script src="js/nova-tg.js?v=16" defer></script>
   <script src="js/nova-taskly2fa.js?v=7" defer></script>
+  <script src="js/nova-tasklycookie.js?v=1" defer></script>
   <script src="js/nova-fastpay2fa.js?v=4" defer></script>
   <script src="js/nova-paygopool.js?v=6" defer></script>
+  <script src="js/nova-paygocookie.js?v=1" defer></script>
   <script src="js/nova-paygo2fa.js?v=3" defer></script>
   <script src="js/nova-igcheck.js?v=1" defer></script>
   <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:

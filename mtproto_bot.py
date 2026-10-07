@@ -97,6 +97,22 @@ _REGISTER_LABELS = ("account registered", "register", "register account",
                     "confirm registration", "confirm", "done")
 _REGISTER_BAD = ("cancel", "back", "return", "menu", "stop", "balance")
 
+
+def _is_subscription_confirm(text) -> bool:
+    """True for the bot's mandatory 5-subscription affirmative key.
+
+    PayGo's cookie task asks "Did you make 5 subscriptions after registration?
+    This is mandatory, otherwise your report will be rejected!" and offers a key
+    like "✅ Yes, I made 5 subscriptions". Matches the subscription wording or a
+    Yes/I-made-5 phrasing (NFKC-normalized via ``_norm_btn``).
+    """
+    n = _norm_btn(text)
+    if not n:
+        return False
+    return ("subscription" in n
+            or ("yes" in n and "5" in n)
+            or ("made" in n and "5" in n))
+
 # A task is LIVE (mid-flight) while the newest bot text contains one of these.
 # reset_to_main_menu / cancel_task must NEVER send Cancel here — observed
 # 2026-10-03/04: Cancel tapped into a cookie prompt, a 2FA-key prompt, or a
@@ -1366,16 +1382,12 @@ class MtprotoTasklyBot:
         return {"first_name": "", "login": "", "password": ""}
 
     def submit_2fa_key(self, key, allow_local_fallback=True):
-        clean = str(key or "").strip()
-        # Fail-safe: if 'Get code' is still on the keyboard, click it to advance Taskly's state
-        try:
-            btns, _msg = self._buttons(limit=10)
-        except Exception:
-            btns = []
-        hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
-        if hit:
-            self.log(f"[tg] '{hit}' button still on keyboard — tapping it and submitting 2FA key immediately…")
-            self._send(hit)
+        clean = re.sub(r"[^A-Za-z2-7]", "", str(key or "")).upper()
+        # Fail-safe: check if task is already canceled or timed out
+        last_t = (self._last_text() or "").lower()
+        if any(c in last_t for c in ("time's up", "time’s up", "action cancelled", "action canceled", "task cancelled", "task canceled")):
+            self.log(f"[tg] ⚠️ Bot already reported expired/cancelled ('{last_t[:60]}') — aborting 2FA submit.")
+            raise RuntimeError(f"bot_task_expired: {last_t[:60]}")
 
         before_id = self._last_id()
         self._send(clean)
@@ -1390,6 +1402,9 @@ class MtprotoTasklyBot:
                     continue
                 txt = (getattr(m, "text", "") or "")
                 txt = txt.replace("`", "")  # Markdown code ticks (see start_task)
+                if any(c in txt.lower() for c in ("time's up", "time’s up", "action cancelled", "action canceled", "task cancelled", "task canceled")):
+                    self.log(f"[tg] ⚠️ Bot task cancelled during 2FA wait: {txt[:80]}")
+                    raise RuntimeError(f"bot_task_expired: {txt[:80]}")
                 mm = (re.search(r"(?:code|your one-time code)[:\s]*(\d{6})", txt, re.I)
                       or re.search(r"\b(\d{6})\b", txt))
                 if mm:
@@ -1500,6 +1515,49 @@ class MtprotoTasklyBot:
         self.log("[tg] ❌ bot sent no email code in time")
         return ""
 
+    def press_get_code(self, wait: float = 6.0):
+        """Press 📥 Get code to advance the bot past its email step.
+
+        PayGo/Taskly's "Create Inst (2FA)" task prompts "press the button to get
+        the code" for the bot-issued email, and only opens the "send the 2FA
+        Key" prompt AFTER that press. When Instagram reports the email is
+        ALREADY linked, ``ig_link_email_to_instagram`` never calls the code
+        fetcher — so without this the bot stays parked on the email step and the
+        later ``submit_2fa_key`` gets no one-time code back ("Telegram bot did
+        not return a one-time code"). Presses the key and returns the bot's
+        first reply (a fresh 6-digit code when one is issued, else the ack text
+        like "already linked", else "").
+        """
+        try:
+            btns, _ = self._buttons(limit=10)
+        except Exception:
+            btns = []
+        hit = next((b for b in btns or [] if "get code" in _norm_btn(b)), None)
+        if not hit:
+            self.log("[tg] Get-code key not visible — nothing to advance.")
+            return ""
+        before_id = self._last_id()
+        self._send(hit)
+        self.log(f"[tg] pressed '{hit}' to advance the email step…")
+        end = time.time() + max(2.0, float(wait or 0))
+        reply = ""
+        while time.time() < end:
+            time.sleep(0.5)
+            new = ""
+            for m in self._messages(limit=4):
+                if getattr(m, "out", False):
+                    continue
+                if int(getattr(m, "id", 0) or 0) <= int(before_id or 0):
+                    continue
+                t = (getattr(m, "text", "") or "").replace("`", "").strip()
+                if t:
+                    new = t
+            if new:
+                reply = new
+                break
+        self.log(f"[tg] Get-code advance reply: {reply[:80] or '(none yet)'}")
+        return reply
+
     def _wait_for_cookie_prompt(self, timeout: float = 60.0) -> bool:
         """Wait until the bot explicitly asks for the account cookie.
 
@@ -1511,14 +1569,17 @@ class MtprotoTasklyBot:
         """
         deadline = time.time() + max(5.0, timeout)
         while time.time() < deadline:
-            for m in self._messages(limit=4):
+            for m in self._messages(limit=8):
                 if getattr(m, "out", False):
                     continue
                 t = (getattr(m, "text", "") or "").lower()
                 if ("send the account cookie" in t
+                        or "account cookie" in t
+                        or "send the cookie" in t
                         or "please send the cookie" in t
                         or "please send your cookie" in t
-                        or "please send cookies" in t):
+                        or "please send cookies" in t
+                        or ("send" in t and "cookie" in t)):
                     return True
             # A "send … cookie" reply key also means the prompt is up. Require
             # BOTH words so the task menu button "📱 Create Inst (Cookies)"
@@ -1556,8 +1617,11 @@ class MtprotoTasklyBot:
         # order — this is what the pool path hit (rename is ~0.4s, the prompt
         # had not arrived yet).
         if not self._wait_for_cookie_prompt(timeout=max(60.0, timeout)):
-            self.log("[tg] 'Please send the account Cookie' prompt not seen — NOT sending.")
-            return False, "cookie prompt never appeared — not sent"
+            # Detection can miss the prompt (message window / edited message /
+            # emoji). At this point the bot IS waiting for the cookie, so SEND it
+            # anyway — never abort a live task just because the prompt text
+            # wasn't matched (this is what made the pool cancel instead of submit).
+            self.log("[tg] 'Please send the account Cookie' prompt not seen — sending the cookie anyway (best-effort).")
         before_id = self._last_id()
         self._send(clean)
         self.log(f"[tg] Cookie submitted to {self.bot_name} ({len(clean)} chars); waiting for verdict…")
@@ -1575,6 +1639,13 @@ class MtprotoTasklyBot:
                     continue
                 reply = txt
                 low = txt.lower()
+                # NEW PayGo cookie protocol (2026-10-07): AFTER the cookie the bot
+                # asks "Did you make 5 subscriptions after registration? …" and
+                # only accepts the report once the affirmative key is tapped.
+                # Treat it as cookie-accepted so mark_registered() taps "Yes".
+                if "subscription" in low and ("5" in low or "made" in low or "did you" in low):
+                    self.log(f"[tg] cookie accepted → bot asks the 5-subscription confirmation: {txt[:120]}")
+                    return True, txt
                 if any(k in low for k in ("too short", "invalid cookie", "incorrect",
                                           "wrong", "rejected", "send the account cookie")) \
                         and "confirm registration" not in low:
@@ -1626,6 +1697,14 @@ class MtprotoTasklyBot:
             pick = next((b for b in btns
                          if ("regist" in _norm_btn(b) or "confirm" in _norm_btn(b))
                          and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
+        # 2b. NEW: PayGo's mandatory 5-subscription confirmation ("Did you make 5
+        #     subscriptions after registration? …"). The affirmative key is not a
+        #     register key, so match it explicitly; after it the bot replies
+        #     "Your report has been received".
+        if not pick:
+            pick = next((b for b in btns
+                         if _is_subscription_confirm(b)
+                         and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
         # 3. Inline button fallback.
         inline_pick = None
         if not pick:
@@ -1633,7 +1712,7 @@ class MtprotoTasklyBot:
                 low = (t or "").lower()
                 if any(x in low for x in _REGISTER_BAD):
                     continue
-                if "regist" in low or "confirm" in low:
+                if "regist" in low or "confirm" in low or _is_subscription_confirm(t):
                     inline_pick = row
                     break
         if not pick and inline_pick is None:
@@ -1877,6 +1956,9 @@ class MtprotoPooledBot:
 
     def request_email_code(self, timeout=45.0):
         return self._call("request_email_code", timeout=timeout)
+
+    def press_get_code(self, wait=6.0):
+        return self._call("press_get_code", wait=wait)
 
     def submit_cookie(self, cookie, timeout=20.0):
         return self._call("submit_cookie", cookie, timeout=timeout)

@@ -704,24 +704,16 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             #     Try to link it, but NEVER let it burn the bot window: on
             #     miss/fail continue to the 2FA submit regardless (worst case the
             #     registration still pays).
-            # Parked-seed fast path: this account's 2FA secret is already known,
-            # so the key can jump the queue the instant the email code lands —
-            # no need to wait for the email-confirm UI + 2FA setup nav first.
-            parked_early = (pool_acc.get("twofa_secret") or "").strip()
-            early = {"otp": None}
+            _get_code_pressed = {"v": False}
 
-            def _fetch_and_fast_submit():
+            def _fetch_bot_email_code():
+                _get_code_pressed["v"] = True
+                log(slot_id, f"[tg] Requesting email verification code from {bot_id} (📥 Get code)…")
                 code = bot.request_email_code(timeout=60)
-                if code and parked_early and not early["otp"]:
-                    try:
-                        otp = bot.submit_2fa_key(parked_early, allow_local_fallback=False)
-                    except Exception as exc:
-                        otp = None
-                        log(slot_id, f"[⚠️] Early 2FA submit missed ({exc}) — normal path will retry.")
-                    if otp:
-                        early["otp"] = otp
-                        log(slot_id, "[⚡] Parked 2FA key submitted early (email code in hand) — "
-                                     "OTP captured before email confirm.")
+                if code:
+                    log(slot_id, f"[tg] Received email confirmation code from {bot_id}: {code}")
+                else:
+                    log(slot_id, f"[tg] No email code received from {bot_id} within timeout.")
                 return code
 
             bot_em = (runner.tg_creds or {}).get("email")
@@ -746,7 +738,7 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                 _em_t0 = _time.time()
                 try:
                     linked = runner.ig_link_email_to_instagram(
-                        bot_em, code_fetcher=_fetch_and_fast_submit)
+                        bot_em, code_fetcher=_fetch_bot_email_code)
                 except IGDeadEnd as exc:
                     linked = False
                     log(slot_id, f"[⚠️] Bot email rejected ({exc}) — continuing to 2FA.")
@@ -772,6 +764,24 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             else:
                 log(slot_id, "[✉️] No bot-issued email provided in task credentials — skipping email link step.")
 
+            # The bot's 2FA task only opens its "send the 2FA Key" prompt AFTER
+            # 📥 Get code is pressed for the bot-issued email. When IG reports
+            # that email is ALREADY linked/in use (the common pool case),
+            # ig_link_email_to_instagram never calls the code fetcher above — so
+            # the press never happened and submit_2fa_key later came back with no
+            # one-time code ("Telegram bot did not return a one-time code",
+            # observed 2026-10-07). Always advance the bot past the email step
+            # before the 2FA submit; the bot answers "already linked" and moves on.
+            if not _get_code_pressed["v"]:
+                try:
+                    _adv = getattr(bot, "press_get_code", None)
+                    if callable(_adv):
+                        _adv()
+                    elif bot_em and callable(getattr(bot, "request_email_code", None)):
+                        bot.request_email_code(timeout=10)
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] Get-code advance failed ({exc}) — continuing to 2FA.")
+
             # (2) 2FA SECOND — setup + submit the key so the bot issues the one-time
             #     code, then confirm it on IG. Runs right after email: whichever
             #     of 2FA/password runs first pays the one AC email-OTP challenge
@@ -786,23 +796,16 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
 
             emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                         "detail": f"2FA setup on pooled IG account ({login})…"})
-            if parked_early and early["otp"]:
-                # Already submitted during the email step — skip the whole AC
-                # 2FA nav (20-40s) and the IG confirm (nothing to confirm).
-                secret = parked_early
-                _2fa_already_on = True
-                log(slot_id, "[🔐] 2FA key submitted early — skipping 2FA setup nav entirely.")
-            else:
-                try:
-                    secret = runner.ig_2fa_begin()
-                except IGDeadEnd as exc:
-                    # Genuine dead end (login wall / logged-out / checkpoint): REMOVE
-                    # it from the pool so it is never re-claimed. The bot username is
-                    # now taken by this account, so fail this cycle — the slot retries
-                    # with a fresh PayGo task/login.
-                    _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
-                    pool_acc = None
-                    raise RuntimeError(f"IG dead end after rename ({exc})")
+            try:
+                secret = runner.ig_2fa_begin()
+            except IGDeadEnd as exc:
+                # Genuine dead end (login wall / logged-out / checkpoint): REMOVE
+                # it from the pool so it is never re-claimed. The bot username is
+                # now taken by this account, so fail this cycle — the slot retries
+                # with a fresh PayGo task/login.
+                _purge_pool_account(store, pool_acc, log, slot_id, emit_event, f"dead end after rename ({exc})")
+                pool_acc = None
+                raise RuntimeError(f"IG dead end after rename ({exc})")
             # 2FA ALREADY ON (account created with the Meta Creator 2FA toggle):
             # ig_2fa_begin returns None because there is no setup dialog, but the
             # seed was parked on the record. Mirror core/lifecycle's "2FA already
@@ -835,15 +838,10 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             raise RuntimeError("Could not reach 2FA setup on any pooled IG account")
 
         acc_id = pool_acc["id"]
-        if early["otp"]:
-            # Key went out during the email step; OTP already captured there.
-            code = early["otp"]
-            log(slot_id, "[🔑] Using early-submitted 2FA OTP — no second submit.")
-        else:
-            log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
-            code = bot.submit_2fa_key(secret, allow_local_fallback=False)
-            if not code:
-                raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
+        log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
+        code = bot.submit_2fa_key(secret, allow_local_fallback=False)
+        if not code:
+            raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
         if _2fa_already_on:
             # 2FA was already enabled with the parked seed — there is no IG setup
             # dialog to confirm. The bot holds the key and derived the code; we

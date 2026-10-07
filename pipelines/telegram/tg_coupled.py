@@ -427,12 +427,18 @@ def run_tg_coupled_cycle(
         def _step_email_link():
             bot_em = (runner.tg_creds or {}).get("email")
             _require_window("email link")
+            _get_code_touched = {"v": False}
+
+            def _fetch_code():
+                _get_code_touched["v"] = True
+                return bot.request_email_code(timeout=45)
+
             if bot_em:
                 runner.log(f"[✉️] Bot-issued email {bot_em} present — linking via bot code fetcher (📥 Get code)…")
                 try:
                     linked = runner.ig_link_email_to_instagram(
                         bot_em,
-                        code_fetcher=lambda: bot.request_email_code(timeout=45),
+                        code_fetcher=_fetch_code,
                     )
                 except IGDeadEnd as exc:
                     log(f"[⚠️] Bot email rejected ({exc}) — proceeding to 2FA anyway.")
@@ -441,6 +447,21 @@ def run_tg_coupled_cycle(
                     linked = False
                     log(f"[⚠️] Bot email linkage error ({exc}) — continuing.")
                 runner.log(f"[✉️] Bot email linkage result: {linked}")
+                # The bot's 2FA task only opens its "send the 2FA Key" prompt
+                # AFTER 📥 Get code is pressed. When IG reports the bot-issued
+                # email is ALREADY linked (the common case), the email-linking
+                # helper returns without ever calling the code fetcher, so the
+                # bot stays parked on the email step and _step_2fa's
+                # submit_2fa_key gets no one-time code back. Advance it here.
+                if not _get_code_touched["v"]:
+                    try:
+                        _adv = getattr(bot, "press_get_code", None)
+                        if callable(_adv):
+                            _adv()
+                        elif callable(getattr(bot, "request_email_code", None)):
+                            bot.request_email_code(timeout=10)
+                    except Exception as exc:
+                        runner.log(f"[⚠️] Get-code advance failed ({exc}) — continuing to 2FA.")
             elif add_email:
                 runner.log("[✉️] Extra-email requested (no bot email) — deferring email link to extra_email.")
             else:

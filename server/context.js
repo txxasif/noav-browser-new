@@ -422,8 +422,10 @@ function routeOf(eng, cfg) {
     const bot = (cfg && cfg.tg_bot) || 'taskly';
     const task = String((cfg && cfg.tg_task) || '');
     if (bot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(task)) return 'taskly2fa';
+    if (bot === 'taskly' && /taskly cookie/i.test(task)) return 'tasklycookie';
     if (bot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(task)) return 'fastpay2fa';
     if (bot === 'paygo' && /paygo\s*2fa/i.test(task)) return 'paygo2fa';
+    if (bot === 'paygo' && /paygo cookie/i.test(task)) return 'paygocookie';
     if (bot === 'paygo' && cfg && cfg.use_ig_pool) return 'paygo_pool';
     return bot || 'tg';
   }

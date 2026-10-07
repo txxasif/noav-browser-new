@@ -165,8 +165,9 @@ MODULE_SERVER_FILES = {
 MODULE_PUBLIC_JS = {
     "ig": ["public/js/nova-igcheck.js"],
     "tg": ["public/js/nova-tg.js", "public/js/nova-taskly2fa.js",
+           "public/js/nova-tasklycookie.js",
            "public/js/nova-fastpay2fa.js", "public/js/nova-paygopool.js",
-           "public/js/nova-paygo2fa.js",
+           "public/js/nova-paygocookie.js", "public/js/nova-paygo2fa.js",
            "public/js/nova-manager.js", "public/js/nova-fastpay.js"],
 }
 # Per-bot root runners (only when tg ships AND the bot is selected).
@@ -179,21 +180,22 @@ BOT_ROOT_FILES = {
 # Per-bot dashboard scripts + dashboard view-panel ids (nav uses data-bot /
 # the same data-view, stripped together).
 BOT_PUBLIC_JS = {
-    "taskly": ["public/js/nova-taskly2fa.js"],
-    "paygo": ["public/js/nova-paygopool.js", "public/js/nova-paygo2fa.js"],
+    "taskly": ["public/js/nova-taskly2fa.js", "public/js/nova-tasklycookie.js"],
+    "paygo": ["public/js/nova-paygopool.js", "public/js/nova-paygocookie.js",
+              "public/js/nova-paygo2fa.js"],
     "fastpay": ["public/js/nova-fastpay2fa.js"],
 }
 BOT_VIEWS = {
-    "taskly": ["view-tg-taskly2fa"],
-    "paygo": ["view-tg-paygopool", "view-tg-paygo2fa"],
+    "taskly": ["view-tg-taskly2fa", "view-tg-tasklycookie"],
+    "paygo": ["view-tg-paygopool", "view-tg-paygocookie", "view-tg-paygo2fa"],
     "fastpay": ["view-tg-fastpay2fa"],
 }
 # Dashboard views removed wholesale when the module is excluded.
 MODULE_VIEWS = {
     "ig": ["view-ig-creator", "view-ig-checker"],
-    "tg": ["view-tg-classic", "view-tg-taskly2fa", "view-tg-fastpay2fa",
-           "view-tg-paygopool", "view-tg-paygo2fa",
-           "view-tg-manager", "view-guide"],
+    "tg": ["view-tg-classic", "view-tg-taskly2fa", "view-tg-tasklycookie",
+           "view-tg-fastpay2fa", "view-tg-paygopool", "view-tg-paygocookie",
+           "view-tg-paygo2fa", "view-tg-manager", "view-guide"],
 }
 
 
