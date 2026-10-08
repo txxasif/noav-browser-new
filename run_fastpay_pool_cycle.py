@@ -43,12 +43,17 @@ from tg_accounts import tg_manager  # noqa: E402
 from run_cookie_cycle import (  # noqa: E402
     change_ig_username_fast,
     _is_account_dead_error,
+    _is_ig_checkpoint_error,
+    _IG_CHECKPOINT_STOP,
+    _IG_CHALLENGE_COOLDOWN,
+    _ig_challenge_until,
+    _trip_challenge_backoff,
     _all_flooded_until,
     _sleep_until,
     _ig_spam_streak,
     _IG_SPAM_STOP,
 )
-from run_pool_2fa_cycle import (  # noqa: E402
+from pool_common import (  # noqa: E402
     _cookies_for_playwright,
     _purge_pool_account,
     _browser_logged_in,
@@ -102,6 +107,15 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
 
     if _stopped():
         return False, "stopped"
+
+    # IP-level rename challenge cooldown — check BEFORE leasing/Start so a parked
+    # slot does NOT burn a bot task window (see run_cookie_cycle).
+    if time.time() < _ig_challenge_until[0]:
+        _remain = int(_ig_challenge_until[0] - time.time())
+        log(slot_id, f"[pool] IG rename CHALLENGE cooldown — parking {min(_remain, 60)}s "
+                     f"before leasing (accounts stay safe in the pool).")
+        _sleep_until(time.time() + max(1, min(_remain, 60)), stop_event)
+        return False, "ig_challenge_cooldown"
 
     # Reclaim submittals abandoned by an abrupt stop BEFORE the pool-empty
     # gate — otherwise stuck claims make the pool look empty and the drain
@@ -268,6 +282,24 @@ def run_fastpay_pool_cycle_once(slot_id=94, worker_factory=None, is_headless=Fal
                     log(slot_id, f"✅ [api] IG username updated to '{login}' in ~0.4s ({name_msg})")
                     clog(f"⚡ [username] Updated Instagram username: '{cand_user}' -> '{login}' (in 0.4s)")
                     break
+                if _is_ig_checkpoint_error(name_msg):
+                    _ig_spam_streak[0] += 1
+                    try:
+                        store.mark_ig_creator_challenged(cand_id)
+                    except Exception:
+                        pass
+                    emit_event({"type": "accounts_updated"})
+                    if _IG_CHECKPOINT_STOP > 0 and _ig_spam_streak[0] >= _IG_CHECKPOINT_STOP:
+                        _ig_spam_streak[0] = 0
+                        _cd = _trip_challenge_backoff()
+                        raise RuntimeError(
+                            f"IG rename CHALLENGED on {_IG_CHECKPOINT_STOP} consecutive accounts "
+                            f"({name_msg[:60]}) — IP-level checkpoint; pausing the drain "
+                            f"{_cd}s (accounts restored, none purged).")
+                    log(slot_id, f"⚠️ [pool] Rename CHALLENGED ({name_msg[:80]}) — RESTORING "
+                                 f"account (NOT purging) [{_ig_spam_streak[0]}/{_IG_CHECKPOINT_STOP}].")
+                    pool_acc = None
+                    continue
                 if _is_account_dead_error(name_msg):
                     _purge_pool_account(store, cand, log, slot_id, emit_event, f"dead/banned ({name_msg})")
                     continue

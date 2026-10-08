@@ -73,7 +73,7 @@ COLUMNS = [
     "nitro_device", "nitro_submitted", "nitro_submitted_at",
     "coinsta_device", "coinsta_submitted", "coinsta_submitted_at",
     "dob", "mail_provider", "created_at", "claimed_at", "attempts", "platform", "cookies",
-    "fastpay_paid", "fastpay_paid_at", "followed", "extra"
+    "fastpay_paid", "fastpay_paid_at", "followed", "challenged_at", "extra"
 ]
 
 
@@ -161,6 +161,13 @@ def init_db() -> None:
         conn.execute("ALTER TABLE accounts ADD COLUMN followed INTEGER DEFAULT 0;")
     except Exception:
         pass
+    # Rename-challenge stamp: when IG answers a rename with "checkpoint_required"
+    # the account is set aside (NOT purged) and pop_ig_creator_account skips it
+    # until this timestamp + the retry window. Prevents churning the whole pool.
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN challenged_at REAL;")
+    except Exception:
+        pass
     # Index after the columns exist (safe on both fresh and migrated tables).
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_acc_pending_coinsta ON accounts(target, status, coinsta_submitted);")
@@ -210,8 +217,15 @@ def row_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
 
     for k, v in d.items():
         if k in COLUMNS and k != "extra":
-            if k in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid", "followed"):
+            if k in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid"):
                 row[k] = 1 if v else 0
+            elif k in ("attempts", "followed"):
+                # `followed` is a COUNT (5 = followed five), not a flag — it was
+                # collapsed to 0/1 here, so every account read back as "had 1/5".
+                try:
+                    row[k] = int(v) if v is not None else 0
+                except (TypeError, ValueError):
+                    row[k] = 0
             elif k == "attempts":
                 row[k] = int(v) if v is not None else 0
             elif k == "claimed_at":
@@ -224,7 +238,7 @@ def row_from_dict(d: Dict[str, Any]) -> Dict[str, Any]:
 
     for col in COLUMNS:
         if col not in row and col != "extra":
-            if col in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid", "attempts"):
+            if col in ("tg_submitted", "nitro_submitted", "coinsta_submitted", "fastpay_paid", "attempts", "followed"):
                 row[col] = 0
             else:
                 row[col] = None

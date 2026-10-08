@@ -19,6 +19,11 @@ from ai_config import ACCOUNTS_CSV, ACCOUNTS_JSON, ACCOUNTS_TXT, AI_DIR, DATA_DI
 import db  # noqa: E402
 
 _lock = threading.Lock()
+
+# A checkpoint-challenged rename is set aside for this long before it is retried
+# (see mark_ig_creator_challenged). A per-account challenge usually clears once
+# IG is satisfied; 30 min keeps the drain from churning the same accounts.
+_CHALLENGE_RETRY_SEC = int(os.environ.get("INSTA_IG_CHALLENGE_RETRY_SEC", "1800") or 1800)
 CLAIM_TIMEOUT = 600  # a Submitting claim older than this is considered stale
 MAX_SUBMIT_ATTEMPTS = 3
 
@@ -258,8 +263,15 @@ def pop_pending(destination: str = "telegram") -> Optional[Dict[str, Any]]:
 
 
 def count_ig_creator_accounts() -> int:
-    """Return count of available IG creator accounts with cookies in the pool."""
+    """Return count of available IG creator accounts with cookies in the pool.
+
+    Applies the SAME filters as ``pop_ig_creator_account`` — including the
+    rename-challenge set-aside — so the two never disagree. (They did: the count
+    reported "445 available" while pop returned none because every account was
+    challenge-stamped, which made the drain log a false pool size and churn.)
+    """
     conn = db.get_connection()
+    _challenge_cutoff = time.time() - _CHALLENGE_RETRY_SEC
     cur = conn.cursor()
     cur.execute(
         """
@@ -267,7 +279,9 @@ def count_ig_creator_accounts() -> int:
         WHERE platform = 'Meta+Instagram'
           AND cookies IS NOT NULL AND cookies != ''
           AND (status = 'Created' OR status IS NULL)
-        """
+          AND (challenged_at IS NULL OR challenged_at < ?)
+        """,
+        (_challenge_cutoff,)
     )
     row = cur.fetchone()
     return row[0] if row else 0
@@ -284,6 +298,7 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
         pass
     conn = db.get_connection()
     now = time.time()
+    _challenge_cutoff = now - _CHALLENGE_RETRY_SEC
     with _lock:
         with conn:
             cur = conn.execute(
@@ -292,12 +307,19 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
                 WHERE platform = 'Meta+Instagram'
                   AND cookies IS NOT NULL AND cookies != ''
                   AND (status = 'Created' OR status IS NULL)
-                -- ROTATION: never-claimed accounts first (claimed_at NULL), then
-                -- previously-claimed/failed ones. Without this a failed account
-                -- (restored with its claimed_at kept) stays the newest and is
-                -- re-popped in a tight loop, which IG flags as spam.
-                ORDER BY (claimed_at IS NULL) DESC, created_at DESC, rowid DESC LIMIT 1
-                """
+                  AND (challenged_at IS NULL OR challenged_at < ?)
+                -- FRESHEST FIRST. The IG Creator's accounts are only viable for
+                -- ~1h before IG suspends them, so the drain must consume the
+                -- NEWEST ones while they are still alive. Ordering by claimed_at
+                -- (least-recently-claimed) made it walk the OLDEST first — i.e.
+                -- straight into accounts that were already suspended (observed
+                -- 2026-10-08: a whole run purging dead accounts while fresh live
+                -- ones sat untouched at the back). Recently-challenged accounts
+                -- are already excluded by challenged_at, and locked ones are
+                -- purged, so newest-first cannot tight-loop.
+                ORDER BY created_at DESC, rowid DESC LIMIT 1
+                """,
+                (_challenge_cutoff,)
             )
             row = cur.fetchone()
             if not row:
@@ -313,6 +335,85 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
             return res
 
 
+_META_LIST_WHERE = """
+        platform = 'Meta'
+        AND status = 'MetaCreated'
+        AND email IS NOT NULL AND email != ''
+        AND (COALESCE(NULLIF(meta_password, ''), NULLIF(password, '')) IS NOT NULL)
+        AND (challenged_at IS NULL OR challenged_at < ?)
+"""
+
+
+def count_meta_list_accounts() -> int:
+    """Meta Creator accounts (no IG session yet) that the Meta-list source can drain.
+
+    Same challenge set-aside as the IG pool, so count and pop never disagree.
+    """
+    conn = db.get_connection()
+    cutoff = time.time() - _CHALLENGE_RETRY_SEC
+    cur = conn.execute(f"SELECT COUNT(*) FROM accounts WHERE {_META_LIST_WHERE}", (cutoff,))
+    row = cur.fetchone()
+    return row[0] if row else 0
+
+
+def pop_meta_list_account() -> Optional[Dict[str, Any]]:
+    """Atomically claim the OLDEST usable Meta-list account.
+
+    Oldest first (opposite of the IG pool): a Meta account is not time-limited
+    by an IG suspension clock — it has no IG profile yet — so FIFO keeps the
+    list draining evenly. Claims as ``Submitting_MetaCookie`` so a killed cycle
+    is reclaimed by ``recover_stale_submitting`` back to ``MetaCreated``.
+    """
+    try:
+        recover_stale_submitting()
+    except Exception:
+        pass
+    conn = db.get_connection()
+    now = time.time()
+    with _lock:
+        with conn:
+            cur = conn.execute(
+                f"SELECT id FROM accounts WHERE {_META_LIST_WHERE} "
+                "ORDER BY created_at ASC, rowid ASC LIMIT 1",
+                (now - _CHALLENGE_RETRY_SEC,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return None
+            rec_id = row[0]
+            conn.execute(
+                "UPDATE accounts SET status = 'Submitting_MetaCookie', claimed_at = ? WHERE id = ?",
+                (now, rec_id)
+            )
+            cur = conn.execute("SELECT * FROM accounts WHERE id = ? LIMIT 1", (rec_id,))
+            res = db.dict_from_row(cur.fetchone())
+        sync_files()
+        return res
+
+
+def mark_meta_list_challenged(rec_id: str) -> None:
+    """Set a Meta-list account aside after an IG login challenge (NOT a purge).
+
+    Back to ``MetaCreated`` but stamped ``challenged_at`` so the pop skips it
+    for ``INSTA_IG_CHALLENGE_RETRY_SEC`` — the account is not dead, IG just
+    wants more than a password from this fresh device.
+    """
+    conn = db.get_connection()
+    now = time.time()
+    with _lock:
+        with conn:
+            row = conn.execute("SELECT attempts FROM accounts WHERE id = ?", (rec_id,)).fetchone()
+            attempts = int((row[0] if row else 0) or 0) + 1
+            # Bounded: an account that keeps failing at IG login stops being
+            # offered (same cap as stale claims) instead of looping forever.
+            status = "Failed" if attempts >= MAX_SUBMIT_ATTEMPTS else "MetaCreated"
+            conn.execute(
+                "UPDATE accounts SET status = ?, attempts = ?, claimed_at = ?, challenged_at = ? WHERE id = ?",
+                (status, attempts, now, now, rec_id)
+            )
+        sync_files()
+
+
 def restore_ig_creator_account(rec_id: str, rotate: bool = False) -> None:
     """Restore an account's status to 'Created' if drain cycle was aborted.
 
@@ -324,16 +425,92 @@ def restore_ig_creator_account(rec_id: str, rotate: bool = False) -> None:
     conn = db.get_connection()
     with _lock:
         with conn:
+            # A Meta-LIST account (platform 'Meta', no IG session yet) must go
+            # back to 'MetaCreated' — 'Created' would drop it out of the Meta
+            # list pool (pop_meta_list_account filters on MetaCreated).
             if rotate:
                 conn.execute(
-                    "UPDATE accounts SET status = 'Created' WHERE id = ?",
+                    "UPDATE accounts SET status = CASE WHEN platform = 'Meta' "
+                    "THEN 'MetaCreated' ELSE 'Created' END WHERE id = ?",
                     (rec_id,)
                 )
             else:
                 conn.execute(
-                    "UPDATE accounts SET status = 'Created', claimed_at = NULL WHERE id = ?",
+                    "UPDATE accounts SET status = CASE WHEN platform = 'Meta' "
+                    "THEN 'MetaCreated' ELSE 'Created' END, claimed_at = NULL WHERE id = ?",
                     (rec_id,)
                 )
+        sync_files()
+
+
+def peek_pool_accounts(limit: int = 6) -> list:
+    """Return up to ``limit`` NEWEST pooled IG accounts WITHOUT claiming them.
+
+    Read-only — for the pre-flight health probe (never mutates status).
+    """
+    conn = db.get_connection()
+    cutoff = time.time() - _CHALLENGE_RETRY_SEC
+    cur = conn.execute(
+        """
+        SELECT * FROM accounts
+        WHERE platform = 'Meta+Instagram'
+          AND cookies IS NOT NULL AND cookies != ''
+          AND (status = 'Created' OR status IS NULL)
+          AND (challenged_at IS NULL OR challenged_at < ?)
+        ORDER BY created_at DESC, rowid DESC LIMIT ?
+        """,
+        (cutoff, int(limit)),
+    )
+    return [db.dict_from_row(r) for r in cur.fetchall()]
+
+
+def purge_dead_sessions() -> int:
+    """Delete pooled IG accounts whose stored cookie has NO ``sessionid``.
+
+    A suspended/invalidated IG session loses its ``sessionid`` (``ds_user_id``,
+    ``mid``, ``datr`` … survive). Such an account can never log in — the browser
+    follow then fails with "no IG sessionid after follow". Purging them up front
+    is INSTANT (a DB-only test, no network, no TG lease, no bot Start) and stops
+    the drain from burning a whole bot task on an account that is already dead.
+
+    Returns the number of rows deleted.
+    """
+    conn = db.get_connection()
+    n = 0
+    with _lock:
+        with conn:
+            cur = conn.execute(
+                """
+                DELETE FROM accounts
+                WHERE platform = 'Meta+Instagram'
+                  AND (status = 'Created' OR status IS NULL)
+                  AND (cookies IS NULL OR cookies = '' OR cookies NOT LIKE '%sessionid=%')
+                """
+            )
+            n = cur.rowcount or 0
+        if n:
+            sync_files()
+    return n
+
+
+def mark_ig_creator_challenged(rec_id: str) -> None:
+    """Set a rename-CHALLENGED account aside WITHOUT purging it.
+
+    A ``checkpoint_required`` rename is a PER-ACCOUNT challenge (proven: renames
+    on other accounts succeed in the same run), not death. The account is
+    restored to the pool but stamped ``challenged_at`` so
+    ``pop_ig_creator_account`` skips it for ``INSTA_IG_CHALLENGE_RETRY_SEC``.
+    Without the stamp the drain churns the entire pool in one pass, re-trying
+    accounts IG is already challenging.
+    """
+    conn = db.get_connection()
+    now = time.time()
+    with _lock:
+        with conn:
+            conn.execute(
+                "UPDATE accounts SET status = 'Created', claimed_at = ?, challenged_at = ? WHERE id = ?",
+                (now, now, rec_id)
+            )
         sync_files()
 
 
@@ -554,7 +731,7 @@ def recover_stale_submitting(timeout: float = CLAIM_TIMEOUT) -> int:
         with conn:
             cur = conn.execute(
                 """
-                SELECT id, attempts FROM accounts
+                SELECT id, attempts, platform FROM accounts
                 WHERE status LIKE 'Submitting%'
                   AND (claimed_at IS NULL OR (? - claimed_at) > ?)
                 """,
@@ -564,9 +741,10 @@ def recover_stale_submitting(timeout: float = CLAIM_TIMEOUT) -> int:
             if not stale:
                 return 0
 
-            for rec_id, attempts in stale:
+            for rec_id, attempts, _plat in stale:
                 new_attempts = int(attempts or 0) + 1
-                new_status = "Failed" if new_attempts >= MAX_SUBMIT_ATTEMPTS else "Created"
+                _back = "MetaCreated" if _plat == "Meta" else "Created"
+                new_status = "Failed" if new_attempts >= MAX_SUBMIT_ATTEMPTS else _back
                 conn.execute(
                     "UPDATE accounts SET status = ?, attempts = ?, claimed_at = NULL WHERE id = ?",
                     (new_status, new_attempts, rec_id)

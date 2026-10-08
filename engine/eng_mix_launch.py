@@ -24,9 +24,9 @@ try:
 except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from eng_constants import HERE, _NOVA_FLAGS  # noqa: E402
 try:
-    from .eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity, pc_mobile_identity  # noqa: E402
+    from .eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity, pc_mobile_identity, pc_mobile_models, resolve_timezone  # noqa: E402
 except ImportError:
-    from eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity, pc_mobile_identity  # noqa: E402
+    from eng_antidetect import _build_antidetect_script, _get_extension_id_from_manifest, _pin_extensions_in_profile, device_identity, pc_mobile_identity, pc_mobile_models, resolve_timezone  # noqa: E402
 try:
     from .resource_runtime import register_profile  # type: ignore
 except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
@@ -315,7 +315,7 @@ class EngineLaunchMixin:
         self.is_mobile = (os.environ.get("INSTA_DEVICE_MODE", "mobile").lower() != "desktop")
         _seed = os.path.basename(str(prof).rstrip("/")) or str(getattr(w, "slot_id", "ig"))
         _pinned = getattr(self, "device_model", None)
-        _pc_models = ("SM-S918B", "Pixel 6")
+        _pc_models = pc_mobile_models()
         pc_mode = bool(self.is_mobile and _pc_mode_enabled()
                        and (not _pinned or _pinned in _pc_models))
         if self.is_mobile:
@@ -572,7 +572,7 @@ class EngineLaunchMixin:
             launch_kwargs.update(
                 screen={"width": viewport["width"], "height": viewport["height"]},
                 locale="en-US",
-                timezone_id="America/New_York",
+                timezone_id=(self._device_ident or {}).get("timezone") or resolve_timezone(),
                 color_scheme="light",
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9",

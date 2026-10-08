@@ -60,6 +60,9 @@
           <h2>Nova Browser</h2>
           <span class="brand-badge">CREATOR ENGINE</span>
         </div>
+        <button id="sidebar-collapse-btn" class="sidebar-toggle-btn" type="button" title="Hide sidebar" aria-label="Hide sidebar">
+          <i class="fa-solid fa-angles-left"></i>
+        </button>
       </div>
 
       <nav class="sidebar-nav">
@@ -94,50 +97,77 @@
           <i class="fa-solid fa-chevron-down nav-caret"></i>
         </button>
         <div class="nav-submenu" id="tg-submenu">
-          <div class="nav-section-title">BOTS</div>
-          <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="taskly" title="Meta → Instagram → Taskly submit (2FA / No mail)">
-            <i class="fa-solid fa-bolt" style="color: #229ED9;"></i>
-            <span>Taksly Bot</span>
+          <!-- ===== Taskly ===== -->
+          <button class="nav-item nav-parent nav-parent--bot" type="button" data-bot-group="taskly" data-bot="taskly" aria-expanded="false" title="Taskly Bot — tasks">
+            <img src="img/bot_logo/taskly.png" width="16" height="16" alt="" style="border-radius:4px;object-fit:cover;flex:none;">
+            <span>Taskly</span>
+            <i class="fa-solid fa-chevron-down nav-caret"></i>
           </button>
-          <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="paygo" title="Meta → Instagram → PayGo cookie submit">
-            <i class="fa-solid fa-cookie-bite" style="color: #f59e0b;"></i>
-            <span>PayGo Bot</span>
+          <div class="nav-submenu nav-submenu--nested collapsed" data-bot-menu="taskly">
+            <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="taskly" data-task="📱 Create Inst (2FA)" title="Taskly 📱 Create Inst (2FA) — native 2FA (bot email + code)">
+              <span>📱 Create Inst (2FA)</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="taskly" data-task="🍪 Create Inst (No mail)" title="Taskly 🍪 Create Inst (No mail) — 2FA + cookie">
+              <span>🍪 Create Inst (No mail)</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="taskly" data-task="🔥 Create Inst (No mail)" title="Taskly 🔥 Create Inst (No mail) — 2FA flow">
+              <span>🔥 Create Inst (No mail)</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-taskly2fa" title="Taskly 📱 Create Inst (2FA) — pooled IG drain (no Meta)">
+              <span>📱 Create Inst (2FA)</span>
+              <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-tasklycookie" title="Taskly 🍪 Create Inst (No mail) — pooled IG drain (2FA + cookie, no Meta)">
+              <span>🍪 Create Inst (No mail)</span>
+              <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+            </button>
+          </div>
+
+          <!-- ===== PayGo ===== -->
+          <button class="nav-item nav-parent nav-parent--bot" type="button" data-bot-group="paygo" data-bot="paygo" aria-expanded="false" title="PayGo Bot — tasks">
+            <img src="img/bot_logo/paygo.png" width="16" height="16" alt="" style="border-radius:4px;object-fit:cover;flex:none;">
+            <span>PayGo</span>
+            <i class="fa-solid fa-chevron-down nav-caret"></i>
           </button>
-          <button class="nav-item nav-sub" data-view="view-tg-paygocookie" title="PayGo Create Inst (Cookies) — Meta → Instagram → 2FA → cookie submit (classic: creates the account from scratch)">
-            <i class="fa-solid fa-cookie-bite" style="color: #fbbf24;"></i>
-            <span>PayGo Cookie</span>
+          <div class="nav-submenu nav-submenu--nested collapsed" data-bot-menu="paygo">
+            <button class="nav-item nav-sub" data-view="view-tg-paygocookie" title="PayGo 📱 Create Inst (Cookies) — classic Meta → IG → 2FA → cookie">
+              <span>📱 Create Inst (Cookies)</span>
+              <span class="nav-pill nav-pill--tool" style="background:rgba(245,158,11,.15);color:#fbbf24;">CLASSIC</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="paygo" data-task="PayGo 2FA (Normal)" title="PayGo 📱 Create Inst (2FA) — normal browser (Meta → IG)">
+              <span>📱 Create Inst (2FA)</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-paygopool" title="PayGo 📱 Create Inst (Cookies) — pooled IG drain (no Meta)">
+              <span>📱 Create Inst (Cookies)</span>
+              <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-paygo2fa" title="PayGo 📱 Create Inst (2FA) — pooled IG drain (no Meta)">
+              <span>📱 Create Inst (2FA)</span>
+              <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+            </button>
+          </div>
+
+          <!-- ===== FastPay ===== -->
+          <button class="nav-item nav-parent nav-parent--bot" type="button" data-bot-group="fastpay" data-bot="fastpay" aria-expanded="false" title="FastPay Bot — tasks">
+            <img src="img/bot_logo/fastpay.png" width="16" height="16" alt="" style="border-radius:4px;object-fit:cover;flex:none;">
+            <span>FastPay</span>
+            <i class="fa-solid fa-chevron-down nav-caret"></i>
           </button>
-          <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="fastpay" title="Meta → Instagram → FastPay 2FA create + payout">
-            <i class="fa-solid fa-sack-dollar" style="color: #22c55e;"></i>
-            <span>FastPay Bot</span>
-          </button>
-          <div class="nav-section-title">POOL</div>
-          <button class="nav-item nav-sub" data-view="view-tg-taskly2fa" title="Taskly Create Inst (2FA) — pooled IG drain (no Meta, reuses an existing IG account)">
-            <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
-            <span>Taskly 2FA</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-          </button>
-          <button class="nav-item nav-sub" data-view="view-tg-tasklycookie" title="Taskly Create Inst (No mail) — pooled IG drain: rename + 2FA (stored inbox OTP) + cookie submit (no Meta, reuses an existing IG account)">
-            <i class="fa-solid fa-cookie-bite" style="color: #4ade80;"></i>
-            <span>Taskly Cookie</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-          </button>
-          <button class="nav-item nav-sub" data-view="view-tg-paygopool" title="PayGo Create Inst (Cookies) — pooled IG drain (no Meta, reuses an existing IG account)">
-            <i class="fa-solid fa-cookie-bite" style="color: #4ade80;"></i>
-            <span>PayGo Cookie</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-          </button>
-          <button class="nav-item nav-sub" data-view="view-tg-paygo2fa" title="PayGo Create Inst (2FA) — pooled IG drain (no Meta, reuses an existing IG account)">
-            <i class="fa-solid fa-shield-halved" style="color: #4ade80;"></i>
-            <span>PayGo 2FA</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-          </button>
-          <button class="nav-item nav-sub" data-view="view-tg-fastpay2fa" title="FastPay Instagram 2FA — pooled IG drain (no Meta, reuses an existing IG account)">
-            <i class="fa-solid fa-sack-dollar" style="color: #4ade80;"></i>
-            <span>FastPay 2FA</span>
-            <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-          </button>
+          <div class="nav-submenu nav-submenu--nested collapsed" data-bot-menu="fastpay">
+            <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="fastpay" data-task="Instagram 2FA" title="FastPay Instagram 2FA — create + payout">
+              <span>Instagram 2FA</span>
+            </button>
+            <button class="nav-item nav-sub" data-view="view-tg-fastpay2fa" title="FastPay Instagram 2FA — pooled IG drain (no Meta)">
+              <span>Instagram 2FA</span>
+              <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
+            </button>
+          </div>
         </div>
+        <button class="nav-item" data-view="view-tg-failover" title="Cookie Fleet — universal cookie drain: pick task, set priority, start">
+          <i class="fa-solid fa-shuffle" style="color: #4ade80;"></i>
+          <span>Cookie Fleet</span>
+          <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">AUTO</span>
+        </button>
         <button class="nav-item" data-view="view-tg-manager" title="Connect & manage Telegram accounts — lease, enable/disable, balances">
           <i class="fa-solid fa-sliders" style="color: #a78bfa;"></i>
           <span>TG Manager</span>
@@ -177,6 +207,9 @@
 
     <!-- Main Content Area -->
     <div class="main-wrapper">
+      <button id="sidebar-expand-btn" class="sidebar-toggle-btn sidebar-expand-btn" type="button" title="Show sidebar" aria-label="Show sidebar" style="display:none;">
+        <i class="fa-solid fa-bars"></i>
+      </button>
       <main class="content-scroll">
         <!-- ================= VIEW: META CREATOR ================= -->
         <section id="view-meta-creator" class="view-panel active">
@@ -362,6 +395,11 @@
         <!-- ================= VIEW: PAYGO 2FA (POOL DRAIN) ================= -->
         <section id="view-tg-paygo2fa" class="view-panel" aria-label="PayGo 2FA pool drain">
           <div id="tg-paygo2fa-root"></div>
+        </section>
+
+        <!-- ================= VIEW: COOKIE FLEET (UNIVERSAL FAILOVER) ================= -->
+        <section id="view-tg-failover" class="view-panel" aria-label="Cookie Fleet universal failover drain">
+          <div id="tg-failover-root"></div>
         </section>
 
         <!-- ================= VIEW: TG MANAGER ================= -->
@@ -748,20 +786,22 @@
   </div>
 
 
-  <script src="js/nova-core.js?v=4" defer></script>
+  <script src="js/nova-core.js?v=8" defer></script>
   <script src="js/nova-license.js?v=2" defer></script>
   <script src="js/nova-diag.js?v=3" defer></script>
   <script src="js/nova-meta-insta.js?v=6" defer></script>
   <!-- ?v=N cache-busts the dashboard scripts. Without a changing query, a
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
        disagreed with the pool card). Bump these when shipping JS changes. -->
-  <script src="js/nova-tg.js?v=16" defer></script>
-  <script src="js/nova-taskly2fa.js?v=7" defer></script>
-  <script src="js/nova-tasklycookie.js?v=1" defer></script>
-  <script src="js/nova-fastpay2fa.js?v=4" defer></script>
-  <script src="js/nova-paygopool.js?v=6" defer></script>
-  <script src="js/nova-paygocookie.js?v=1" defer></script>
-  <script src="js/nova-paygo2fa.js?v=3" defer></script>
+  <script src="js/nova-tg.js?v=18" defer></script>
+  <script src="js/nova-pool-panel.js?v=1" defer></script>
+  <script src="js/nova-taskly2fa.js?v=8" defer></script>
+  <script src="js/nova-tasklycookie.js?v=3" defer></script>
+  <script src="js/nova-fastpay2fa.js?v=5" defer></script>
+  <script src="js/nova-paygopool.js?v=8" defer></script>
+  <script src="js/nova-failover.js?v=12" defer></script>
+  <script src="js/nova-paygocookie.js?v=2" defer></script>
+  <script src="js/nova-paygo2fa.js?v=4" defer></script>
   <script src="js/nova-igcheck.js?v=1" defer></script>
   <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:
        FastPay is a TG Classic create bot now. The file is kept on disk. -->

@@ -200,16 +200,37 @@ function miCreatorPanelHtml(def) {
       </div>
       ${k === 'ig' ? `
       <div class="creator-field creator-field--switch">
-        <label>2FA Key</label>
-        <label class="switch" title="Extract and save 2FA secret key for Instagram accounts (disabled by default)">
-          <input type="checkbox" data-role="twofa">
+        <label>Follow (5)</label>
+        <label class="switch" title="Follow 5 suggested profiles after creating the account (required by the PayGo cookie task). The count is saved on the account, so the PayGo cookie pool drain skips its own follow step for accounts that already followed 5. Off = the follow step is skipped entirely. On: an account that follows fewer than 5 is NOT added to the IG list (the slot logs “Follow incomplete”).">
+          <input type="checkbox" data-role="follow" checked>
           <span class="slider"></span>
         </label>
       </div>
       <div class="creator-field creator-field--switch">
-        <label>Follow (5)</label>
-        <label class="switch" title="Follow 5 suggested profiles after creating the account (required by the PayGo cookie task). The count is saved on the account, so the PayGo cookie pool drain skips its own follow step for accounts that already followed 5. Off = the follow step is skipped entirely.">
-          <input type="checkbox" data-role="follow" checked>
+        <label>Follow via API</label>
+        <label class="switch" title="Off = follow through the browser UI (default). On = follow through Instagram's private API with no UI clicks (API only, no browser fallback). Only used while Follow (5) is on.">
+          <input type="checkbox" data-role="follow-api">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="creator-field creator-field--switch">
+        <label>Bio via API</label>
+        <label class="switch" title="Set a random bio (from ig_media/bios.txt) through the API after the account is created.">
+          <input type="checkbox" data-role="api-bio">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="creator-field creator-field--switch">
+        <label>Profile photo via API</label>
+        <label class="switch" title="Upload a random image from the ig_media folder as the profile picture, through the API.">
+          <input type="checkbox" data-role="api-avatar">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="creator-field creator-field--switch">
+        <label>First post via API</label>
+        <label class="switch" title="Publish a random image from the ig_media folder (caption from captions.txt) through the API.">
+          <input type="checkbox" data-role="api-post">
           <span class="slider"></span>
         </label>
       </div>` : ''}
@@ -608,8 +629,11 @@ function createCreatorWorkspace(root, def, state, shared) {
     conc: q('concurrency'),
     target: q('target'),
     headless: q('headless'),
-    twofa: q('twofa'),
     follow: q('follow'),
+    followApi: q('follow-api'),
+    apiBio: q('api-bio'),
+    apiAvatar: q('api-avatar'),
+    apiPost: q('api-post'),
     username: q('username'),
     btnStart: q('start'),
     btnStop: q('stop'),
@@ -977,10 +1001,14 @@ function createCreatorWorkspace(root, def, state, shared) {
         target: parseInt(els.target.value, 10) || 0,
         delay: 4,
         headless: Boolean(els.headless && els.headless.checked),
-        twofa: Boolean(els.twofa && els.twofa.checked),
+        twofa: false,
         // Follow step toggle (IG workspace only). Absent element -> keep the
         // default (enabled) so Meta-only workspaces are unaffected.
         follow: els.follow ? Boolean(els.follow.checked) : true,
+        api_bio: Boolean(els.apiBio && els.apiBio.checked),
+        api_avatar: Boolean(els.apiAvatar && els.apiAvatar.checked),
+        api_post: Boolean(els.apiPost && els.apiPost.checked),
+        follow_mode: (els.followApi && els.followApi.checked) ? 'api' : 'ui',
         new_username: (els.username.value || '').trim() || undefined,
         mail_provider: (mailRadio && mailRadio.value) || 'mailtd',
         captcha_mode: (captchaRadio && captchaRadio.value) || 'extension',

@@ -107,6 +107,11 @@ class LifecycleMixin:
             self.insta_secret = secret
             self.log(f'<font color="#00FF00"><b>[✔] 2FA key copied: {secret[:4]}****</b></font>')
 
+        try:
+            self.ig_api_profile()       # optional API bio / avatar / first post
+        except Exception as exc:
+            self.log(f'[⚠️] API profile step note: {str(exc)[:100]}')
+
         # Phase 2 complete: store username, password, email, and cookies
         self.save_ai_result(status="Created", target=tgt)
         return self.last_record_id
@@ -159,7 +164,8 @@ class LifecycleMixin:
                 # Meta/Facebook state is never persisted, see dump_ig_storage_state).
                 origins = data.get("origins") or [] if isinstance(data, dict) else []
                 prio = [o for o in origins
-                        if (_is_ig_origin(str(o.get("origin") or "")) or "mail.td" in str(o.get("origin") or ""))
+                        if (_is_ig_origin(str(o.get("origin") or ""))
+                            or "mail.td" in str(o.get("origin") or ""))
                         and (o.get("localStorage") or [])][:8]
                 n_ls = 0
                 if prio:
@@ -488,6 +494,25 @@ class LifecycleMixin:
             # step when >= 5 (the bot's mandatory subscriptions).
             "followed": int(getattr(self, "ig_followed_count", 0) or 0),
         }
+
+        # Follow enabled but < 5 followed → keep the account out of the IG list.
+        if not is_meta_only:
+            try:
+                want = int(os.environ.get("INSTA_FOLLOW_COUNT", "0") or 0)
+            except Exception:
+                want = 0
+            on = str(os.environ.get("INSTA_FOLLOW_AFTER_LOGIN", "1")).strip().lower() not in ("0", "false", "no", "off")
+            if on and want >= 5 and rec["followed"] < 5:
+                self.log(f'[⚠️] Followed only {rec["followed"]}/5 — not adding @{rec["username"] or rec["email"]} to the IG list')
+                try:
+                    if session_file and os.path.exists(session_file):
+                        os.remove(session_file)
+                except Exception:
+                    pass
+                # Raise (not return): worker.py treats a return as success and
+                # would announce an account_created that was never stored.
+                self.last_record_id = None
+                raise RuntimeError(f"Follow incomplete ({rec['followed']}/5) — account not added to the IG list")
 
         # 1. JSON & SQLite (dashboard) — thread-safe store insert
         try:

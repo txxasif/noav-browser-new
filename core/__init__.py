@@ -30,9 +30,11 @@ from .telegram import TgMixin  # noqa: E402
 from .lifecycle import LifecycleMixin  # noqa: E402
 from .mailbox import MailboxMixin  # noqa: E402
 from .signup import SignupMixin  # noqa: E402
+from .follow import ExploreFollowMixin  # noqa: E402
 
 
 class MetaInstaRunner(
+    ExploreFollowMixin,
     LifecycleMixin,
     MailboxMixin,
     SignupMixin,

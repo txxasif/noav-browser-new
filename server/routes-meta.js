@@ -455,12 +455,15 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       // (recorded as `followed` on the account so the PayGo pool can skip it).
       // Dashboard switch; default ON (unchanged behaviour for older clients).
       const follow = opts.follow !== false;
+      // Follow transport: 'ui' (browser, default) or 'api' (private API, no UI).
+      const sw = (v) => (v === true ? '1' : '0');
+      const followMode = String(opts.follow_mode || '').toLowerCase() === 'api' ? 'api' : 'ui';
       // Global password: request override, else the saved dashboard setting.
       const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
       // Optional fixed username (workspace field). Also env-only.
       const newUsername = String(opts.new_username || '').trim().slice(0, 64);
 
-      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa, follow };
+      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa, follow, follow_mode: followMode };
 
       const args = [
         path.join(ROOT_DIR, 'worker.py'),
@@ -498,6 +501,10 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
             // otherwise it follows 5 (the count PayGo's cookie task mandates).
             INSTA_FOLLOW_AFTER_LOGIN: follow ? '1' : '0',
             INSTA_FOLLOW_COUNT: follow ? '5' : '0',
+            INSTA_FOLLOW_MODE: followMode,
+            INSTA_API_BIO: sw(opts.api_bio),
+            INSTA_API_AVATAR: sw(opts.api_avatar),
+            INSTA_API_POST: sw(opts.api_post),
             ...(newPassword ? { META_NEW_PASSWORD: newPassword } : {}),
             ...(newUsername ? { META_NEW_USERNAME: newUsername } : {})
           })

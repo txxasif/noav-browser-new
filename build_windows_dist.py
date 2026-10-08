@@ -151,7 +151,7 @@ MODULE_ROOT_FILES = {
         "tg_balance.py", "tg_toggle.py", "warm_pool.py",
         "tg_tasks.py", "tg_flows.py", "tg_steps.py",
         "tg_join_bot.py", "tg_manager_cli.py", "tg_stats.py",
-        "tg_task_probe.py", "tg_withdraw.py",
+        "tg_task_probe.py", "tg_catalog.py", "tg_withdraw.py",
         "run_native_cycle.py",  # native flow has no bot task mapping (shared)
     ],
 }
@@ -159,7 +159,7 @@ MODULE_ROOT_FILES = {
 # them optionally, so the server boots without them).
 MODULE_SERVER_FILES = {
     "ig": ["server/routes-igcheck.js"],
-    "tg": ["server/routes-tg.js", "server/paygo-orchestrator.js"],
+    "tg": ["server/routes-tg.js", "server/paygo-orchestrator.js", "server/cookie-orchestrator.js", "server/tg-start.js"],
 }
 # Dashboard scripts dropped when the module is excluded.
 MODULE_PUBLIC_JS = {
@@ -168,6 +168,8 @@ MODULE_PUBLIC_JS = {
            "public/js/nova-tasklycookie.js",
            "public/js/nova-fastpay2fa.js", "public/js/nova-paygopool.js",
            "public/js/nova-paygocookie.js", "public/js/nova-paygo2fa.js",
+           "public/js/nova-failover.js",
+           "public/js/nova-pool-panel.js",
            "public/js/nova-manager.js", "public/js/nova-fastpay.js"],
 }
 # Per-bot root runners (only when tg ships AND the bot is selected).
@@ -195,7 +197,7 @@ MODULE_VIEWS = {
     "ig": ["view-ig-creator", "view-ig-checker"],
     "tg": ["view-tg-classic", "view-tg-taskly2fa", "view-tg-tasklycookie",
            "view-tg-fastpay2fa", "view-tg-paygopool", "view-tg-paygocookie",
-           "view-tg-paygo2fa", "view-tg-manager", "view-guide"],
+           "view-tg-paygo2fa", "view-tg-failover", "view-tg-manager", "view-guide"],
 }
 
 
@@ -284,6 +286,11 @@ SYNC_ROOT_FILES = [
     "tg_flows.py",          # per-flow step pipelines (data-driven cycle steps)
     "tg_steps.py",          # step registry (single source of truth for one step)
     "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
+    "pool_common.py",       # shared pool-drain helpers (all pool runners import this)
+    "pool_prepare.py",      # explore-page follow + in-page rename + Meta-list source (run_cookie_cycle imports this)
+    "tg_runners.py",        # runner registry (flow runner name -> callable)
+    "mtproto_client.py",    # low-level Telethon client/session/login helpers
+    "mtproto_pool.py",      # pooled warm-worker wrapper (MtprotoPooledBot)
     "run_native_cycle.py",  # one-shot Taskly 2FA native cycle (lease -> bot email+code -> IG signup -> register)
     "run_pool_2fa_cycle.py",  # one-shot Taskly 2FA POOL DRAIN (reuse pooled IG acct: rename + 2FA + register)
     "run_paygo_pool_2fa_cycle.py",  # one-shot PayGo 2FA POOL DRAIN (same-to-same as Taskly pool, bot paygo)
@@ -294,6 +301,7 @@ SYNC_ROOT_FILES = [
     "tg_stats.py",          # Telegram submission statistics counter
     "tg_paygo_probe.py",    # fast non-blocking PayGo stock probe & countdown
     "tg_task_probe.py",     # single-lease task-availability probe (all bots)
+    "tg_catalog.py",        # task catalog dump for the Fleet page (tg_tasks -> JSON)
     "tg_withdraw.py",       # USDT (BEP-20) withdrawal (Taskly/PayGo) + TG freeze
     "ig_check.py",          # Instagram account checker (IG Checker page; stdlib-only)
     "ig_backup.py",         # IG Creator full backup/restore CSV (cookies + mail session + 2FA)
@@ -398,6 +406,16 @@ def strip_dashboard_selection():
         if n:
             removed.append("nav:%s=%s" % (attr, value))
 
+    def drop_nav_block(attr, value):
+        # <div ... data-bot-menu="paygo" ...>...</div> — the nested bot group
+        # wrapper (contains only <button>s, so the first </div> closes it).
+        nonlocal html, removed
+        pat = re.compile(r'<div\b[^>]*%s="%s"[^>]*>.*?</div>\s*'
+                         % (re.escape(attr), re.escape(value)), re.DOTALL)
+        html, n = pat.subn("", html)
+        if n:
+            removed.append("nav-block:%s=%s" % (attr, value))
+
     def drop_nav_range(start_marker, end_view_attr):
         # Remove a whole sidebar block, e.g. TELEGRAM title .. TG Manager btn.
         nonlocal html, removed
@@ -420,6 +438,7 @@ def strip_dashboard_selection():
             if b in bots:
                 continue
             drop_nav_button("data-bot", b)
+            drop_nav_block("data-bot-menu", b)
             for v in BOT_VIEWS.get(b, []):
                 drop_nav_button("data-view", v)
                 drop_view(v)
@@ -801,6 +820,13 @@ REQUIRED_IG = [
 REQUIRED_TG = [
     "MetaCreator/server/routes-tg.js",
     "MetaCreator/server/paygo-orchestrator.js",
+    "MetaCreator/server/cookie-orchestrator.js",
+    "MetaCreator/server/tg-start.js",
+    "MetaCreator/pool_common.py",
+    "MetaCreator/pool_prepare.py",
+    "MetaCreator/tg_runners.py",
+    "MetaCreator/mtproto_client.py",
+    "MetaCreator/mtproto_pool.py",
     "MetaCreator/tg_bot.py",
     "MetaCreator/tg_accounts.py",
     "MetaCreator/tg_fingerprint.py",
@@ -817,6 +843,7 @@ REQUIRED_TG = [
     "MetaCreator/tg_manager_cli.py",
     "MetaCreator/tg_stats.py",
     "MetaCreator/tg_task_probe.py",
+    "MetaCreator/tg_catalog.py",
     "MetaCreator/tg_withdraw.py",
     "MetaCreator/run_native_cycle.py",
     "MetaCreator/tg/enabled_bots.json",
@@ -832,6 +859,8 @@ REQUIRED_TG = [
     "MetaCreator/pipelines/telegram/tg_support.py",
     "MetaCreator/pipelines/telegram/tg_worker.py",
     "MetaCreator/public/js/nova-tg.js",
+    "MetaCreator/public/js/nova-pool-panel.js",
+    "MetaCreator/public/js/nova-failover.js",
     "MetaCreator/public/js/nova-manager.js",
 ]
 REQUIRED_BOT = {

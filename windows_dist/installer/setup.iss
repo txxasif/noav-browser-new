@@ -72,6 +72,7 @@ Source: "..\tg_manager_cli.py*"; DestDir: "{app}"; Flags: ignoreversion skipifso
 Source: "..\tg_stats.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_paygo_probe.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_task_probe.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\tg_catalog.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\tg_withdraw.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\run_paygo_pool_2fa_cycle.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\ig_check.py*"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

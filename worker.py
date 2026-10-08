@@ -301,7 +301,32 @@ class AISlotWorker:
         emit_event(evt)
 
     def _get_proxy_config(self):
-        return None
+        """Playwright proxy dict from PROXY_URL (rotating residential/mobile).
+
+        Each slot gets a stable egress via PROXY_URL's {session} token. Returns
+        None when PROXY_URL is unset → direct connection (behaviour unchanged).
+        """
+        try:
+            from instagram.ig_api import proxy_for
+            url = proxy_for(getattr(self, "slot_id", "") or "")
+        except Exception:
+            url = (os.environ.get("PROXY_URL") or "").strip()
+        if not url:
+            return None
+        try:
+            from urllib.parse import urlparse
+            u = urlparse(url)
+            if not u.hostname:
+                return None
+            server = ("%s://%s:%s" % (u.scheme or "http", u.hostname, u.port)).rstrip(":")
+            cfg = {"server": server}
+            if u.username:
+                cfg["username"] = u.username
+            if u.password:
+                cfg["password"] = u.password
+            return cfg
+        except Exception:
+            return None
 
     def on_browser_closed(self):
         self.is_running = False
@@ -577,12 +602,39 @@ def _task_miss_reason(err_text: str):
     return None
 
 
+def _parse_fleet(raw) -> list | None:
+    """Parse --tg-fleet-json into an ordered [{bot, task, pool}] chain.
+
+    Returns None when absent/invalid (normal single-task runs). Entries with a
+    missing bot/task are dropped; capped at 8.
+    """
+    if not raw:
+        return None
+    try:
+        import json as _json
+        items = _json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(items, list):
+            return None
+        out = []
+        for c in items[:8]:
+            if not isinstance(c, dict):
+                continue
+            b = str(c.get("bot") or "").strip().lower()
+            t = str(c.get("task") or "")
+            if b and t:
+                out.append({"bot": b, "task": t, "pool": bool(c.get("pool", True))})
+        return out or None
+    except Exception:
+        return None
+
+
 def _is_pool_empty_error(err_text: str) -> bool:
-    """Immediate-stop conditions: the IG Creator pool itself is drained.
+    """Dynamic-wait conditions: the IG Creator pool itself is drained.
 
     Unlike a task-availability miss (which waits for every creator to agree),
-    an empty pool can never resolve by retrying, so the first witness stops
-    the fleet at once.
+    an empty pool CAN resolve by retrying while the IG Creator refills it, so
+    the slot parks (INSTA_POOL_EMPTY_WAIT_SEC) and polls again instead of
+    stopping the fleet.
     """
     if not err_text:
         return False
@@ -602,7 +654,8 @@ def _is_no_task_error(err_text: str) -> bool:
 
 def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_TASK,
                  tg_bot="taskly", captcha_mode="extension", mail_provider="mailtd",
-                 add_email=False, cookie=False, use_ig_pool=False, cookie_2fa=False):
+                 add_email=False, cookie=False, use_ig_pool=False, cookie_2fa=False,
+                 fallback=False, fleet=None):
     """Coupled per-task loop: ONE browser does Meta → TG task → IG → submit.
 
     N slots run in parallel (each opens its own Meta/IG browser up front);
@@ -641,87 +694,44 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 return "done"
             _session_count += 1
         try:
-            # Pick the runner from the REGISTRY (data), not a regex on the task
-            # text: "🍪 Create Inst (No mail)" contains no literal "cookie", so a
-            # /cookie/i test would wrongly send it to the coupled runner.
-            _runner = ""
-            try:
-                import tg_tasks as _tt
-                from tg_flows import runner_of as _runner_of
-                _flow = _tt.flow_of(tg_bot, task)
-                _runner = _runner_of(_flow) if _flow else ""
-            except Exception:
-                _runner = ""
-            _use_cookie = cookie or str(_runner) == "run_cookie_cycle"
-            if _use_cookie:
-                # Cookie-family task (PayGo cookie, Taskly cookie_2fa):
-                # Meta -> TG creds -> [2FA] -> IG join + follow -> cookie export
-                # -> cookie submit. Lazy import: run_cookie_cycle lazily imports
-                # AISlotWorker back, so a top-level import here would be circular.
-                from run_cookie_cycle import run_cookie_cycle_once
-                ok, detail = run_cookie_cycle_once(
+            import tg_runners as _tg_runners
+            if fleet:
+                # Fleet chain (universal page): ordered (bot, task) pairs tried
+                # in order across runners — first success wins.
+                ok, detail = _tg_runners.run_fleet_chain(
                     slot_id=slot_id, worker_factory=AISlotWorker,
                     is_headless=is_headless, captcha_mode=captcha_mode,
                     mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
-                    use_ig_pool=use_ig_pool, cookie_2fa=cookie_2fa)
-            elif str(_runner) == "run_native_cycle":
-                # Taskly 2FA native task: NO Meta, NO mailbox — lease TG,
-                # Start, bot email+code, IG native signup, Account Registered.
-                # Lazy import for the same circularity reason as above.
-                from run_native_cycle import run_native_cycle_once
-                ok, detail = run_native_cycle_once(
-                    slot_id=slot_id, worker_factory=AISlotWorker,
-                    is_headless=is_headless, captcha_mode=captcha_mode,
-                    mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot)
-            elif str(_runner) == "run_pool_2fa_cycle":
-                # Taskly "📱 Create Inst (2FA)" POOL DRAIN (new "Taskly 2FA"
-                # panel): reuse a pre-created IG account from the pool — rename
-                # via Web API + 2FA from the stored inbox — no Meta, no signup.
-                from run_pool_2fa_cycle import run_pool_2fa_cycle_once
-                ok, detail = run_pool_2fa_cycle_once(
-                    slot_id=slot_id, worker_factory=AISlotWorker,
-                    is_headless=is_headless, captcha_mode=captcha_mode,
-                    mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
-                    use_ig_pool=True)
-            elif str(_runner) == "run_fastpay_pool_cycle":
-                # FastPay "Instagram 2FA" POOL DRAIN (new "FastPay 2FA" panel):
-                # reuse a pre-created IG account — rename + 2FA + password +
-                # Confirm in FastPay — no Meta, no signup.
-                from run_fastpay_pool_cycle import run_fastpay_pool_cycle_once
-                ok, detail = run_fastpay_pool_cycle_once(
-                    slot_id=slot_id, worker_factory=AISlotWorker,
-                    is_headless=is_headless, captcha_mode=captcha_mode,
-                    mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
-                    use_ig_pool=True)
-            elif str(_runner) == "run_paygo_pool_2fa_cycle":
-                # PayGo "📱 Create Inst (2FA)" POOL DRAIN (new "PayGo 2FA"
-                # panel): same-to-same as the Taskly pool drain — reuse a
-                # pre-created IG account (rename via Web API + bot email link
-                # via 📥 Get code + 2FA from the stored inbox + register).
-                from run_paygo_pool_2fa_cycle import run_paygo_pool_2fa_cycle_once
-                ok, detail = run_paygo_pool_2fa_cycle_once(
-                    slot_id=slot_id, worker_factory=AISlotWorker,
-                    is_headless=is_headless, captcha_mode=captcha_mode,
-                    mail_provider=mail_provider, stop_event=_stop,
-                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
-                    use_ig_pool=True)
+                    add_email=add_email, cookie_2fa=cookie_2fa,
+                    fleet=fleet)
             else:
-                # TG Classic coupled cycle (Meta -> IG -> bot submit). Imported
-                # lazily: pipelines/ is excluded from non-TG builds.
+                # Pick the runner from the REGISTRY (data), not a regex on the task
+                # text: "🍪 Create Inst (No mail)" contains no literal "cookie", so a
+                # /cookie/i test would wrongly send it to the coupled runner.
+                _runner = ""
                 try:
-                    from pipelines.telegram import tg_worker
-                except ImportError:
-                    raise RuntimeError("TG Classic is not included in this build (pipelines/telegram missing).")
-                ok, detail = tg_worker.run_tg_coupled_cycle(
-                    AISlotWorker, slot_id=slot_id, is_headless=is_headless,
-                    tg_task=task, tg_bot=tg_bot,
-                    captcha_mode=captcha_mode, mail_provider=mail_provider,
-                    add_email=add_email,
-                    stop_event=_stop)
+                    import tg_tasks as _tt
+                    from tg_flows import runner_of as _runner_of
+                    _flow = _tt.flow_of(tg_bot, task)
+                    _runner = _runner_of(_flow) if _flow else ""
+                except Exception:
+                    _runner = ""
+                # cookie=True forces the cookie runner (same _use_cookie semantics
+                # as before); otherwise the flow registry's runner name decides.
+                # Dispatch is DATA (tg_runners.RUNNERS): adding a runner = one
+                # registry entry, no edit here. Each registry callable does its own
+                # lazy import (avoids the AISlotWorker import cycle) and returns
+                # (ok, detail); an unknown/empty name falls back to TG Classic.
+                if cookie or str(_runner) == "run_cookie_cycle":
+                    _runner = "run_cookie_cycle"
+                _run_once = _tg_runners.get_runner(_runner or _tg_runners.DEFAULT_RUNNER)
+                ok, detail = _run_once(
+                    slot_id=slot_id, worker_factory=AISlotWorker,
+                    is_headless=is_headless, captcha_mode=captcha_mode,
+                    mail_provider=mail_provider, stop_event=_stop,
+                    add_email=add_email, tg_task=task, tg_bot=tg_bot,
+                    use_ig_pool=use_ig_pool, cookie_2fa=cookie_2fa,
+                    cookie=cookie, fallback=fallback)
             err_text = "" if ok else str(detail or "")
         except Exception as exc:
             ok, err_text = False, str(exc)
@@ -737,9 +747,11 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 _session_count = max(0, _session_count - 1)
 
             # Fleet availability agreement: a task miss (hidden button,
-            # sold-out stock, unoffered task) VOTES; the run stops only when
-            # EVERY active creator's latest verdict is a miss. Pool-empty
-            # stays an immediate fleet stop (it can never resolve by retry).
+            # sold-out stock, unoffered task) VOTES; the slots keep waiting while
+            # EVERY active creator's latest verdict is a miss. NOTHING stops the
+            # fleet automatically — stock refills hourly and hidden is flaky, so
+            # all-miss parks stop-aware and retries (operator: never auto-stop).
+            # Pool-empty is NOT a miss — it waits dynamically below.
             miss_reason = _task_miss_reason(err_text)
             if miss_reason:
                 with _task_miss_lock:
@@ -749,23 +761,24 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                     active = set(_active_slots)
                 agreed = bool(active) and all(s in votes for s in active)
                 if agreed:
-                    _stop.set()
-                    with _active_slots_lock:
-                        _active_slots.discard(slot_id)
-                        remaining = len(_active_slots)
-                    print(f"[*] [Slot {slot_id}] 🛑 Task unavailable on ALL {len(active)} creator(s) (reason={miss_reason}). Stopping fleet.", flush=True)
+                    try:
+                        _miss_s = max(15.0, float(os.environ.get("INSTA_TASK_MISS_WAIT_SEC", "60") or 60))
+                    except (TypeError, ValueError):
+                        _miss_s = 60.0
+                    print(f"[*] [Slot {slot_id}] Task unavailable on ALL {len(active)} creator(s) (reason={miss_reason}) — waiting {_miss_s:.0f}s, then retrying (no auto-stop).", flush=True)
                     emit_event({
                         "type": "slot_event",
                         "slot_id": slot_id,
-                        "status": "stopped",
-                        "detail": f"Task unavailable on all creators ({miss_reason}) — Creator {slot_id} stopped ({remaining} remaining)."
+                        "status": "waiting",
+                        "detail": f"Task unavailable everywhere ({miss_reason}) — waiting {_miss_s:.0f}s, then retrying."
                     })
                     emit_event({
                         "type": "log",
                         "pipeline": "telegram",
-                        "message": f"[tg:slot-{slot_id}] All {len(active)} creators agree: task unavailable ({miss_reason}). Stopped."
+                        "message": f"[tg:slot-{slot_id}] All {len(active)} creators agree: task unavailable ({miss_reason}). Waiting, not stopping."
                     })
-                    return "no_task"
+                    _sleep_stop(_miss_s + (slot_id % 6))
+                    return "ok"
                 print(f"[*] [Slot {slot_id}] Task miss ({miss_reason}) recorded "
                       f"({len([s for s in votes if s in active])}/{len(active)} creators agree) — waiting for the rest.", flush=True)
                 emit_event({
@@ -775,26 +788,25 @@ def coupled_loop(slot_id, is_headless=False, target=0, delay=2, task=TG_DEFAULT_
                 })
                 return "ok"
 
-            # Pool-empty: immediate fleet stop (preserved behavior).
+            # Pool-empty: DYNAMIC wait (not a fleet stop). The IG Creator may be
+            # running concurrently and refilling the pool — stopping here would
+            # strand fresh accounts until a manual restart (observed). Park
+            # this slot stop-aware, then retry; a new account gets claimed on
+            # the next poll. Env: INSTA_POOL_EMPTY_WAIT_SEC (default 20s).
             if _is_pool_empty_error(err_text):
-                # When pool is empty or bot has no task available, stop ALL creators immediately
-                _stop.set()
-                with _active_slots_lock:
-                    _active_slots.discard(slot_id)
-                    remaining = len(_active_slots)
-                print(f"[*] [Slot {slot_id}] 🛑 Bot/pool has no task available ({err_text}). Creator {slot_id} stopped ({remaining} active creator(s) remaining).", flush=True)
+                try:
+                    _wait_s = max(5.0, float(os.environ.get("INSTA_POOL_EMPTY_WAIT_SEC", "20") or 20))
+                except (TypeError, ValueError):
+                    _wait_s = 20.0
+                print(f"[*] [Slot {slot_id}] IG pool empty ({err_text}) — waiting {_wait_s:.0f}s for the IG Creator refill…", flush=True)
                 emit_event({
                     "type": "slot_event",
                     "slot_id": slot_id,
-                    "status": "stopped",
-                    "detail": f"No task available ({err_text}) — Creator {slot_id} stopped ({remaining} remaining)."
+                    "status": "waiting",
+                    "detail": f"IG pool empty — waiting {_wait_s:.0f}s for new accounts…"
                 })
-                emit_event({
-                    "type": "log",
-                    "pipeline": "telegram",
-                    "message": f"[tg:slot-{slot_id}] Stopped: {err_text} ({remaining} creator(s) remaining)."
-                })
-                return "no_task"
+                _sleep_stop(_wait_s + (slot_id % 6))
+                return "ok"
 
             if IG_WALL_SPLIT and _is_phone_wall(err_text):
                 # Per-account/region gate: skip this account without pausing the
@@ -881,13 +893,39 @@ def main():
                              "Takes precedence over --tg-task/--tg-bot.")
     parser.add_argument("--use-ig-pool", action="store_true",
                         help="PayGo Cookies task: drain pre-created accounts from the IG Creator pool")
+    parser.add_argument("--account-source", choices=("ig", "meta"), default="ig",
+                        help="Cookie pool drain: where accounts come from. 'ig' = IG Creator "
+                             "pool (default); 'meta' = Meta Creator list (IG login -> join -> "
+                             "follow -> cookie).")
     parser.add_argument("--cookie-2fa", action="store_true",
                         help="PayGo Cookies task: NEW protocol — submit the 2FA key "
                              "(waiting for the email OTP) BEFORE the cookie submit.")
+    parser.add_argument("--ig-api", action="store_true",
+                        help="BROWSERLESS IG private-API path: handle rename/email/2FA/"
+                             "password/follow/cookie via the API instead of the browser. "
+                             "Default OFF (existing browser logic). Sets IG_API_MODE=1.")
+    parser.add_argument("--ig-api-mock", action="store_true",
+                        help="API mode ONLY: submit a MOCK 2FA key instead of enabling REAL "
+                             "2FA (lets you skip the 2FA-enable leg). Sets IG_API_MOCK=1.")
+    parser.add_argument("--tg-fallback", action="store_true",
+                        help="Cookie pool/classic: try cookie bots in dashboard priority "
+                             "order (data/settings.json tg_cookie_priority) — first "
+                             "available task wins, others are tried next.")
+    parser.add_argument("--tg-fleet-json", type=str, default=None,
+                        help="Fleet chain (universal page): JSON list of "
+                             "{bot, task, pool} tried in order across runners.")
     parser.add_argument("--start-stagger-ms", type=int, default=None,
                         help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
 
     args = parser.parse_args()
+    # Read by run_cookie_cycle._run_pool_drain_cycle (no signature plumbing).
+    os.environ["COOKIE_ACCOUNT_SOURCE"] = str(getattr(args, "account_source", "ig") or "ig")
+
+    # Browserless IG private-API switch (opt-in). The runners read IG_API_MODE.
+    if getattr(args, "ig_api", False):
+        os.environ["IG_API_MODE"] = "1"
+    if getattr(args, "ig_api_mock", False):
+        os.environ["IG_API_MOCK"] = "1"
 
     concurrency = _safe_concurrency(args.concurrency)
     target = max(0, args.target)
@@ -1000,7 +1038,9 @@ def main():
         _shared.update(task=args.tg_task, tg_bot=args.tg_bot, add_email=args.add_email,
                        cookie=bool(getattr(args, "cookie", False)),
                        use_ig_pool=bool(getattr(args, "use_ig_pool", False)),
-                       cookie_2fa=bool(getattr(args, "cookie_2fa", False)))
+                       cookie_2fa=bool(getattr(args, "cookie_2fa", False)),
+                       fallback=bool(getattr(args, "tg_fallback", False)),
+                       fleet=_parse_fleet(getattr(args, "tg_fleet_json", None)))
     # Self-heal TG leases. The Windows Stop button kills the worker with
     # TerminateProcess, so the coupled cycle's `finally: tg_manager.release`
     # never runs and the profile stays `busy` until LEASE_TTL (20 min). Reset

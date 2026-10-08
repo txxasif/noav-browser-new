@@ -179,19 +179,34 @@ class IgAcNavMixin:
                 the stored name NEVER succeeds and every tap looked like "did not
                 navigate" → the 3×5×1s retry grind that made AC entry ~24s.
                 """
+                import re as _re
+                u = p.url or ""
+                if user:
+                    # STRICT: only OUR OWN profile counts. Any other /<user>/ URL
+                    # (a feed account we mis-tapped onto) ALSO has an Options gear,
+                    # so the old "has gear -> ready" test made Step 1 pass on the
+                    # WRONG profile and Step 2 then tapped that account's ⋯ →
+                    # Block/Restrict (the classic-flow dead end, 2026-10-07).
+                    if _re.match(r"^https?://www\.instagram\.com/" + _re.escape(str(user)) + r"/?$", u):
+                        return True
+                    # The stored username goes stale after a rename — also accept
+                    # the LIVE username read from the bottom tab bar.
+                    try:
+                        live = self._ig_profile_tab_href(p)
+                        live_user = str(live or "").strip("/").split("/")[-1]
+                        if live_user and _re.match(
+                                r"^https?://www\.instagram\.com/" + _re.escape(live_user) + r"/?$", u):
+                            return True
+                    except Exception:
+                        pass
+                    return False
+                # Unknown username: any profile showing the owner gear is fine.
                 try:
                     if p.locator('a[href*="/accounts/settings/"], svg[aria-label="Options"], [aria-label="Options"]').count() > 0:
                         return True
                 except Exception:
                     pass
-                u = p.url or ""
-                if user and f"/{user}" in u:
-                    return True
-                try:
-                    import re as _re
-                    return bool(_re.match(r"^https?://www\.instagram\.com/[A-Za-z0-9._]+/?$", u))
-                except Exception:
-                    return False
+                return bool(_re.match(r"^https?://www\.instagram\.com/[A-Za-z0-9._]+/?$", u))
 
             is_on_profile = _profile_ready()
 
@@ -947,6 +962,45 @@ class IgAcNavMixin:
             pass
         return False
 
+    def _recover_saved_account_chooser(self, p) -> bool:
+        """Resume the session from IG's SAVED-ACCOUNT chooser by clicking Continue.
+
+        When IG drops the browser session it shows the chooser (the account name +
+        "Continue" / "Use another profile" / "Create new account"). The saved
+        profile's session is often STILL valid, so clicking "Continue" logs back in
+        as that profile instead of dead-ending the whole cycle (operator 2026-10-07:
+        "the moment we see this, don't exit — find a way"). Returns True when the
+        chooser is gone (session resumed).
+        """
+        try:
+            if not self._is_ig_dead_end_chooser(p):
+                return False
+        except Exception:
+            return False
+        self.log("[🔄] Saved-account chooser — clicking 'Continue' to resume the session…")
+        clicked = False
+        for sel in ('button:has-text("Continue")', 'div[role="button"]:has-text("Continue")',
+                    'a:has-text("Continue")', '[role="button"]:has-text("Continue")'):
+            try:
+                el = p.locator(sel).first
+                if el.count() > 0 and el.is_visible():
+                    if self._tap_or_click(p, el):
+                        clicked = True
+                        break
+            except Exception:
+                continue
+        if not clicked:
+            return False
+        # Give IG time to resume the profile, then verify the chooser is gone.
+        for _ in range(6):
+            p.wait_for_timeout(1500)
+            try:
+                if not self._is_ig_dead_end_chooser(p):
+                    return True
+            except Exception:
+                return True
+        return False
+
     def _is_human_confirm_page(self, p) -> bool:
         """True on Instagram's 'Confirm you're human to use your profile' page."""
         try:
@@ -1070,13 +1124,10 @@ class IgAcNavMixin:
         if "accountscenter.instagram.com" not in (p.url or ""):
             for _try in range(3):
                 if self._is_human_confirm_page(p):
-                    self.log("[🛡️] Human confirm page encountered during AC nav — attempting captcha solve…")
-                    if hasattr(self, "_solve_captcha_ordered"):
-                        self._solve_captcha_ordered(p)
-                    if self._is_human_confirm_page(p):
-                        raise IGDeadEnd(
-                            "Instagram 'Confirm you're human to use your profile' checkpoint "
-                            "— terminal dead state (not solvable offline)")
+                    # Operator 2026-10-07: DO NOT click "Continue" / solve — DEAD END.
+                    raise IGDeadEnd(
+                        "Instagram 'Confirm you're human to use your profile' checkpoint "
+                        "— terminal dead state (not clicking Continue)")
                 self._recover_something_went_wrong(p, max_attempts=2)
                 try:
                     self._ac_navigate_in_app(p, section_path=section_path, label=label)
@@ -1119,16 +1170,21 @@ class IgAcNavMixin:
         #   * /accounts/login            (login wall)
         #   * "Confirm you're human"     (not solvable offline)
         if self._is_human_confirm_page(p):
-            self.log("[🛡️] Human confirm page encountered — attempting captcha solve…")
-            if hasattr(self, "_solve_captcha_ordered"):
-                self._solve_captcha_ordered(p)
-            if self._is_human_confirm_page(p):
-                raise IGDeadEnd(
-                    "Instagram 'Confirm you're human to use your profile' checkpoint "
-                    "— terminal dead state (not solvable offline)")
-        if self._is_ig_dead_end_chooser(p):
+            # Operator 2026-10-07: DO NOT click "Continue" / attempt the captcha —
+            # this checkpoint is a DEAD END. Quit and move to the next account.
             raise IGDeadEnd(
-                "IG saved-account chooser (logged out — session dropped) — dead end")
+                "Instagram 'Confirm you're human to use your profile' checkpoint "
+                "— terminal dead state (not clicking Continue)")
+        if self._is_ig_dead_end_chooser(p):
+            # Try to RECOVER first: the chooser means the browser session dropped,
+            # but the saved profile's session is often still valid — click
+            # "Continue" to resume instead of exiting instantly (operator
+            # 2026-10-07: "the moment we see this, don't exit — find a way").
+            if self._recover_saved_account_chooser(p):
+                self.log("[🔄] Resumed the saved profile — continuing Accounts Center nav.")
+            else:
+                raise IGDeadEnd(
+                    "IG saved-account chooser (logged out — session dropped) — dead end")
         if "/accounts/login" in (p.url or ""):
             raise IGDeadEnd(
                 f"IG login wall during Accounts Center navigation ({(p.url or '')[:90]})")
@@ -1356,13 +1412,10 @@ class IgAcNavMixin:
             # other TERMINAL state (not solvable offline) — name it explicitly
             # so the caller stops there instead of retrying forever.
             if self._is_human_confirm_page(p):
-                self.log("[🛡️] Human confirm page encountered — attempting captcha solve…")
-                if hasattr(self, "_solve_captcha_ordered"):
-                    self._solve_captcha_ordered(p)
-                if self._is_human_confirm_page(p):
-                    raise IGDeadEnd(
-                        "Instagram 'Confirm you're human to use your profile' checkpoint "
-                        "— terminal dead state (not solvable offline)")
+                # Operator 2026-10-07: DO NOT click "Continue" / solve — DEAD END.
+                raise IGDeadEnd(
+                    "Instagram 'Confirm you're human to use your profile' checkpoint "
+                    "— terminal dead state (not clicking Continue)")
             _dead = False
             try:
                 _names = self._ig_cookie_names()

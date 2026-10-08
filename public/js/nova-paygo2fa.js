@@ -20,41 +20,16 @@
     headless: true,
     pool: 0,
     submitted: 0,
-    startedAt: 0,
-    log: []
+    startedAt: 0
   };
   var MAX_LOG = 500;
 
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
   function $(id) { return document.getElementById(id); }
 
-  function toast(msg, kind, ms) {
-    if (typeof window.showToast === 'function') { try { window.showToast(msg, kind || 'info'); return; } catch (e) {} }
-    var host = $('toast-container');
-    if (!host) return;
-    var el = document.createElement('div');
-    el.className = 'toast ' + (kind || 'info');
-    el.style.cssText = 'position:relative;padding:10px 12px;margin-top:8px;' +
-      'border-left:3px solid #4ade80;border-radius:8px;background:#111726;' +
-      'color:#e2e8f0;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);';
-    el.textContent = msg;
-    host.appendChild(el);
-    setTimeout(function () { try { host.removeChild(el); } catch (e) {} }, ms || 9000);
-  }
-
-  function statCard(label, id, sub, color) {
-    return '<div class="insta-stat-card" style="background:var(--bg-card);' +
-             'border:1px solid var(--border-color);border-radius:var(--radius-md);' +
-             'padding:14px 16px;position:relative;overflow:hidden;">' +
-      '<div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:' + color + ';opacity:.9;"></div>' +
-      '<div class="insta-stat-label" style="color:var(--text-dim);">' + esc(label) + '</div>' +
-      '<div class="insta-stat-value" id="' + id + '" style="color:var(--text-main);">0</div>' +
-      '<div class="insta-stat-sub" style="color:var(--text-muted);">' + esc(sub) + '</div></div>';
-  }
+  // Shared helpers (nova-pool-panel.js).
+  var toast = NovaPoolPanel.toast;
+  var statCard = NovaPoolPanel.statCard;
+  var buf = NovaPoolPanel.logBuffer(MAX_LOG);
 
   function shell() {
     root.innerHTML =
@@ -161,29 +136,15 @@
   }
 
   function append(line) {
-    var entry = '[' + new Date().toLocaleTimeString() + '] ' + line;
-    state.log.push(entry);
-    if (state.log.length > MAX_LOG) state.log = state.log.slice(-400);
+    buf.push(line);
     var el = $('pg2fa-log');
     if (!el) return;
-    el.textContent = state.log.join('\n');
+    el.textContent = buf.text();
     var auto = $('pg2fa-autoscroll');
     if (!auto || auto.checked) el.scrollTop = el.scrollHeight;
   }
 
-  function post(url, body) {
-    append('> POST ' + url + ' ' + JSON.stringify(body || {}));
-    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body || {}) })
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        append('< ' + JSON.stringify(j));
-        if (j && (j.error || j.status === 'ERROR')) toast(j.error || 'Request failed', 'error', 12000);
-        setTimeout(refresh, 400);
-        return j;
-      })
-      .catch(function (e) { append('! ' + e); toast('Request failed: ' + e, 'error', 12000); });
-  }
+  function post(url, body) { return NovaPoolPanel.postJson(url, body, append, refresh); }
 
   function start() {
     var btn = $('pg2fa-start');
@@ -334,10 +295,10 @@
       });
     }
     if ($('pg2fa-clear')) $('pg2fa-clear').addEventListener('click', function () {
-      state.log = []; var el = $('pg2fa-log'); if (el) el.textContent = '';
+      buf.clear(); var el = $('pg2fa-log'); if (el) el.textContent = '';
     });
     if ($('pg2fa-copy')) $('pg2fa-copy').addEventListener('click', function () {
-      try { navigator.clipboard.writeText(state.log.join('\n')); toast('Log copied', 'success'); } catch (e) {}
+      try { navigator.clipboard.writeText(buf.text()); toast('Log copied', 'success'); } catch (e) {}
     });
   }
 
@@ -351,25 +312,8 @@
     timer = setInterval(refresh, 4000);
     if (tick) clearInterval(tick);
     tick = setInterval(tickTimer, 1000);
-    try {
-      // Shared SSE hub (nova-core.js): one stream per page.
-      if (!window.__pg2faEsShared && typeof window.__novaEsSubscribe === 'function') {
-        window.__pg2faEsShared = true;
-        window.__novaEsSubscribe(handleEvent);
-      } else if (!window.__pg2faEs && typeof window.__novaEsSubscribe !== 'function') {
-        window.__pg2faEs = new EventSource('/api/meta-insta/events');
-        window.__pg2faEs.onmessage = function (ev) {
-          try {
-            var d = JSON.parse(ev.data);
-            if (d && d.type === 'batch' && Array.isArray(d.items)) {
-              for (var i = 0; i < d.items.length; i++) { try { handleEvent(d.items[i]); } catch (e) {} }
-              return;
-            }
-            handleEvent(d);
-          } catch (e) {}
-        };
-      }
-    } catch (e) {}
+    // Shared SSE hub (nova-core.js): one stream per page.
+    NovaPoolPanel.subscribe(handleEvent, 'pg2fa');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

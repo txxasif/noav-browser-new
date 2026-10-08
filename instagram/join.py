@@ -1189,6 +1189,8 @@ class IgJoinMixin:
                 self._touch_scroll(p, dy=random.randint(320, 520))
                 self._human_pause(1.5, 3.0)
                 self.ig_follow_suggested()
+            except IGDeadEnd:
+                raise
             except Exception as exc:
                 self.log(f'[⚠️] Note on feed warm-up: {exc}')
         self.log('[🏠] Instagram session ready.')
@@ -1276,8 +1278,9 @@ class IgJoinMixin:
             # Light warm-up only — a real user pauses a beat. NO big scrolls:
             # follow from the FIRST suggested profile and continue to the next.
             if humanize:
-                self._human_pause(0.6, 1.6)
-            for _ in range(12):
+                self._human_pause(0.3, 0.8)
+            _empty = 0
+            for _ in range(10):
                 if followed >= max_follows:
                     break
                 tapped = False
@@ -1327,7 +1330,7 @@ class IgJoinMixin:
                         self.log(f'[👥] Followed suggested profile ({followed}/{max_follows}).')
                         # Short pause only — enough for IG to flip the button to
                         # "Following" server-side — then continue to the next.
-                        p.wait_for_timeout(random.uniform(1000, 1800))
+                        p.wait_for_timeout(random.uniform(500, 900))
                         break
                     except IGDeadEnd:
                         raise
@@ -1335,12 +1338,21 @@ class IgJoinMixin:
                         pass
                 if not tapped:
                     # Next row may be just below the fold: ONE small nudge, then
-                    # re-collect. No big scrolling.
+                    # re-collect. If TWO consecutive passes find NO Follow button
+                    # at all, there is nothing more to follow — end the pass EARLY
+                    # instead of scrolling through the whole loop (the "stuck
+                    # after 2 follows" case).
+                    _empty += 1
+                    if _empty >= 2:
+                        self.log('[👥] No more suggested Follow buttons — ending the follow pass early.')
+                        break
                     try:
                         self._touch_scroll(p, dy=random.randint(160, 340))
                     except Exception:
                         pass
-                    p.wait_for_timeout(random.uniform(700, 1400))
+                    p.wait_for_timeout(random.uniform(350, 700))
+                else:
+                    _empty = 0
 
             self.log(f'[👥] Follow pass complete: followed {followed} suggested account(s).')
             try:

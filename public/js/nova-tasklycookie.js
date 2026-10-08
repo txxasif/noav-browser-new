@@ -21,46 +21,23 @@
     running: false,
     headless: true,
     cookie2fa: true,
+    source: 'ig',          // 'ig' = IG Creator pool, 'meta' = Meta Creator list
     pool: 0,
+    metaList: 0,
     submitted: 0,
-    startedAt: 0,
-    log: []
+    startedAt: 0
   };
   var MAX_LOG = 500;
   var BOT_ID = 'taskly';
   var TASK = 'Taskly Cookie';           // → tg_tasks.COOKIES_NOMAIL_POOL
   var ROUTE = 'tasklycookie';
 
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
   function $(id) { return document.getElementById(id); }
 
-  function toast(msg, kind, ms) {
-    if (typeof window.showToast === 'function') { try { window.showToast(msg, kind || 'info'); return; } catch (e) {} }
-    var host = $('toast-container');
-    if (!host) return;
-    var el = document.createElement('div');
-    el.className = 'toast ' + (kind || 'info');
-    el.style.cssText = 'position:relative;padding:10px 12px;margin-top:8px;' +
-      'border-left:3px solid #229ED9;border-radius:8px;background:#111726;' +
-      'color:#e2e8f0;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);';
-    el.textContent = msg;
-    host.appendChild(el);
-    setTimeout(function () { try { host.removeChild(el); } catch (e) {} }, ms || 9000);
-  }
-
-  function statCard(label, id, sub, color) {
-    return '<div class="insta-stat-card" style="background:var(--bg-card);' +
-             'border:1px solid var(--border-color);border-radius:var(--radius-md);' +
-             'padding:14px 16px;position:relative;overflow:hidden;">' +
-      '<div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:' + color + ';opacity:.9;"></div>' +
-      '<div class="insta-stat-label" style="color:var(--text-dim);">' + esc(label) + '</div>' +
-      '<div class="insta-stat-value" id="' + id + '" style="color:var(--text-main);">0</div>' +
-      '<div class="insta-stat-sub" style="color:var(--text-muted);">' + esc(sub) + '</div></div>';
-  }
+  // Shared helpers (nova-pool-panel.js).
+  var toast = NovaPoolPanel.toast;
+  var statCard = NovaPoolPanel.statCard;
+  var buf = NovaPoolPanel.logBuffer(MAX_LOG);
 
   function shell() {
     root.innerHTML =
@@ -85,8 +62,9 @@
       '</div>' +
 
       /* ---- KPIs ---- */
-      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">' +
+      '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">' +
         statCard('IG CREATOR POOL', 'tcp-kpi-pool', 'available accounts ready to drain', '#a5b4fc') +
+        statCard('META LIST', 'tcp-kpi-meta', 'Meta accounts ready (IG login)', '#f0abfc') +
         statCard('SUBMITTED (Taskly Cookie)', 'tcp-kpi-submitted', 'cookie task accepted', '#4ade80') +
         statCard('PARALLEL SLOTS', 'tcp-kpi-conc', 'concurrent creators', '#38bdf8') +
         statCard('ENGINE', 'tcp-kpi-status', 'idle', '#229ED9') +
@@ -115,7 +93,7 @@
             '<div style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Lease TG → select <strong>Create Inst (No mail)</strong> → Taskly issues the target login.</div></div>' +
           '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:12px;">' +
             '<div style="font-size:.7rem;color:var(--text-muted);font-weight:700;">2 · RENAME</div>' +
-            '<div style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Pop a pool account → rename via <strong>IG Web API (~0.4s)</strong>.</div></div>' +
+            '<div id="tcp-step2" style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Pop a pool account → rename via <strong>IG Web API (~0.4s)</strong>.</div></div>' +
           '<div style="background:var(--bg-card);border:1px solid var(--border-color);border-radius:10px;padding:12px;">' +
             '<div style="font-size:.7rem;color:var(--text-muted);font-weight:700;">3 · 2FA</div>' +
             '<div style="font-size:.82rem;color:var(--text-main);margin-top:.25rem;">Enable 2FA (wait email OTP) → submit key → confirm the bot code.</div></div>' +
@@ -137,14 +115,21 @@
           '</span>' +
         '</div>' +
         '<div class="creator-grid">' +
+          '<div class="creator-field"><label>Account source</label>' +
+            '<select id="tcp-source" class="form-control" title="IG Creator pool = finished IG accounts (rename by API). Meta list = Meta Creator accounts: log in to Instagram, join with the bot username, follow, export the cookie.">' +
+              '<option value="ig">IG Creator pool</option><option value="meta">Meta list (IG login)</option></select></div>' +
           '<div class="creator-field"><label>Parallel</label>' +
             '<input id="tcp-conc" class="form-control" type="number" min="1" max="10" value="6" title="Concurrent creators. Capped by the number of enabled Telegram profiles."></div>' +
           '<div class="creator-field"><label>Target (0 = \u221e)</label>' +
             '<input id="tcp-target" class="form-control" type="number" min="0" value="0"></div>' +
           '<div class="creator-field creator-field--switch"><label>Headless</label>' +
             '<label class="switch" title="Run browsers headless (recommended)"><input type="checkbox" id="tcp-headless" checked><span class="slider"></span></label></div>' +
-          '<div class="creator-field creator-field--switch"><label>2FA + Cookie</label>' +
-            '<label class="switch" title="ON (default for this task) = rename → 2FA (wait email OTP) → submit key → confirm code → export cookie → submit. OFF = legacy rename + submit the stored cookie (no browser, no 2FA)."><input type="checkbox" id="tcp-cookie2fa" checked><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch" id="tcp-c2fa-wrap"><label>2FA + Cookie</label>' +
+            '<label class="switch" title="ON (default for this task) = MOCK 2FA mode: rename → follow 5 → submit a MOCK 2FA key (no Accounts-Center, no OTP) → export cookie → submit. OFF = legacy rename + submit the stored cookie (no browser, no 2FA)."><input type="checkbox" id="tcp-cookie2fa" checked><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch" id="tcp-igapi-wrap"><label>API mode</label>' +
+            '<label class="switch" title="ON = BROWSERLESS IG private-API path: rename, follow 5 (random from the fixed operator list), REAL 2FA, password, email and cookie all via the API — no browser. OFF = the existing browser logic (default)."><input type="checkbox" id="tcp-igapi"><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch" id="tcp-igapimock-wrap" style="display:none;"><label>Mock 2FA</label>' +
+            '<label class="switch" title="API mode only. ON = submit a MOCK 2FA key and skip the real 2FA enable. OFF (default) = REAL 2FA via the API."><input type="checkbox" id="tcp-igapimock"><span class="slider"></span></label></div>' +
         '</div>' +
         '<div class="creator-service-note" style="margin-top:.6rem;">' +
           '<i class="fa-solid fa-circle-info" style="color:#229ED9;"></i> ' +
@@ -173,29 +158,15 @@
   }
 
   function append(line) {
-    var entry = '[' + new Date().toLocaleTimeString() + '] ' + line;
-    state.log.push(entry);
-    if (state.log.length > MAX_LOG) state.log = state.log.slice(-400);
+    buf.push(line);
     var el = $('tcp-log');
     if (!el) return;
-    el.textContent = state.log.join('\n');
+    el.textContent = buf.text();
     var auto = $('tcp-autoscroll');
     if (!auto || auto.checked) el.scrollTop = el.scrollHeight;
   }
 
-  function post(url, body) {
-    append('> POST ' + url + ' ' + JSON.stringify(body || {}));
-    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body || {}) })
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        append('< ' + JSON.stringify(j));
-        if (j && (j.error || j.status === 'ERROR')) toast(j.error || 'Request failed', 'error', 12000);
-        setTimeout(refresh, 400);
-        return j;
-      })
-      .catch(function (e) { append('! ' + e); toast('Request failed: ' + e, 'error', 12000); });
-  }
+  function post(url, body) { return NovaPoolPanel.postJson(url, body, append, refresh); }
 
   function start() {
     var btn = $('tcp-start');
@@ -208,32 +179,45 @@
         var pool = (s.pool && s.pool.accounts) || [];
         var enabled = pool.filter(function (p) { return p.enabled !== false; });
         var connected = enabled.filter(function (p) { return p.logged_in === true; }).length;
-        if (!pool.length) { toast('No Telegram account is connected. Add one in TG Manager first.', 'error', 14000); return; }
-        if (!enabled.length) { toast('Every Telegram profile is disabled. Enable at least one.', 'error', 14000); return; }
-        if (!connected) { toast('No logged-in Telegram profile. Log one in, then start.', 'error', 14000); return; }
-        var avail = s.ig_pool_available || 0;
-        if (!avail) { toast('IG Creator pool is empty — nothing to drain.', 'error', 14000); return; }
+        if (!pool.length) { append('> blocked: no Telegram account connected.'); toast('No Telegram account is connected. Add one in TG Manager first.', 'error', 14000); return; }
+        if (!enabled.length) { append('> blocked: every Telegram profile is disabled.'); toast('Every Telegram profile is disabled. Enable at least one.', 'error', 14000); return; }
+        if (!connected) { append('> blocked: no logged-in Telegram profile.'); toast('No logged-in Telegram profile. Log one in, then start.', 'error', 14000); return; }
+        var isMeta = state.source === 'meta';
+        var avail = isMeta ? (s.meta_list_available || 0) : (s.ig_pool_available || 0);
+        if (!avail) {
+          var what = isMeta ? 'Meta list' : 'IG Creator pool';
+          append('> blocked: ' + what + ' is empty (0).');
+          toast(what + ' is empty — nothing to drain.', 'error', 14000);
+          return;
+        }
         var conc = parseInt(($('tcp-conc') || {}).value || 1, 10);
         var target = parseInt(($('tcp-target') || {}).value || 0, 10);
         var c2fa = $('tcp-cookie2fa') ? $('tcp-cookie2fa').checked : true;
+        var apiOn = (state.source === 'meta') ? false : ($('tcp-igapi') ? $('tcp-igapi').checked : false);
+        var apiMockOn = $('tcp-igapimock') ? $('tcp-igapimock').checked : false;
+        var task = TASK;
         state.cookie2fa = c2fa;
-        append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
+        append('> start (' + (isMeta ? 'meta-list=' : 'pool=') + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
                ', ' + (state.headless ? 'headless' : 'visible') +
-               ', 2fa+cookie=' + (c2fa ? 'ON' : 'OFF') + ')');
+               ', 2fa+cookie=' + (c2fa ? 'ON' : 'OFF') +
+               ', api=' + (apiOn ? (apiMockOn ? 'MOCK-2FA' : 'REAL-2FA') : 'OFF') + ')');
         var _doPost = function () { post('/api/tg/start', {
           concurrency: conc,
           target: target,
           headless: state.headless,
           captcha: 'extension',
-          tg_task: TASK,
+          tg_task: task,
           tg_bot: BOT_ID,
           add_email: false,
           use_ig_pool: true,
-          cookie_2fa: c2fa
+          account_source: state.source,
+          cookie_2fa: c2fa,
+          ig_api: apiOn,
+          ig_api_mock: (apiOn && apiMockOn)
         }); };
         if (typeof window.__tgTaskCheck === 'function') {
-          window.__tgTaskCheck(BOT_ID, TASK, append).then(function (pre) {
+          window.__tgTaskCheck(BOT_ID, task, append).then(function (pre) {
             if (pre.proceed) _doPost(); else if (btn) btn.disabled = false;
           });
         } else _doPost();
@@ -256,6 +240,7 @@
     cfg = cfg || {};
     var activeBot = cfg.tg_bot ? String(cfg.tg_bot).toLowerCase() : null;
     var cfgTask = String(cfg.tg_task || '');
+    // Taskly cookie POOL drain belongs to this page.
     var isMine = !!(running && activeBot === BOT_ID && cfg.use_ig_pool
                     && /taskly cookie/i.test(cfgTask));
     var isOther = !!(running && activeBot && !isMine);
@@ -280,7 +265,7 @@
         ? ('Taskly Create Inst (No mail) · parallel ' + (cfg.concurrency || '-') + ' · ' + (cfg.headless ? 'headless' : 'visible'))
         : isOther
           ? ('⚡ ' + otherName + ' is running (one engine at a time). Stop it from its own page.')
-          : 'Ready. Reuses pooled IG accounts — no Meta.';
+          : (state.source === 'meta' ? 'Ready. Logs Meta-list accounts in to Instagram.' : 'Ready. Reuses pooled IG accounts — no Meta.');
     }
     state.isMine = isMine;
     if (startBtn) startBtn.style.display = running ? 'none' : 'inline-flex';
@@ -293,7 +278,7 @@
       kpi.textContent = isMine ? 'LIVE' : (isOther ? otherName.toUpperCase() : 'IDLE');
       kpi.style.color = (isMine || isOther) ? '#4ade80' : '#229ED9';
     }
-    if (kpi && kpi.nextElementSibling) kpi.nextElementSibling.textContent = isMine ? 'draining the IG pool' : (isOther ? (otherName + ' is running') : 'idle');
+    if (kpi && kpi.nextElementSibling) kpi.nextElementSibling.textContent = isMine ? (state.source === 'meta' ? 'draining the Meta list' : 'draining the IG pool') : (isOther ? (otherName + ' is running') : 'idle');
   }
 
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -312,8 +297,10 @@
         if (!s) return;
         setRunning(s.running, s.engine || null);
         state.pool = s.ig_pool_available || 0;
+        state.metaList = s.meta_list_available || 0;
         state.submitted = s.tg_submitted_taskly_cookie_pool || 0;
         var p = $('tcp-kpi-pool'); if (p) p.textContent = String(state.pool);
+        var ml = $('tcp-kpi-meta'); if (ml) ml.textContent = String(state.metaList);
         var sub = $('tcp-kpi-submitted'); if (sub) sub.textContent = String(state.submitted);
         var c = $('tcp-kpi-conc'); if (c) c.textContent = String((s.engine && s.engine.concurrency) || 0);
       })
@@ -333,10 +320,58 @@
     if (d.type === 'loop_stopped') { append('[engine] loop stopped' + (d.exit_code != null ? ' (code ' + d.exit_code + ')' : '')); refresh(); }
   }
 
+  // Reflect the chosen account source in the pipeline copy.
+  function applySource() {
+    var meta = state.source === 'meta';
+    var s2 = $('tcp-step2');
+    if (s2) s2.innerHTML = meta
+      ? 'Claim a Meta-list account → <strong>IG login</strong> (before the task) → join with the bot username → follow.'
+      : 'Pop a pool account → rename via <strong>IG Web API (~0.4s)</strong>.';
+    var sub = $('tcp-sub');
+    if (sub && !state.running) sub.textContent = meta
+      ? 'Ready. Logs Meta-list accounts in to Instagram.'
+      : 'Ready. Reuses pooled IG accounts — no Meta.';
+    var sel = $('tcp-source'); if (sel && sel.value !== state.source) sel.value = state.source;
+    // Meta list ignores these (it always joins + follows in the browser and
+    // sends the mock 2FA key whenever the task asks for one) — hide them.
+    ['tcp-c2fa-wrap', 'tcp-igapi-wrap'].forEach(function (id) {
+      var w = $(id); if (w) w.style.display = meta ? 'none' : '';
+    });
+    var mw = $('tcp-igapimock-wrap');
+    if (mw) mw.style.display = (!meta && $('tcp-igapi') && $('tcp-igapi').checked) ? '' : 'none';
+  }
+
   function wire() {
+    if ($('tcp-source')) {
+      try { if (localStorage.getItem('nova_tcp_source') === 'meta') state.source = 'meta'; } catch (e) {}
+      $('tcp-source').addEventListener('change', function () {
+        state.source = this.value === 'meta' ? 'meta' : 'ig';
+        try { localStorage.setItem('nova_tcp_source', state.source); } catch (e) {}
+        applySource();
+      });
+      applySource();
+    }
     if ($('tcp-start')) $('tcp-start').addEventListener('click', start);
     if ($('tcp-stop')) $('tcp-stop').addEventListener('click', stop);
     if ($('tcp-headless')) $('tcp-headless').addEventListener('change', function () { state.headless = this.checked; });
+    if ($('tcp-igapi')) {
+      try { if (localStorage.getItem('nova_tcp_igapi') === '1') $('tcp-igapi').checked = true; } catch (e) {}
+      var syncMock = function () {
+        var w = $('tcp-igapimock-wrap');
+        if (w) w.style.display = $('tcp-igapi').checked ? '' : 'none';
+      };
+      $('tcp-igapi').addEventListener('change', function () {
+        try { localStorage.setItem('nova_tcp_igapi', this.checked ? '1' : '0'); } catch (e) {}
+        syncMock();
+      });
+      syncMock();
+    }
+    if ($('tcp-igapimock')) {
+      try { if (localStorage.getItem('nova_tcp_igapimock') === '1') $('tcp-igapimock').checked = true; } catch (e) {}
+      $('tcp-igapimock').addEventListener('change', function () {
+        try { localStorage.setItem('nova_tcp_igapimock', this.checked ? '1' : '0'); } catch (e) {}
+      });
+    }
     if ($('tcp-cookie2fa')) {
       try { if (localStorage.getItem('nova_tcp_cookie2fa') === '0') { $('tcp-cookie2fa').checked = false; state.cookie2fa = false; } } catch (e) {}
       $('tcp-cookie2fa').addEventListener('change', function () {
@@ -351,11 +386,12 @@
       });
     }
     if ($('tcp-clear')) $('tcp-clear').addEventListener('click', function () {
-      state.log = []; var el = $('tcp-log'); if (el) el.textContent = '';
+      buf.clear(); var el = $('tcp-log'); if (el) el.textContent = '';
     });
     if ($('tcp-copy')) $('tcp-copy').addEventListener('click', function () {
-      try { navigator.clipboard.writeText(state.log.join('\n')); toast('Log copied', 'success'); } catch (e) {}
-    });
+      try { navigator.clipboard.writeText(buf.text()); toast('Log copied', 'success'); } catch (e) {}
+    });    // Re-apply last: the saved API-mode state must not re-show Mock 2FA for Meta list.
+    applySource();
   }
 
   function boot() {
@@ -368,24 +404,8 @@
     timer = setInterval(refresh, 4000);
     if (tick) clearInterval(tick);
     tick = setInterval(tickTimer, 1000);
-    try {
-      if (!window.__tcpEsShared && typeof window.__novaEsSubscribe === 'function') {
-        window.__tcpEsShared = true;
-        window.__novaEsSubscribe(handleEvent);
-      } else if (!window.__tcpEs && typeof window.__novaEsSubscribe !== 'function') {
-        window.__tcpEs = new EventSource('/api/meta-insta/events');
-        window.__tcpEs.onmessage = function (ev) {
-          try {
-            var d = JSON.parse(ev.data);
-            if (d && d.type === 'batch' && Array.isArray(d.items)) {
-              for (var i = 0; i < d.items.length; i++) { try { handleEvent(d.items[i]); } catch (e) {} }
-              return;
-            }
-            handleEvent(d);
-          } catch (e) {}
-        };
-      }
-    } catch (e) {}
+    // Shared SSE hub (nova-core.js): one stream per page.
+    NovaPoolPanel.subscribe(handleEvent, 'tcp');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

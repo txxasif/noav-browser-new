@@ -44,10 +44,26 @@ from tg_flows import step_label  # noqa: E402
 from run_cookie_cycle import (  # noqa: E402
     change_ig_username_fast,
     _is_account_dead_error,
+    _is_ig_checkpoint_error,
+    _IG_CHECKPOINT_STOP,
+    _IG_CHALLENGE_COOLDOWN,
+    _ig_challenge_until,
+    _trip_challenge_backoff,
     _all_flooded_until,
     _sleep_until,
     _ig_spam_streak,
     _IG_SPAM_STOP,
+)
+from pool_common import (  # noqa: E402
+    _cookies_for_playwright,
+    _mail_tokens_from_extra,
+    _mailtd_list,
+    _mailtd_http_list,
+    _mailtd_http_body,
+    _mailtd_http_code,
+    _make_pool_fetch_code,
+    _purge_pool_account,
+    _browser_logged_in,
 )
 from pipelines.telegram.tg_support import (  # noqa: E402
     _boot_bot,
@@ -58,6 +74,10 @@ from pipelines.telegram.tg_support import (  # noqa: E402
     _sanitize_name,
     IGDeadEnd,
 )
+# Browserless API path (opt-in via IG_API_MODE=1). The browser code below is
+# untouched when the switch is OFF (invariant 24).
+from instagram import ig_api  # noqa: E402
+from instagram import ig_api_cycle  # noqa: E402
 
 POOL_TASK = "Taskly 2FA"          # alias → tg_tasks.INST_2FA_POOL (pool_2fa flow)
 POOL_FLOW = "pool_2fa"
@@ -66,252 +86,6 @@ TASK_WINDOW = 420                 # bot ~8-min TTL; fail fast past it
 
 def log(slot_id, m):
     print(f"[pool2fa:{slot_id}] {m}", flush=True)
-
-
-def _cookies_for_playwright(cookie_str: str) -> list:
-    """Parse a '; k=v' cookie header into Playwright add_cookies() dicts."""
-    out = []
-    for part in str(cookie_str or "").split(";"):
-        part = part.strip()
-        if "=" not in part:
-            continue
-        name, val = part.split("=", 1)
-        name = name.strip()
-        if not name:
-            continue
-        out.append({"name": name, "value": val, "domain": ".instagram.com", "path": "/"})
-    return out
-
-
-def _mail_tokens_from_extra(extra) -> dict:
-    """Extract the stored mail.td {tempmail_account_id, tempmail_token}."""
-    try:
-        ex = extra
-        if isinstance(ex, str):
-            ex = json.loads(ex) if ex.strip() else {}
-        toks = (ex or {}).get("mail_tokens") or {}
-        if isinstance(toks, dict) and toks.get("tempmail_token"):
-            return toks
-    except Exception:
-        pass
-    return {}
-
-
-def _mailtd_list(runner):
-    """Return the raw mail.td message list for the runner's stored inbox."""
-    try:
-        mail = getattr(runner, "mail", None)
-        if mail is None or mail.is_closed():
-            return []
-        ctx = runner._mailtd_api_ctx()
-        if not ctx:
-            return []
-        res = mail.evaluate("""async ({id, token}) => {
-            try {
-                const r = await fetch('/api/accounts/' + id + '/messages?page=1',
-                    {headers: {Authorization: 'Bearer ' + token}});
-                if (!r.ok) return {status: r.status, messages: []};
-                const j = await r.json();
-                return {status: 200, messages: (j && j.messages) || []};
-            } catch (e) { return {status: -1, messages: []}; }
-        }""", {"id": ctx["id"], "token": ctx["token"]})
-        return (res or {}).get("messages") or []
-    except Exception:
-        return []
-
-
-def _mailtd_http_list(tokens):
-    """Message list via mail.td REST over plain HTTP — NO browser page/tab.
-
-    The pooled account already stores its own mailbox credential
-    (``extra.mail_tokens``), so the OTP can be read with one HTTP GET instead of
-    driving a Playwright mail tab (``mail.evaluate(fetch(...))``). Measured
-    ~0.7s for the list + ~0.3s for one body on a live inbox.
-    """
-    try:
-        import requests
-        tok = (tokens or {}).get("tempmail_token")
-        aid = (tokens or {}).get("tempmail_account_id")
-        if not tok or not aid:
-            return []
-        r = requests.get(
-            f"https://mail.td/api/accounts/{aid}/messages?page=1",
-            headers={"Authorization": "Bearer " + tok, "Accept": "application/json"},
-            timeout=12)
-        if r.status_code != 200:
-            return []
-        return (r.json() or {}).get("messages") or []
-    except Exception:
-        return []
-
-
-def _mailtd_http_body(tokens, mid):
-    """Full message text (subject + html_body + text_body) via plain HTTP."""
-    try:
-        import requests
-        tok = (tokens or {}).get("tempmail_token")
-        aid = (tokens or {}).get("tempmail_account_id")
-        if not tok or not aid or not mid:
-            return ""
-        r = requests.get(
-            f"https://mail.td/api/accounts/{aid}/messages/{mid}",
-            headers={"Authorization": "Bearer " + tok, "Accept": "application/json"},
-            timeout=12)
-        if r.status_code != 200:
-            return ""
-        j = r.json() or {}
-        return " ".join(str(j.get(k) or "") for k in
-                        ("subject", "html_body", "text_body", "text", "body"))
-    except Exception:
-        return ""
-
-
-def _mailtd_http_code(runner, tokens, preexisting_ids, keyword, timeout,
-                      subject_hint=None, prefer_len=None):
-    """Poll the stored inbox over HTTP for a FRESH matching code (no browser).
-
-    Always takes the NEWEST matching message (``created_at`` desc) and never
-    returns a code whose message id predates the snapshot. Returns None when
-    nothing usable arrives — the caller then falls back to the bot / browser.
-    """
-    if not tokens:
-        return None
-    end = time.time() + max(5, int(timeout or 60))
-    seen = {}
-    while time.time() < end:
-        msgs = [m for m in _mailtd_http_list(tokens)
-                if str(m.get("id")) not in preexisting_ids]
-        try:
-            msgs.sort(key=lambda m: str(m.get("created_at") or m.get("createdAt")
-                                        or m.get("updated_at") or m.get("updatedAt")
-                                        or m.get("id") or ""), reverse=True)
-        except Exception:
-            pass
-        for msg in msgs:
-            mid = msg.get("id")
-            subject = str(msg.get("subject") or "").lower()
-            sender = str(msg.get("from") or msg.get("sender") or "").lower()
-            if subject_hint:
-                hints = [h.strip().lower() for h in str(subject_hint).split("|") if h.strip()]
-                if not (any(h in subject or h in sender for h in hints)
-                        or any(d in sender for d in ("meta", "instagram", "facebook"))):
-                    continue
-            text = seen.get(mid)
-            if text is None and mid:
-                text = _mailtd_http_body(tokens, mid)
-                seen[mid] = text
-            try:
-                code = runner._pick_code(text or "", keyword, set(), prefer_len=prefer_len)
-            except Exception:
-                code = None
-            if code:
-                try:
-                    runner.log(f'[📧] fresh {keyword} code (HTTP): {code} '
-                               f'(subject: {subject[:40]})')
-                except Exception:
-                    pass
-                if isinstance(preexisting_ids, set):
-                    preexisting_ids.add(str(mid))
-                return code
-        time.sleep(0.8)
-    return None
-
-
-def _make_pool_fetch_code(runner, preexisting_ids, bot=None):
-    """A ``fetch_code`` for the pooled flow.
-
-    Order: (1) plain-HTTP read of the account's STORED inbox — fastest, no
-    browser tab; (2) the BOT's ``📥 Get code`` (the bot-issued email); (3) the
-    legacy browser-tab read as a last resort.
-    """
-    _tokens = {}
-    try:
-        _tokens = dict(getattr(runner, "mail_tokens", None) or {})
-    except Exception:
-        _tokens = {}
-
-    def _fetch(keyword="instagram", timeout=60, subject_hint=None, prefer_len=None, **kwargs):
-        # (1) FAST PATH — plain HTTP against the account's stored inbox. The
-        #     Accounts-Center challenge mails the account's own address, so this
-        #     is both the correct source AND the cheapest read.
-        try:
-            c = _mailtd_http_code(runner, _tokens, preexisting_ids, keyword,
-                                  timeout, subject_hint=subject_hint, prefer_len=prefer_len)
-            if c:
-                return c
-        except Exception:
-            pass
-        # (2) BOT Get-code (only useful once the bot email is linked).
-        if bot is not None:
-            try:
-                c = bot.request_email_code(timeout=min(int(timeout or 45), 45))
-                if c:
-                    try:
-                        runner.log(f"[📧] bot Get-code returned: {c}")
-                    except Exception:
-                        pass
-                    return c
-            except Exception:
-                pass
-        # NO browser-tab fallback: ``_ensure_mail_tab`` opened a new mail.td tab
-        # (goto ≤45s + reload ≤45s) and, on a stale/expired token, polled an
-        # empty inbox until timeout — the "stuck + mail.td in a new tab" hang
-        # (2026-10-05). If HTTP + bot both missed, the caller already falls
-        # through to the 2FA submit instead of stalling.
-        try:
-            runner.log("[📧] No OTP from stored inbox or bot — not opening a mail tab; "
-                       "continuing (the caller falls through to 2FA).")
-        except Exception:
-            pass
-        return None
-    return _fetch
-
-
-def _purge_pool_account(store, cand, log, slot_id, emit_event, reason):
-    """Permanently remove a pooled account that cannot be used (dead session,
-    login wall, no 2FA key). Never cancels the TG task — the caller just moves
-    on to the next account."""
-    cid = (cand or {}).get("id")
-    if not cid:
-        return
-    try:
-        store.delete_record(cid)
-    except Exception:
-        pass
-    sf = (cand or {}).get("session_file")
-    if sf and os.path.exists(sf):
-        try:
-            os.remove(sf)
-        except Exception:
-            pass
-    try:
-        log(slot_id, f"[pool] Purged account {cid} ({reason}) — trying the next.")
-    except Exception:
-        pass
-    emit_event({"type": "account_deleted", "account_id": cid})
-    emit_event({"type": "accounts_updated"})
-
-
-def _browser_logged_in(page) -> bool:
-    """True when the injected pooled session is actually logged in.
-
-    A logged-OUT browser shows the saved-account chooser ("Use another
-    profile"), the /accounts/login wall, or a public visitor view ("Log in" +
-    "Open app"). The benign "Save your login info" sheet is NOT a logged-out
-    signal, so it must not be treated as one.
-    """
-    try:
-        url = (page.url or "").lower()
-        t = (page.inner_text("body") or "").lower()
-    except Exception:
-        return True
-    if "/accounts/login" in url:
-        return False
-    if "use another profile" in t:
-        return False
-    if ("log in" in t or "login" in t) and "open app" in t:
-        return False
-    return True
 
 
 def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
@@ -336,6 +110,15 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
     if _stopped():
         return False, "stopped"
+
+    # IP-level rename challenge cooldown — check BEFORE leasing/Start so a parked
+    # slot does NOT burn a bot task window (see run_cookie_cycle).
+    if time.time() < _ig_challenge_until[0]:
+        _remain = int(_ig_challenge_until[0] - time.time())
+        log(slot_id, f"[pool] IG rename CHALLENGE cooldown — parking {min(_remain, 60)}s "
+                     f"before leasing (accounts stay safe in the pool).")
+        _sleep_until(time.time() + max(1, min(_remain, 60)), stop_event)
+        return False, "ig_challenge_cooldown"
 
     # Reclaim submittals abandoned by an abrupt stop BEFORE the pool-empty
     # gate — otherwise stuck claims make the pool look empty and the drain
@@ -429,6 +212,10 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
         log(slot_id, f"[creds] Taskly issued target username: '{login}'")
 
         # -- Browser (launch ONCE; reused across pool-account retries) --------
+        # NOTE: API mode still launches the browser — the API can do rename,
+        # but the follow/2FA WRITES need a mobile session IG no longer issues to
+        # raw clients, so those steps fall back to the browser (Accounts Center).
+        _api = ig_api.api_mode()
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
                     "detail": "Pool 2FA: launching browser with the pooled IG session…"})
         worker = worker_factory(slot_id=slot_id, is_headless=is_headless)
@@ -462,6 +249,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
         #    The TG task is NEVER cancelled — bot creds stay valid across tries.
         secret = None
         _2fa_already_on = False
+        _api_2fa_done = False
         MAX_POOL_TRIES = 6
         for _try in range(MAX_POOL_TRIES):
             if _stopped():
@@ -525,6 +313,24 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                     except Exception as exc:
                         log(slot_id, f"[⚠️] post-rename IG sync note: {exc}")
                     break
+                if _is_ig_checkpoint_error(name_msg):
+                    _ig_spam_streak[0] += 1
+                    try:
+                        store.mark_ig_creator_challenged(cand_id)
+                    except Exception:
+                        pass
+                    emit_event({"type": "accounts_updated"})
+                    if _IG_CHECKPOINT_STOP > 0 and _ig_spam_streak[0] >= _IG_CHECKPOINT_STOP:
+                        _ig_spam_streak[0] = 0
+                        _cd = _trip_challenge_backoff()
+                        raise RuntimeError(
+                            f"IG rename CHALLENGED on {_IG_CHECKPOINT_STOP} consecutive accounts "
+                            f"({name_msg[:60]}) — IP-level checkpoint; pausing the drain "
+                            f"{_cd}s (accounts restored, none purged).")
+                    log(slot_id, f"⚠️ [pool] Rename CHALLENGED ({name_msg[:80]}) — RESTORING "
+                                 f"account (NOT purging) [{_ig_spam_streak[0]}/{_IG_CHECKPOINT_STOP}].")
+                    pool_acc = None
+                    continue
                 if _is_account_dead_error(name_msg):
                     _purge_pool_account(store, cand, log, slot_id, emit_event, f"dead/banned ({name_msg})")
                     continue
@@ -586,7 +392,22 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             #     email linking and 2FA open cleanly without challenge.
             cur_pw = pool_acc.get("password") or runner.password
             target_pw = (runner.tg_creds or {}).get("password") or runner.new_password
-            if target_pw and target_pw != cur_pw:
+            if target_pw and target_pw != cur_pw and ig_api.api_mode():
+                # ---- BROWSERLESS password change (mobile API) ----
+                _c = ig_api_cycle.client_for(pool_acc, username=login, password=cur_pw)
+                _api_ok = ig_api_cycle.change_password(
+                    _c, cur_pw, target_pw, lambda m, _s=slot_id: log(_s, m))
+                if _api_ok:
+                    runner.password = target_pw
+                    try:
+                        pool_acc["password"] = target_pw
+                    except Exception:
+                        pass
+                    log(slot_id, "[🔑][api] Password updated to the TG task password.")
+                else:
+                    log(slot_id, "[⚠️][api] Password change failed — continuing "
+                                 "(the bot accepts the registration).")
+            elif target_pw and target_pw != cur_pw:
                 ok_pw = False
                 why = "unknown"
                 for _pw_try in range(2):
@@ -621,7 +442,19 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
                 _get_code_pressed["v"] = True
                 return bot.request_email_code(timeout=45)
 
-            if bot_em:
+            if bot_em and ig_api.api_mode():
+                # ---- BROWSERLESS email link (send_confirm_email -> code -> verify) ----
+                _c = ig_api_cycle.client_for(pool_acc, username=login,
+                                             password=pool_acc.get("password") or "")
+                try:
+                    linked = ig_api_cycle.link_email(
+                        _c, bot, bot_em, lambda m, _s=slot_id: log(_s, m),
+                        fetch_code=_fetch_bot_email_code)
+                except Exception as exc:
+                    linked = False
+                    log(slot_id, f"[⚠️][api] email link error ({exc}) — continuing to 2FA.")
+                log(slot_id, f"[✉️][api] Bot email linkage result: {linked} (continuing to 2FA)")
+            elif bot_em:
                 log(slot_id, f"[✉️] Linking bot-issued email {bot_em} via 📥 Get code…")
                 try:
                     linked = runner.ig_link_email_to_instagram(
@@ -670,6 +503,39 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
 
             emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                         "detail": f"2FA setup on pooled IG account ({login})…"})
+            if ig_api.api_mode():
+                # ---- BROWSERLESS 2FA (generate seed -> submit to bot -> enable) ----
+                if ig_api.mock_2fa():
+                    # API-mock toggle ON: submit a MOCK key (no IG 2FA enable).
+                    import secrets as _secrets
+                    secret = (_secrets.token_hex(8).upper().replace("0", "A")
+                              .replace("1", "B").replace("8", "C").replace("9", "D"))
+                    log(slot_id, f"[🔑][api] MOCK 2FA key ({secret[:4]}****); submitting to the bot…")
+                    try:
+                        bot.submit_2fa_key(secret, allow_local_fallback=True)
+                    except Exception as _exc:
+                        log(slot_id, f"[⚠️][api] MOCK 2FA submit note ({_exc}).")
+                    _api_2fa_done = True
+                    break
+                _c = ig_api_cycle.client_for(pool_acc, username=login,
+                                             password=pool_acc.get("password") or "")
+                try:
+                    secret, _api_ok = ig_api_cycle.enable_2fa(
+                        _c, bot, lambda m, _s=slot_id: log(_s, m),
+                        parked_seed=ig_api_cycle.parked_seed_of(pool_acc))
+                except IGDeadEnd as exc:
+                    _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                        f"api dead end during 2FA ({exc})")
+                    pool_acc = None
+                    raise RuntimeError(f"IG dead end during API 2FA ({exc})")
+                if secret and _api_ok:
+                    _api_2fa_done = True
+                    break
+                # API 2FA is unusable (enable is 403 without a mobile session IG
+                # no longer issues to raw clients) → fall through to the browser
+                # 2FA (Accounts Center) below. The browser is launched already.
+                log(slot_id, "[⚠️][api] API 2FA not usable — falling back to the browser "
+                             "(Accounts Center) for this account.")
             try:
                 secret = runner.ig_2fa_begin()
             except IGDeadEnd as exc:
@@ -712,38 +578,41 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             raise RuntimeError("Could not reach 2FA setup on any pooled IG account")
 
         acc_id = pool_acc["id"]
-        log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
-        code = bot.submit_2fa_key(secret, allow_local_fallback=False)
-        if not code:
-            raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
-        if _2fa_already_on:
-            # 2FA was already enabled with the parked seed — there is no IG setup
-            # dialog to confirm. The bot holds the key and derived the code; we
-            # just cross-check that the seed is the one generating it (advisory).
-            log(slot_id, "✔ 2FA already enabled on the pooled account (parked seed) — no IG confirm needed.")
+        if _api_2fa_done:
+            log(slot_id, f"✔ [api] 2FA enabled via API — key already submitted to {bot_id}.")
         else:
-            log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
-            if not runner.ig_2fa_confirm(code):
-                # Bot TOTP stale/wrong — we hold the same secret, so compute it
-                # locally and retry (waiting out the 30s window if unchanged).
-                ok2 = False
-                try:
-                    import re as _re
-                    import pyotp
-                    _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
-                    for _t in range(3):
-                        local = pyotp.TOTP(_s).now()
-                        if local != str(code):
-                            log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
-                            if runner.ig_2fa_confirm(local):
-                                ok2 = True
-                                break
-                        time.sleep(31 - (int(time.time()) % 30))
-                except Exception as exc:
-                    log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
-                if not ok2:
-                    raise RuntimeError("Instagram rejected the 2FA code")
-            log(slot_id, "✔ 2FA enabled on the pooled account.")
+            log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
+            code = bot.submit_2fa_key(secret, allow_local_fallback=False)
+            if not code:
+                raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
+            if _2fa_already_on:
+                # 2FA was already enabled with the parked seed — there is no IG setup
+                # dialog to confirm. The bot holds the key and derived the code; we
+                # just cross-check that the seed is the one generating it (advisory).
+                log(slot_id, "✔ 2FA already enabled on the pooled account (parked seed) — no IG confirm needed.")
+            else:
+                log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
+                if not runner.ig_2fa_confirm(code):
+                    # Bot TOTP stale/wrong — we hold the same secret, so compute it
+                    # locally and retry (waiting out the 30s window if unchanged).
+                    ok2 = False
+                    try:
+                        import re as _re
+                        import pyotp
+                        _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
+                        for _t in range(3):
+                            local = pyotp.TOTP(_s).now()
+                            if local != str(code):
+                                log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
+                                if runner.ig_2fa_confirm(local):
+                                    ok2 = True
+                                    break
+                            time.sleep(31 - (int(time.time()) % 30))
+                    except Exception as exc:
+                        log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
+                    if not ok2:
+                        raise RuntimeError("Instagram rejected the 2FA code")
+                log(slot_id, "✔ 2FA enabled on the pooled account.")
 
 
 

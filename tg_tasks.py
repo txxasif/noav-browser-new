@@ -213,6 +213,9 @@ TASKS = {
                 {"all": ["🍪"], "none": ["create inst", "twitter"]},  # 🍪 category (emoji-only button, no text — 2026-10-07)
                 {"all": ["create inst", "no mail"], "none": ["twitter"]},  # 🍪 Create Inst (No mail)
             ],
+            # Follow 5 (the bot asks "did you make 5 subscriptions?" before it
+            # accepts the report).
+            "follow": 5,
         },
         # SAME bot button as COOKIES_NOMAIL, run as a POOL DRAIN (new "Taskly
         # Cookie" panel): reuse a pre-created IG account — rename via Web API,
@@ -227,9 +230,9 @@ TASKS = {
                 {"all": ["🍪"], "none": ["create inst", "twitter"]},
                 {"all": ["create inst", "no mail"], "none": ["twitter"]},
             ],
-            # Taskly's cookie task needs NO follows — skip the follow step
-            # entirely (operator 2026-10-07): just 2FA then cookie submit.
-            "follow": 0,
+            # Follow 5 (same as the PayGo cookie pool): the bot asks "did you
+            # make 5 subscriptions?" before accepting the report.
+            "follow": 5,
         },
     },
     "paygo": {

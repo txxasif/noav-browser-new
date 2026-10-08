@@ -1,4 +1,6 @@
 const paygoOrchestrator = require('./paygo-orchestrator');
+const cookieOrchestrator = require('./cookie-orchestrator');
+const { buildTgWorkerArgs, tgRouteOf } = require('./tg-start');
 let _orchestratorInit = false;
 // One withdrawal at a time: two concurrent runs would each freeze/unfreeze the
 // same file flag and could unfreeze while the other is still touching sessions.
@@ -9,6 +11,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
   if (!_orchestratorInit) {
     _orchestratorInit = true;
     paygoOrchestrator.init(ctx);
+    cookieOrchestrator.init(ctx);
   }
   const { fs, path, spawn, ROOT_DIR, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, runPythonJson, resolveScript, loadAccounts, getAccounts, readTgPool, tgPoolUsable, readEnabledBots, defaultBot, storedGlobalPassword, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, fastpayCount, fastpayList, fastpayAdd, fastpayRemove, readSettings, writeSettings } = ctx;
 
@@ -481,6 +484,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         }, 5000);
         slot().config = null;
         try { paygoOrchestrator.notifyUserStopped(); } catch (e) {}
+        try { cookieOrchestrator.notifyUserStopped(); } catch (e) {}
         broadcastEvent({ type: 'log', pipeline: 'telegram',
           message: '[tg] Freeze: stopping the running TG engine so its leases release…' });
       }
@@ -509,6 +513,44 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       }
       try { writeSettings({ bep20Wallet: w }); } catch (e) {}
       sendJson(req, res, { status: 'SUCCESS', wallet: w });
+    });
+    return true;
+  }
+
+  // Cookie-drain bot failover priority (dashboard order; engine reads the same
+  // key from data/settings.json). Only bots with a cookie task are allowed —
+  // intersected with this build's bot manifest so subset builds can't persist
+  // (or serve) an unshipped bot.
+  var COOKIE_BOTS = ['paygo', 'taskly'];
+  function cookieKnown() {
+    try {
+      var eb = readEnabledBots();
+      if (Array.isArray(eb) && eb.length) return COOKIE_BOTS.filter(b => eb.indexOf(b) !== -1);
+    } catch (e) {}
+    return COOKIE_BOTS.slice();
+  }
+  if (pathname === '/api/tg/cookie-priority' && req.method === 'GET') {
+    const KNOWN = cookieKnown();
+    let order = []; try { order = readSettings().tg_cookie_priority || []; } catch (e) {}
+    order = (Array.isArray(order) ? order : []).map(String).filter(b => KNOWN.includes(b));
+    KNOWN.forEach(b => { if (!order.includes(b)) order.push(b); });
+    sendJson(req, res, { status: 'SUCCESS', order: order });
+    return true;
+  }
+  if (pathname === '/api/tg/cookie-priority' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const KNOWN = cookieKnown();
+      const seen = [], order = [];
+      (Array.isArray(b.order) ? b.order : []).forEach(x => {
+        const id = String(x || '').toLowerCase();
+        if (KNOWN.includes(id) && !seen.includes(id)) { seen.push(id); order.push(id); }
+      });
+      KNOWN.forEach(id => { if (!order.includes(id)) order.push(id); });
+      try { writeSettings({ tg_cookie_priority: order }); } catch (e) {}
+      sendJson(req, res, { status: 'SUCCESS', order: order });
     });
     return true;
   }
@@ -588,6 +630,20 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     return true;
   }
 
+  // GET /api/tg/catalog — every task (classic + pool) grouped by bot,
+  // serialized from tg_tasks.py / tg_flows.py (single source of truth).
+  if (pathname === '/api/tg/catalog' && req.method === 'GET') {
+    (async () => {
+      try {
+        const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'tg_catalog.py', [], 30000);
+        sendJson(req, res, r);
+      } catch (e) {
+        sendJson(req, res, { ok: false, error: String((e && e.message) || e).slice(0, 200) });
+      }
+    })();
+    return true;
+  }
+
   // GET /api/tg/task-availability?bot=&task= — single-lease pre-flight probe.
   // Walks the registry button path WITHOUT pressing Start (creates nothing,
   // costs nothing). Fail-OPEN: when every profile is busy or the probe
@@ -628,12 +684,23 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const total = stats.total != null ? stats.total : submitted;
 
       let igPoolAvail = 0;
+      let metaListAvail = 0;
       try {
         const allAccs = getAccounts() || [];
         igPoolAvail = allAccs.filter(a =>
           (a.platform === 'Meta+Instagram' || a.cookies) &&
           (a.status === 'Created' || !a.status) &&
           a.cookies && a.cookies.length > 20
+        ).length;
+      } catch (e) {}
+      try {
+        // Meta Creator list: Meta-only accounts (no IG session yet) with
+        // credentials, minus ones set aside after an IG login challenge.
+        const cut = Date.now() / 1000 - 1800;
+        metaListAvail = (getAccounts() || []).filter(a =>
+          a.platform === 'Meta' && a.status === 'MetaCreated' &&
+          a.email && (a.meta_password || a.password) &&
+          !(a.challenged_at && Number(a.challenged_at) > cut)
         ).length;
       } catch (e) {}
 
@@ -668,6 +735,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         tg_pending_fastpay: 0,
         tg_paid_fastpay: subFastpay,
         ig_pool_available: igPoolAvail,
+        meta_list_available: metaListAvail,
         paygo_stock: autoStatus ? autoStatus.stock : null,
         paygo_max_stock: 5700,
         paygo_wait_seconds: autoStatus ? autoStatus.wait_seconds : 0,
@@ -712,7 +780,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         releaseStartTg(); return;
       }
 
-      const concurrency = Math.max(1, Math.min(parseInt(opts.concurrency || 3, 10) || 3, 10));
+      const concurrency = Math.max(1, Math.min(parseInt(opts.concurrency || 3, 10) || 3, 60));
       const target = Math.max(0, parseInt(opts.target || 0, 10) || 0);
       const delay = Math.max(1, parseInt(opts.delay || 4, 10) || 4);
       const headless = opts.headless !== false;
@@ -769,39 +837,39 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       // NEW PayGo cookies protocol toggle. DEFAULT OFF = legacy browserless
       // drain (rename + submit cookie). Only an EXPLICIT true enables 2FA+follow.
       const cookie2fa = useIgPool && (opts.cookie_2fa === true || opts.cookie_2fa === 'true');
+      // Account source for the cookie pool drain: 'meta' = Meta Creator list.
+      const accountSource = (useIgPool && opts.account_source === 'meta') ? 'meta' : 'ig';
+      // Cookie-bot failover: try bots in dashboard priority order.
+      const fallback = (opts.fallback === true || opts.fallback === 'true');
+      // Fleet chain (universal page): ordered [{bot, task, pool}] tried in
+      // order across runners. Validated lightly here; the engine resolves
+      // strictly and skips anything unresolvable.
+      let fleet = null;
+      if (Array.isArray(opts.fleet)) {
+        const eb = readEnabledBots();
+        fleet = opts.fleet.slice(0, 8).map(c => ({
+          bot: String((c && c.bot) || '').toLowerCase(),
+          task: String((c && c.task) || '').slice(0, 80),
+          pool: (c && c.pool) !== false,
+          c2fa: !c || (c && c.c2fa) !== false,
+        })).filter(c => c.bot && c.task && eb.includes(c.bot));
+        if (!fleet.length) fleet = null;
+      }
 
       slot().config = { concurrency, headless, target, delay, captcha,
                         coupled: true, tg_task: tgTask, tg_bot: tgBot,
                         twofa: opts.twofa !== false, use_ig_pool: useIgPool,
-                        cookie_2fa: cookie2fa };
+                        cookie_2fa: cookie2fa, fallback: fallback, fleet: fleet,
+                        account_source: accountSource,
+                        ig_api: (opts.ig_api === true || opts.ig_api === 'true'),
+                        ig_api_mock: (opts.ig_api_mock === true || opts.ig_api_mock === 'true') };
 
-      const args = [
-        resolveScript('worker.py'),
-        '--concurrency', String(concurrency),
-        '--target', String(target),
-        '--delay', String(delay),
-        '--mail', 'mailtd',
-        '--captcha', captcha,
-        '--mode', 'meta',
-        '--coupled',
-        '--tg-task', tgTask,
-        '--tg-bot', tgBot,
-      ];
-      if (opts.twofa !== false) args.push('--twofa');
-      // Belt-and-braces with the dashboard guard: the native Taskly-2FA flow
-      // has no mailbox step (bot email+code), so --add-email must never reach
-      // the worker for it even if a stale client sends true.
-      let addEmail = (opts.add_email === true || opts.add_email === 'true');
-      if (tgBot === 'taskly' && /2fa/i.test(tgTask) && !/no.mail/i.test(tgTask) && !/cookie/i.test(tgTask)) {
-        addEmail = false;
-      }
-      if (addEmail) args.push('--add-email');
-      // PayGo Cookies task runs a different engine flow (no 2FA leg: Meta ->
-      // TG creds -> IG join + follow -> cookie export -> cookie submit).
-      if (/cookie/i.test(tgTask)) args.push('--cookie');
-      if (useIgPool) args.push('--use-ig-pool');
-      if (cookie2fa) args.push('--cookie-2fa');
-      if (headless) args.push('--headless');
+      // Shared builder (server/tg-start.js). `add_email` is passed alongside —
+      // it is not part of the stored/published slot config, so the slot object
+      // and the /api/tg/start payload stay byte-identical.
+      const args = buildTgWorkerArgs(
+        Object.assign({}, slot().config, { add_email: opts.add_email }),
+        resolveScript('worker.py'));
 
       console.log(`[MetaCreator] Starting TG Classic: ${PYTHON_BIN} ${args.join(' ')}`);
       const isWinTg = process.platform === 'win32';
@@ -830,13 +898,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         return;
       }
 
-      const runRoute = (tgBot === 'taskly' && /taskly\s*2fa|pool\s*2fa/i.test(tgTask)) ? 'taskly2fa'
-        : (tgBot === 'taskly' && /taskly cookie/i.test(tgTask)) ? 'tasklycookie'
-        : (tgBot === 'fastpay' && /fastpay\s*2fa|fastpay_pool/i.test(tgTask)) ? 'fastpay2fa'
-        : (tgBot === 'paygo' && /paygo\s*2fa/i.test(tgTask) && !/normal/i.test(tgTask)) ? 'paygo2fa'
-        : (tgBot === 'paygo' && /paygo cookie/i.test(tgTask)) ? 'paygocookie'
-        : (tgBot === 'paygo' && useIgPool) ? 'paygo_pool'
-        : tgBot;
+      const runRoute = tgRouteOf(tgBot, tgTask, useIgPool);
       const rlHandle = ctx.runlog ? ctx.runlog.start('telegram', { argv: args, route: runRoute }) : null;
       slot().runlog = rlHandle;
 
@@ -871,6 +933,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         if (slot().proc === procRef) slot().proc = null;
         if (!procRef || !procRef.__preemptKilled) {
           paygoOrchestrator.notifyLoopStopped(procRef);
+          cookieOrchestrator.notifyLoopStopped(procRef);
         }
       });
       releaseStartTg();
@@ -924,6 +987,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopping gracefully...' });
       sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopping gracefully...' });
       paygoOrchestrator.notifyUserStopped();
+      cookieOrchestrator.notifyUserStopped();
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ERROR', error: 'Stop failed: ' + e.message }));
@@ -943,6 +1007,35 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     req.on('end', () => {
       let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
       const st = paygoOrchestrator.toggle(b.enabled, b.concurrency);
+      sendJson(req, res, { ok: true, status: st });
+    });
+    return true;
+  }
+
+  // ---- Cookie Auto-Mine (Taskly Cookie ↔ PayGo Cookie alternation) ----
+  if (pathname === '/api/tg/cookie-auto/status' && req.method === 'GET') {
+    sendJson(req, res, { ok: true, status: cookieOrchestrator.getStatus() });
+    return true;
+  }
+  if (pathname === '/api/tg/cookie-auto/start' && req.method === 'POST') {
+    // Manual "Start Now": forces the orchestrator on (and to evaluate) at once,
+    // so the operator does not have to wait for :00.
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      if (!cookieOrchestrator.enabled) cookieOrchestrator.toggle(true, b.concurrency);
+      const st = cookieOrchestrator.forceTick();
+      sendJson(req, res, { ok: true, status: st });
+    });
+    return true;
+  }
+  if (pathname === '/api/tg/cookie-auto/toggle' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const st = cookieOrchestrator.toggle(b.enabled, b.concurrency);
       sendJson(req, res, { ok: true, status: st });
     });
     return true;

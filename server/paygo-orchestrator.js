@@ -8,6 +8,7 @@
  */
 const path = require('path');
 const fs = require('fs');
+const { buildTgWorkerArgs } = require('./tg-start');
 
 class PayGoOrchestrator {
   constructor() {
@@ -727,34 +728,7 @@ class PayGoOrchestrator {
       return;
     }
 
-    const args = [
-      this.ctx.resolveScript('worker.py'),
-      '--concurrency', String(cfg.concurrency || 6),
-      '--target', String(cfg.target || 0),
-      '--delay', String(cfg.delay || 8),
-      '--mail', 'mailtd',
-      '--captcha', cfg.captcha || 'extension',
-      '--mode', 'meta',
-      '--coupled',
-      '--tg-task', cfg.tg_task || '📱 Create Inst (Cookies)',
-      '--tg-bot', cfg.tg_bot || 'paygo',
-    ];
-    if (cfg.twofa !== false) args.push('--twofa');
-
-    let addEmail = (cfg.add_email === true || cfg.add_email === 'true');
-    if (cfg.tg_bot === 'taskly' && /2fa/i.test(cfg.tg_task) && !/no.mail/i.test(cfg.tg_task) && !/cookie/i.test(cfg.tg_task)) {
-      addEmail = false;
-    }
-    if (addEmail) args.push('--add-email');
-
-    if (/cookie/i.test(cfg.tg_task)) args.push('--cookie');
-    if (cfg.use_ig_pool) args.push('--use-ig-pool');
-    // NEW PayGo cookies protocol: only when EXPLICITLY enabled (default = legacy
-    // browserless drain).
-    if (cfg.use_ig_pool && /cookie/i.test(cfg.tg_task) && cfg.cookie_2fa === true) {
-      args.push('--cookie-2fa');
-    }
-    if (cfg.headless) args.push('--headless');
+    const args = buildTgWorkerArgs(cfg, this.ctx.resolveScript('worker.py'));
 
     slot.config = cfg;
     try {

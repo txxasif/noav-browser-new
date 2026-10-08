@@ -21,49 +21,23 @@
   var state = {
     running: false,
     headless: true,
-    cookie2fa: false,
+    cookie2fa: true,
     pool: 0,
     submitted: 0,
     stock: null,
-    auto: null,
-    startedAt: 0,
-    log: []
+    startedAt: 0
   };
   var MAX_LOG = 500;
   var BOT_ID = 'paygo';
   var TASK = '📱 Create Inst (Cookies)';
   var ROUTE = 'paygo_pool';
 
-  function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
-  }
   function $(id) { return document.getElementById(id); }
 
-  function toast(msg, kind, ms) {
-    if (typeof window.showToast === 'function') { try { window.showToast(msg, kind || 'info'); return; } catch (e) {} }
-    var host = $('toast-container');
-    if (!host) return;
-    var el = document.createElement('div');
-    el.className = 'toast ' + (kind || 'info');
-    el.style.cssText = 'position:relative;padding:10px 12px;margin-top:8px;' +
-      'border-left:3px solid #f59e0b;border-radius:8px;background:#111726;' +
-      'color:#e2e8f0;font-size:12px;box-shadow:0 8px 24px rgba(0,0,0,.45);';
-    el.textContent = msg;
-    host.appendChild(el);
-    setTimeout(function () { try { host.removeChild(el); } catch (e) {} }, ms || 9000);
-  }
-
-  function statCard(label, id, sub, color) {
-    return '<div class="insta-stat-card" style="background:var(--bg-card);' +
-             'border:1px solid var(--border-color);border-radius:var(--radius-md);' +
-             'padding:14px 16px;position:relative;overflow:hidden;">' +
-      '<div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:' + color + ';opacity:.9;"></div>' +
-      '<div class="insta-stat-label" style="color:var(--text-dim);">' + esc(label) + '</div>' +
-      '<div class="insta-stat-value" id="' + id + '" style="color:var(--text-main);">0</div>' +
-      '<div class="insta-stat-sub" style="color:var(--text-muted);">' + esc(sub) + '</div></div>';
-  }
+  // Shared helpers (nova-pool-panel.js).
+  var toast = NovaPoolPanel.toast;
+  var statCard = NovaPoolPanel.statCard;
+  var buf = NovaPoolPanel.logBuffer(MAX_LOG);
 
   function shell() {
     root.innerHTML =
@@ -159,45 +133,17 @@
           '<div class="creator-field creator-field--switch"><label>Headless</label>' +
             '<label class="switch" title="Run browsers headless (recommended)"><input type="checkbox" id="pgp-headless" checked><span class="slider"></span></label></div>' +
           '<div class="creator-field creator-field--switch"><label>2FA + Cookie</label>' +
-            '<label class="switch" title="OFF (default) = legacy browserless drain: rename the pooled account via the IG Web API and submit its cookie — no browser, no 2FA, no follow. ON = new protocol: open the browser, follow 5, enable 2FA (wait for the email OTP), submit the key, confirm the code, THEN submit the cookie."><input type="checkbox" id="pgp-cookie2fa"><span class="slider"></span></label></div>' +
+            '<label class="switch" title="ON (default for this task) = rename + follow 5 + MOCK 2FA key + cookie submit (the browser does the follow via the stored session — no login). OFF = legacy rename + submit the stored cookie (no browser, no 2FA, no follow)."><input type="checkbox" id="pgp-cookie2fa" checked><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch"><label>API mode</label>' +
+            '<label class="switch" title="ON = BROWSERLESS IG private-API path: rename, follow 5 (random from the fixed operator list), REAL 2FA, password, email and cookie all via the API. Follow falls back to the browser (session reuse, no login) when IG blocks the raw API login. OFF = the existing browser logic (default)."><input type="checkbox" id="pgp-igapi"><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch" id="pgp-igapimock-wrap" style="display:none;"><label>Mock 2FA</label>' +
+            '<label class="switch" title="API mode only. ON = submit a MOCK 2FA key and skip the real 2FA enable. OFF (default) = REAL 2FA via the API."><input type="checkbox" id="pgp-igapimock"><span class="slider"></span></label></div>' +
           '<div class="creator-field creator-field--switch"><label>Auto-consume</label>' +
             '<label class="switch" title="Always on: a used pooled account is removed after submit"><input type="checkbox" checked disabled><span class="slider"></span></label></div>' +
         '</div>' +
         '<div class="creator-service-note" style="margin-top:.6rem;">' +
           '<i class="fa-solid fa-circle-info" style="color:#f59e0b;"></i> ' +
           'Only Telegram profiles and the IG pool are used. Requires at least one logged-in TG profile and a non-empty IG Creator pool.' +
-        '</div>' +
-
-        /* ---- Auto-Mine on hourly refill (:00) ---- */
-        '<div class="paygo-feature-card paygo-feature-automine" id="pgp-auto-card" style="flex-direction:column;align-items:stretch;margin-top:.9rem;">' +
-          '<div style="display:flex;align-items:center;justify-content:space-between;gap:1.25rem;width:100%;">' +
-            '<div class="paygo-feature-main">' +
-              '<div class="paygo-feature-icon"><i class="fa-solid fa-clock-rotate-left"></i></div>' +
-              '<div class="paygo-feature-text">' +
-                '<div class="paygo-feature-title">AUTO-MINE ON HOURLY REFILL (:00)' +
-                  '<span class="paygo-feature-badge automine-badge">Autonomous Scheduler</span>' +
-                '</div>' +
-                '<div class="paygo-feature-desc">Zero-contention background engine: auto-preempts the running bot at :00, drains PayGo at max speed, then restores the previous bot.</div>' +
-              '</div>' +
-            '</div>' +
-            '<div class="paygo-feature-controls">' +
-              '<span id="pgp-auto-pill" class="paygo-status-pill">Auto-Mine Off</span>' +
-              '<label class="switch" title="Auto-Mine PayGo: when stock refills, pauses running bot, drains PayGo pool, then resumes previous bot">' +
-                '<input type="checkbox" id="pgp-auto-sw"><span class="slider"></span>' +
-              '</label>' +
-            '</div>' +
-          '</div>' +
-          '<div class="paygo-automine-config" id="pgp-auto-config-row">' +
-            '<div class="paygo-automine-slots">' +
-              '<span><i class="fa-solid fa-users-gear" style="color:var(--accent-cyan);"></i> Auto-Mine Parallel Slots:</span>' +
-              '<input id="pgp-auto-conc" class="form-control paygo-conc-input" type="number" min="1" max="10" value="6" title="Number of parallel creators spawned when PayGo refills">' +
-              '<span style="font-size:0.72rem;color:var(--text-muted);">(parallel drain slots at :00)</span>' +
-            '</div>' +
-            '<div class="paygo-automine-explainer">' +
-              '<i class="fa-solid fa-circle-info"></i>' +
-              '<span><strong>Autonomous Mode:</strong> runs on its own at :00 — no need to click Start. If another bot is running manually, it auto-pauses at :00, drains, and resumes.</span>' +
-            '</div>' +
-          '</div>' +
         '</div>' +
       '</div>' +
 
@@ -222,29 +168,15 @@
   }
 
   function append(line) {
-    var entry = '[' + new Date().toLocaleTimeString() + '] ' + line;
-    state.log.push(entry);
-    if (state.log.length > MAX_LOG) state.log = state.log.slice(-400);
+    buf.push(line);
     var el = $('pgp-log');
     if (!el) return;
-    el.textContent = state.log.join('\n');
+    el.textContent = buf.text();
     var auto = $('pgp-autoscroll');
     if (!auto || auto.checked) el.scrollTop = el.scrollHeight;
   }
 
-  function post(url, body) {
-    append('> POST ' + url + ' ' + JSON.stringify(body || {}));
-    return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body || {}) })
-      .then(function (r) { return r.json(); })
-      .then(function (j) {
-        append('< ' + JSON.stringify(j));
-        if (j && (j.error || j.status === 'ERROR')) toast(j.error || 'Request failed', 'error', 12000);
-        setTimeout(refresh, 400);
-        return j;
-      })
-      .catch(function (e) { append('! ' + e); toast('Request failed: ' + e, 'error', 12000); });
-  }
+  function post(url, body) { return NovaPoolPanel.postJson(url, body, append, refresh); }
 
   function start() {
     var btn = $('pgp-start');
@@ -265,11 +197,14 @@
         var conc = parseInt(($('pgp-conc') || {}).value || 1, 10);
         var target = parseInt(($('pgp-target') || {}).value || 0, 10);
         var c2fa = $('pgp-cookie2fa') ? $('pgp-cookie2fa').checked : false;
+        var apiOn = $('pgp-igapi') ? $('pgp-igapi').checked : false;
+        var apiMockOn = $('pgp-igapimock') ? $('pgp-igapimock').checked : false;
         state.cookie2fa = c2fa;
         append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
                ', ' + (state.headless ? 'headless' : 'visible') +
-               ', 2fa+cookie=' + (c2fa ? 'ON' : 'OFF') + ')');
+               ', 2fa+cookie=' + (c2fa ? 'ON' : 'OFF') +
+               ', api=' + (apiOn ? (apiMockOn ? 'MOCK-2FA' : 'REAL-2FA') : 'OFF') + ')');
         var _doPost = function () { post('/api/tg/start', {
           concurrency: conc,
           target: target,
@@ -279,7 +214,9 @@
           tg_bot: BOT_ID,
           add_email: false,
           use_ig_pool: true,
-          cookie_2fa: c2fa
+          cookie_2fa: c2fa,
+          ig_api: apiOn,
+          ig_api_mock: (apiOn && apiMockOn)
         }); };
         if (typeof window.__tgTaskCheck === 'function') {
           window.__tgTaskCheck(BOT_ID, TASK, append).then(function (pre) {
@@ -369,50 +306,6 @@
     var subEl = $('pgp-radar-submitted'); if (subEl) subEl.textContent = String(state.submitted);
   }
 
-  function refreshAuto() {
-    fetch('/api/tg/paygo-auto/status', { cache: 'no-store' })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (j) {
-        var st = j && j.status ? j.status : null;
-        if (!st) return;
-        state.auto = st;
-        var sw = $('pgp-auto-sw'); if (sw) sw.checked = !!st.enabled;
-        var conc = st.concurrency || 6;
-        var pill = $('pgp-auto-pill');
-        if (pill) {
-          if (st.is_paygo_active) {
-            pill.textContent = '⚡ Active (draining ' + conc + ' slots)';
-            pill.style.background = 'rgba(16,185,129,0.18)';
-            pill.style.borderColor = 'rgba(16,185,129,0.4)';
-            pill.style.color = '#34d399';
-            pill.style.fontWeight = '700';
-          } else if (st.enabled) {
-            if (typeof st.wait_seconds === 'number' && st.wait_seconds >= 0) {
-              var mm = Math.floor(st.wait_seconds / 60);
-              var ss = st.wait_seconds % 60;
-              var sStr = ss < 10 ? '0' + ss : '' + ss;
-              pill.textContent = (state.running ? '🛡️ Preempting in ' : '⏳ Armed: refill in ')
-                + mm + 'm ' + sStr + 's (' + conc + ' slots)';
-            } else {
-              pill.textContent = '⏳ Armed (' + conc + ' slots)';
-            }
-            pill.style.background = 'rgba(245,158,11,0.14)';
-            pill.style.borderColor = 'rgba(245,158,11,0.35)';
-            pill.style.color = '#fbbf24';
-            pill.style.fontWeight = '600';
-          } else {
-            pill.textContent = 'Auto-Mine Off';
-            pill.style.background = 'rgba(255,255,255,0.04)';
-            pill.style.borderColor = 'rgba(255,255,255,0.08)';
-            pill.style.color = 'var(--text-muted)';
-            pill.style.fontWeight = '600';
-          }
-        }
-        var concEl = $('pgp-auto-conc'); if (concEl && st.concurrency) concEl.value = st.concurrency;
-      })
-      .catch(function () {});
-  }
-
   function refresh() {
     fetch('/api/tg/status', { cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
@@ -428,7 +321,6 @@
         updateRadar(s);
       })
       .catch(function () {});
-    refreshAuto();
   }
 
   function handleEvent(d) {
@@ -455,32 +347,35 @@
         try { localStorage.setItem('nova_pgp_cookie2fa', this.checked ? '1' : '0'); } catch (e) {}
       });
     }
+    if ($('pgp-igapi')) {
+      try { if (localStorage.getItem('nova_pgp_igapi') === '1') $('pgp-igapi').checked = true; } catch (e) {}
+      var pgpSyncMock = function () {
+        var w = $('pgp-igapimock-wrap');
+        if (w) w.style.display = $('pgp-igapi').checked ? '' : 'none';
+      };
+      $('pgp-igapi').addEventListener('change', function () {
+        try { localStorage.setItem('nova_pgp_igapi', this.checked ? '1' : '0'); } catch (e) {}
+        pgpSyncMock();
+      });
+      pgpSyncMock();
+    }
+    if ($('pgp-igapimock')) {
+      try { if (localStorage.getItem('nova_pgp_igapimock') === '1') $('pgp-igapimock').checked = true; } catch (e) {}
+      $('pgp-igapimock').addEventListener('change', function () {
+        try { localStorage.setItem('nova_pgp_igapimock', this.checked ? '1' : '0'); } catch (e) {}
+      });
+    }
     if ($('pgp-conc')) {
       try { var saved = localStorage.getItem('nova_pgp_parallel'); if (saved) $('pgp-conc').value = saved; } catch (e) {}
       $('pgp-conc').addEventListener('change', function () {
         try { localStorage.setItem('nova_pgp_parallel', this.value); } catch (e) {}
       });
     }
-    if ($('pgp-auto-sw')) {
-      $('pgp-auto-sw').addEventListener('change', function () {
-        var sw = this;
-        var conc = parseInt(($('pgp-auto-conc') || {}).value || 6, 10);
-        post('/api/tg/paygo-auto/toggle', { enabled: sw.checked, concurrency: conc });
-      });
-    }
-    if ($('pgp-auto-conc')) {
-      $('pgp-auto-conc').addEventListener('change', function () {
-        var conc = Math.max(1, Math.min(10, parseInt(this.value || 6, 10)));
-        this.value = conc;
-        var sw = $('pgp-auto-sw');
-        post('/api/tg/paygo-auto/toggle', { enabled: sw ? sw.checked : true, concurrency: conc });
-      });
-    }
     if ($('pgp-clear')) $('pgp-clear').addEventListener('click', function () {
-      state.log = []; var el = $('pgp-log'); if (el) el.textContent = '';
+      buf.clear(); var el = $('pgp-log'); if (el) el.textContent = '';
     });
     if ($('pgp-copy')) $('pgp-copy').addEventListener('click', function () {
-      try { navigator.clipboard.writeText(state.log.join('\n')); toast('Log copied', 'success'); } catch (e) {}
+      try { navigator.clipboard.writeText(buf.text()); toast('Log copied', 'success'); } catch (e) {}
     });
   }
 
@@ -494,25 +389,8 @@
     timer = setInterval(refresh, 4000);
     if (tick) clearInterval(tick);
     tick = setInterval(tickTimer, 1000);
-    try {
-      // Shared SSE hub (nova-core.js): one stream per page.
-      if (!window.__pgpEsShared && typeof window.__novaEsSubscribe === 'function') {
-        window.__pgpEsShared = true;
-        window.__novaEsSubscribe(handleEvent);
-      } else if (!window.__pgpEs && typeof window.__novaEsSubscribe !== 'function') {
-        window.__pgpEs = new EventSource('/api/meta-insta/events');
-        window.__pgpEs.onmessage = function (ev) {
-          try {
-            var d = JSON.parse(ev.data);
-            if (d && d.type === 'batch' && Array.isArray(d.items)) {
-              for (var i = 0; i < d.items.length; i++) { try { handleEvent(d.items[i]); } catch (e) {} }
-              return;
-            }
-            handleEvent(d);
-          } catch (e) {}
-        };
-      }
-    } catch (e) {}
+    // Shared SSE hub (nova-core.js): one stream per page.
+    NovaPoolPanel.subscribe(handleEvent, 'pgp');
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

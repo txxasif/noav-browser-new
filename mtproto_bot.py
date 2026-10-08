@@ -82,8 +82,18 @@ from tg_fingerprint import for_profile  # noqa: E402
 # Taskly/PayGo's plain-ASCII menus.
 from tg_tasks import normalize as _norm_btn  # noqa: E402
 
-TG_SESSIONS_DIR = os.path.join(DATA_DIR, "tg_sessions")
-os.makedirs(TG_SESSIONS_DIR, exist_ok=True)
+# Low-level transport/session/login layer lives in ``mtproto_client`` (split out
+# of this module as a pure code move). Re-exported here so existing callers —
+# ``tg_login.py``, ``tg_login_mtproto.py``, ``tg_balance.py``, ``tg/common.py``,
+# ``tg_join_bot.py``, ``tg_fastpay.py``, ``tg_withdraw.py``, ``tg_accounts.py`` —
+# keep importing these names from ``mtproto_bot``.
+from mtproto_client import (  # noqa: E402
+    TG_SESSIONS_DIR, MtprotoNeedsPassword, _APP_VERSIONS, _DEVICE_MODELS,
+    _OPEN_SESSIONS, _SYS_VERSIONS, _api_credentials, _device_identity,
+    _harden_session_db, _inline_buttons, _make_client, _pin_loop,
+    _reply_button_texts, _session_is_foreign, complete_login,
+    has_mtproto_session, send_login_code, session_file,
+)
 
 # Cancellation / TTL markers — a credential block is only valid AFTER the last
 # one of these (mirrors tg_bot.TelegramTasklyBot.start_task; a stale task's
@@ -96,6 +106,38 @@ _CANCEL_RES = ("action cancelled", "action canceled", "time's up", "time’s up"
 _REGISTER_LABELS = ("account registered", "register", "register account",
                     "confirm registration", "confirm", "done")
 _REGISTER_BAD = ("cancel", "back", "return", "menu", "stop", "balance")
+
+# Hourly stock-limit markers. PayGo's cookie task publishes
+# "⚡️ Available this hour: X/5700" and "⏳ This hour's limit is reached. Next
+# execution will be available in N min."; Taskly's "🍪 Create Inst (No mail)"
+# cookie task uses the SAME shape (the counter resets on the hour). Treating a
+# match as "soldout" makes a sold-out hour fail FAST instead of burning the
+# whole TASK_WINDOW (invariant 29).
+_HOUR_LIMIT_PHRASES = (
+    "limit is reached", "hour's limit", "hour’s limit", "hourly limit",
+    "limit reached", "next execution will be available",
+    "next execution is available", "will be available in",
+)
+# The stock counter "Available this hour: 0/5700" — 0 means sold out. Match the
+# ZERO only: a healthy "5/5700" must NEVER veto the pick.
+_HOUR_LIMIT_SOLD_OUT = (
+    "available this hour: 0/", "available this hour: 0 ",
+    "available this hour: 0\n", "available this hour: 0\u00a0",
+)
+
+
+def _is_hour_limit(text, cookies: bool = False) -> bool:
+    """True when ``text`` is an hourly stock-limit / sold-out notice.
+
+    ``cookies`` enables the "Available this hour: 0/N" counter check (only the
+    cookie tasks publish that counter). The generic phrases apply to every task.
+    """
+    tl = (text or "").lower()
+    if any(p in tl for p in _HOUR_LIMIT_PHRASES):
+        return True
+    if cookies and any(p in tl for p in _HOUR_LIMIT_SOLD_OUT):
+        return True
+    return False
 
 
 def _is_subscription_confirm(text) -> bool:
@@ -127,16 +169,6 @@ _ACTIVE_TASK_MARKERS = (
     "confirm registration", "please send the account",
 )
 
-# Deterministic per-account device identity (seeded by the account id) so two
-# MTProto sessions never present the same app/device pair (invariant 25).
-_APP_VERSIONS = ("4.16.8", "4.15.2", "4.14.12", "4.13.1")
-_SYS_VERSIONS = {
-    "Windows": ("Windows 10", "Windows 11"),
-    "macOS": ("macOS 13.5", "macOS 14.2"),
-    "Linux": ("Linux", "Ubuntu 22.04"),
-}
-_DEVICE_MODELS = ("Desktop", "Desktop", "Desktop", "Laptop")
-
 # Random IG first names for bots that issue no name (FastPay sends only
 # Username/Password). Kept plain ASCII so the IG onboarding field accepts it.
 _FIRST_NAMES = (
@@ -149,314 +181,6 @@ _FIRST_NAMES = (
 def _random_first_name() -> str:
     import random
     return random.choice(_FIRST_NAMES)
-
-
-def session_file(tg_id: str) -> str:
-    """Path of the Telethon session file for a pool id (``tg_4`` → data/...)."""
-    return os.path.join(TG_SESSIONS_DIR, f"{tg_id}.session")
-
-
-def has_mtproto_session(path: str) -> bool:
-    """True when a usable Telethon session file exists."""
-    try:
-        return bool(path) and os.path.isfile(path)
-    except Exception:
-        return False
-
-
-def _api_credentials():
-    """(api_id, api_hash) from env or data/tg_mtproto.json. Raises when absent."""
-    aid = os.environ.get("TG_API_ID")
-    ah = os.environ.get("TG_API_HASH")
-    if not (aid and ah):
-        cfg = os.path.join(DATA_DIR, "tg_mtproto.json")
-        if os.path.isfile(cfg):
-            try:
-                with open(cfg, "r", encoding="utf-8") as fh:
-                    d = json.load(fh) or {}
-                aid = aid or d.get("api_id")
-                ah = ah or d.get("api_hash")
-            except Exception:
-                pass
-    if not (aid and ah):
-        raise RuntimeError(
-            "MTProto needs api_id/api_hash. Set TG_API_ID/TG_API_HASH, or write "
-            'data/tg_mtproto.json {"api_id":..,"api_hash":..}. Get them free at '
-            "https://my.telegram.org → API development tools.")
-    return int(aid), str(ah)
-
-
-def _device_identity(tg_id: str) -> dict:
-    """Stable Telethon device fields for this account (distinct across accounts)."""
-    ident = for_profile(tg_id)
-    os_name = ident.get("os") or "Windows"
-    import hashlib
-    hh = int(hashlib.sha256(str(tg_id).encode("utf-8")).hexdigest(), 16)
-    sys_ver = _SYS_VERSIONS.get(os_name, _SYS_VERSIONS["Windows"])[(hh // 31) % 2]
-    return {
-        "device_model": _DEVICE_MODELS[(hh // 41) % len(_DEVICE_MODELS)],
-        "system_version": sys_ver,
-        "app_version": _APP_VERSIONS[(hh // 53) % len(_APP_VERSIONS)],
-        "lang_code": "en",
-        "system_lang_code": "en-US",
-    }
-
-
-# Session files this PROCESS currently holds open. SQLite cannot resolve a lock
-# whose holder is ourselves: busy_timeout waits, then fails anyway, because the
-# holder is the one blocked. Tracking it lets us name the real cause instead of
-# retrying a self-deadlock (observed 2026-10-01: a slot leased tg_2 and the same
-# worker built a second client for it -> "bot start failed: database is locked").
-_OPEN_SESSIONS: set = set()
-
-
-def _make_client(tg_id: str, sess_path: str):
-    """Create a sync Telethon client bound to this thread's event loop."""
-    import asyncio
-    from telethon.sync import TelegramClient
-    loop = None
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    except Exception:
-        loop = None
-    api_id, api_hash = _api_credentials()
-    os.makedirs(os.path.dirname(sess_path) or ".", exist_ok=True)
-    # catch_up=False: do NOT fetch the update backlog on connect. A session that
-    # has been idle replays thousands of stale updates, which Telethon logs as
-    # "Server sent a very old message … ignoring" and then aborts with
-    # "Security error … Too many messages had to be ignored consecutively"
-    # (observed 2026-09-21). We read history explicitly via get_messages(), so
-    # the update stream buys us nothing and only risks dropping the connection.
-    client = TelegramClient(sess_path, api_id, api_hash, catch_up=False,
-                            **_device_identity(tg_id))
-    # Telethon opens its session store with sqlite3's DEFAULT busy timeout (0),
-    # so ANY concurrent writer — the PayGo orchestrator probing the same account,
-    # a balance check, a pool lease handed to a second slot, or an orphaned engine
-    # from a previous run — makes the next write fail INSTANTLY with
-    # "database is locked" instead of waiting its turn (observed 2026-10-01:
-    # "bot boot: bot start failed: database is locked" the instant a slot leased
-    # tg_5). SQLite serialises writers; the correct behaviour is to WAIT for the
-    # holder to finish, which is exactly what busy_timeout does. WAL additionally
-    # lets readers proceed while a write is in flight.
-    _harden_session_db(client)
-    _OPEN_SESSIONS.add(os.path.abspath(sess_path))
-    # Pin the connection loop so Playwright's sync API (which resets the
-    # process's running loop via asyncio._set_running_loop) cannot make Telethon
-    # build a DIFFERENT loop later — that raises "The asyncio event loop must
-    # not change after connection". _pin_loop() re-asserts this on every
-    # connect/auth-check.
-    try:
-        client._pinned_loop = loop
-    except Exception:
-        pass
-    return client
-
-
-def _pin_loop(client) -> None:
-    """Re-assert ``client``'s connection loop on the CURRENT thread.
-
-    Playwright's sync API changes the process asyncio loop; the pooled bot's
-    owner thread then has NO current loop, Telethon builds a fresh one, and
-    every request fails with "The asyncio event loop must not change after
-    connection". Re-setting the pinned loop before each connect/auth-check keeps
-    the running loop identical to the one the client connected on.
-    """
-    try:
-        import asyncio
-        lp = getattr(client, "_pinned_loop", None)
-        if lp is not None:
-            asyncio.set_event_loop(lp)
-    except Exception:
-        pass
-
-
-def _harden_session_db(client, timeout_s: float = 30.0) -> None:
-    """Give Telethon's session SQLite a busy timeout + WAL (best effort).
-
-    NOTE on the attribute name: Telethon's ``SQLiteSession`` stores its handle
-    as ``._conn`` (private) and creates it LAZILY inside ``_cursor()``. An
-    earlier version of this helper read ``.conn`` -- which does not exist -- so
-    ``getattr(..., None)`` returned None and the whole call was a silent NO-OP.
-    That is why "database is locked" persisted after the "fix". Resolve the
-    handle defensively (both spellings) and FORCE creation via ``_cursor()``
-    when it is still None, so the PRAGMAs always land.
-    """
-    try:
-        sess = getattr(client, "session", None)
-        if sess is None:
-            return
-        conn = getattr(sess, "_conn", None) or getattr(sess, "conn", None)
-        if conn is None:
-            # Lazy-created: ask the session for a cursor, which opens the
-            # connection as a side effect.
-            try:
-                sess._cursor()
-            except Exception:
-                pass
-            conn = getattr(sess, "_conn", None) or getattr(sess, "conn", None)
-        if conn is None:
-            return
-        secs = int(timeout_s)
-        conn.execute(f"PRAGMA busy_timeout={secs * 1000}")
-        # WAL is persistent per-database; failures here are harmless (e.g. a
-        # read-only mount), so they must never abort the connect.
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-def _reply_button_texts(msg) -> list:
-    """Texts of a message's reply-keyboard buttons (empty list when none)."""
-    out = []
-    try:
-        rm = getattr(msg, "reply_markup", None)
-        for row in (getattr(rm, "rows", None) or []):
-            for b in (getattr(row, "buttons", None) or []):
-                t = (getattr(b, "text", "") or "").strip()
-                if t:
-                    out.append(t)
-    except Exception:
-        pass
-    return out
-
-
-def _inline_buttons(msg) -> list:
-    """Inline buttons as (text, data) pairs (Taskly uses reply keyboards)."""
-    out = []
-    try:
-        for b in (getattr(msg, "buttons", None) or []):
-            for row in b:
-                out.append(((row.text or "").strip(),
-                            getattr(row, "data", None), row))
-    except Exception:
-        pass
-    return out
-
-
-class MtprotoNeedsPassword(Exception):
-    """Raised when the account has 2FA enabled and no password was supplied."""
-
-
-def _session_is_foreign(tg_id, phone, sess) -> bool:
-    """True when ``sess`` is authorized as a DIFFERENT phone than ``phone``.
-
-    A leftover session file is a footgun: Telethon's ``sign_in`` is a NO-OP on
-    an already-authorized client, so adding a new account into a reused id would
-    silently adopt the OLD account (observed 2026-09-21: an orphaned
-    ``tg_1.session`` held the previous account). The caller deletes the file so
-    the login starts clean.
-    """
-    if not sess or not os.path.isfile(sess):
-        return False
-    want = re.sub(r"\D", "", str(phone or ""))
-    if not want:
-        return False
-    try:
-        c = _make_client(tg_id, sess)
-        try:
-            c.connect()
-            if not c.is_user_authorized():
-                return False
-            me = c.get_me()
-            cur = re.sub(r"\D", "", str(getattr(me, "phone", "") or ""))
-            return bool(cur) and cur != want
-        finally:
-            try:
-                c.disconnect()
-            except Exception:
-                pass
-    except Exception:
-        return False
-
-
-def send_login_code(tg_id, phone, session_path=None):
-    """Step 1 of the dashboard MTProto login: request a login code.
-
-    Telethon's interactive ``start()`` can't be used from the dashboard (the
-    code arrives asynchronously and the form has to collect it), so the flow is
-    split. Returns ``{"phone_code_hash": ...}``, which the caller MUST pass back
-    to :func:`complete_login`.
-    """
-    from telethon.errors import FloodWaitError, PhoneNumberInvalidError
-
-    sess = session_path or session_file(tg_id)
-    # Never reuse a session that belongs to a different account.
-    if _session_is_foreign(tg_id, phone, sess):
-        for f in (sess, sess + "-journal"):
-            try:
-                os.remove(f)
-            except Exception:
-                pass
-
-    client = _make_client(tg_id, sess)
-    try:
-        client.connect()
-        sent = client.send_code_request(str(phone).strip())
-        return {"phone_code_hash": sent.phone_code_hash,
-                "type": type(sent.type).__name__}
-    except PhoneNumberInvalidError:
-        raise RuntimeError("Telegram rejected that phone number (use +countrycode…)")
-    except FloodWaitError as exc:
-        raise RuntimeError(f"Telegram asked to wait {getattr(exc, 'seconds', '?')}s before another code")
-    finally:
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-
-
-def complete_login(tg_id, phone, code, phone_code_hash, password=None,
-                   session_path=None, label=None, proxy=None):
-    """Step 2: sign in with the code (+ 2FA password) and register the pool record.
-
-    Raises :class:`MtprotoNeedsPassword` when the account has 2FA and the caller
-    did not supply a password, so the UI can prompt and retry.
-    """
-    from telethon.errors import (SessionPasswordNeededError, PhoneCodeInvalidError,
-                                 PhoneCodeExpiredError, PasswordHashInvalidError,
-                                 FloodWaitError)
-    from tg_accounts import tg_manager  # local import avoids an import cycle
-
-    sess = session_path or session_file(tg_id)
-    client = _make_client(tg_id, sess)
-    try:
-        client.connect()
-        try:
-            client.sign_in(phone=str(phone).strip(), code=str(code).strip(),
-                           phone_code_hash=phone_code_hash)
-        except SessionPasswordNeededError:
-            if not password:
-                raise MtprotoNeedsPassword()
-            try:
-                client.sign_in(password=str(password))
-            except PasswordHashInvalidError:
-                raise RuntimeError("Wrong 2FA password")
-        me = client.get_me()
-    except PhoneCodeInvalidError:
-        raise RuntimeError("Invalid login code")
-    except PhoneCodeExpiredError:
-        raise RuntimeError("Login code expired — request a new one")
-    except FloodWaitError as exc:
-        raise RuntimeError(f"Telegram asked to wait {getattr(exc, 'seconds', '?')}s")
-    finally:
-        try:
-            client.disconnect()
-        except Exception:
-            pass
-
-    if me is None:
-        raise RuntimeError("Login did not return an account (code rejected?)")
-
-    name = (getattr(me, "first_name", "") or "").strip()
-    rec = tg_manager.upsert_mtproto(
-        tg_id, sess, label=label or f"TG {tg_id} · MTProto",
-        name=name or None, phone=getattr(me, "phone", None),
-        user_id=getattr(me, "id", None), proxy=proxy)
-    return rec
 
 
 class MtprotoTasklyBot:
@@ -1063,6 +787,25 @@ class MtprotoTasklyBot:
                 self._send(rbtn)
                 time.sleep(1.0)
                 return True
+            # No button visible, but the chat is on an ACTIVE task prompt (an
+            # orphan from a dead run). Telegram bots also accept the reply-keyboard
+            # button TEXT as a plain message, so send "Cancel" to clear the corpse
+            # — otherwise the menu walk can never find the task buttons and every
+            # cycle reports [task_unavailable:hidden] even though the task IS
+            # available (operator 2026-10-07).
+            if any(k in low for k in _ACTIVE_TASK_MARKERS):
+                self._send("Cancel")
+                time.sleep(1.5)
+                _low2 = ""
+                try:
+                    _low2 = self._last_text().lower()
+                except Exception:
+                    pass
+                if any(k in _low2 for k in _ACTIVE_TASK_MARKERS):
+                    self._send("Return to main menu")
+                    time.sleep(1.5)
+                self.log("[tg] clear_orphan_task: sent Cancel text to clear an active orphan task.")
+                return True
             return True
         except Exception as exc:
             self.log(f"[tg] clear_orphan_task note: {exc}")
@@ -1174,12 +917,8 @@ class MtprotoTasklyBot:
                             break
                 except Exception:
                     fresh = []
-                phrases = ("limit is reached", "hour's limit")
-                if is_cookies_task:
-                    phrases = phrases + ("available this hour: 0/", "available this hour: 0 ")
                 for t in fresh:
-                    tl = t.lower()
-                    if any(ph in tl for ph in phrases):
+                    if _is_hour_limit(t, cookies=is_cookies_task):
                         self.last_task_verdict = "soldout"
                         self.log(f"[tg] choose_task: {self.bot_target} hourly limit reached: {t.strip()[:120]}")
                         return False
@@ -1252,7 +991,7 @@ class MtprotoTasklyBot:
                                 return self.creds
                     for t in self._recent_texts(4):
                         tl = t.lower()
-                        if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
+                        if _is_hour_limit(t, cookies=True):
                             self.log(f"[tg] start_task: {self.bot_target} hourly limit reached: {t.strip()}")
                             return {"error": "limit_reached", "detail": t.strip(), "login": "", "password": ""}
                     self.log("[tg] start_task: 'Start' button not present on screen")
@@ -1294,7 +1033,7 @@ class MtprotoTasklyBot:
                         if mm:
                             wait_sec = int(mm.group(1))
                         break
-                    if any(ph in tl for ph in ("limit is reached", "hour's limit", "available this hour: 0/", "available this hour: 0 ")):
+                    if _is_hour_limit(txt, cookies=True):
                         self.log(f"[tg] start_task: {self.bot_target} hourly limit reached: {txt[:80]}")
                         found = {"error": "limit_reached", "detail": txt.strip(), "login": "", "password": ""}
                         break
@@ -1590,7 +1329,7 @@ class MtprotoTasklyBot:
                     return True
             except Exception:
                 pass
-            time.sleep(0.5)
+            time.sleep(0.25)
         return False
 
     def submit_cookie(self, cookie: str, timeout: float = 20.0):
@@ -1616,19 +1355,24 @@ class MtprotoTasklyBot:
         # _wait_for_cookie_prompt). Sending before the prompt lands out of
         # order — this is what the pool path hit (rename is ~0.4s, the prompt
         # had not arrived yet).
-        if not self._wait_for_cookie_prompt(timeout=max(60.0, timeout)):
-            # Detection can miss the prompt (message window / edited message /
-            # emoji). At this point the bot IS waiting for the cookie, so SEND it
-            # anyway — never abort a live task just because the prompt text
-            # wasn't matched (this is what made the pool cancel instead of submit).
+        if not self._wait_for_cookie_prompt(timeout=3.0):
+            # The 2FA step (when a task needs one) runs BEFORE this call and, on
+            # FAILURE, the caller aborts instead of submitting — so we never reach
+            # here while the bot is genuinely waiting for the 2FA key. Detection
+            # can still miss the prompt text (message window / edited message /
+            # emoji), so SEND the cookie anyway (best-effort) instead of blocking
+            # a live task (that guard wrongly blocked the cookie right after a
+            # SUCCESSFUL 2FA — the exact bug).
             self.log("[tg] 'Please send the account Cookie' prompt not seen — sending the cookie anyway (best-effort).")
         before_id = self._last_id()
         self._send(clean)
         self.log(f"[tg] Cookie submitted to {self.bot_name} ({len(clean)} chars); waiting for verdict…")
-        deadline = time.time() + max(5.0, timeout)
+        deadline = time.time() + min(max(4.0, timeout), 15.0)
         reply = ""
+        _poll = 0
         while time.time() < deadline:
-            time.sleep(0.5)
+            time.sleep(0.25)
+            _poll += 1
             for m in self._messages(limit=4):
                 if getattr(m, "out", False):
                     continue
@@ -1661,15 +1405,16 @@ class MtprotoTasklyBot:
                         or "under review" in low or "please wait" in low):
                     self.log(f"[tg] cookie accepted → {txt[:160]}")
                     return True, txt
-            # Fallback: the register key appearing means the cookie passed.
-            try:
-                btns, _ = self._buttons(limit=3)
-                if any("regist" in (b or "").lower() or "confirm" in (b or "").lower()
-                       for b in btns):
-                    self.log("[tg] cookie accepted (register key visible).")
-                    return True, reply or "register key visible"
-            except Exception:
-                pass
+            # Fallback (every ~1s): the register key appearing means it passed.
+            if _poll % 4 == 0:
+                try:
+                    btns, _ = self._buttons(limit=3)
+                    if any("regist" in (b or "").lower() or "confirm" in (b or "").lower()
+                           for b in btns):
+                        self.log("[tg] cookie accepted (register key visible).")
+                        return True, reply or "register key visible"
+                except Exception:
+                    pass
         self.log(f"[tg] no cookie verdict yet; last reply: {reply[:160]}")
         # Unknown-but-not-rejected: let the caller try mark_registered; a
         # dead task fails loudly there instead of here.
@@ -1677,418 +1422,109 @@ class MtprotoTasklyBot:
                 or "account registered" in reply.lower()), reply
 
     def mark_registered(self):
-        """Send the register/confirm key and classify ONLY the NEW reply."""
+        """Drive the register/confirm chain and classify the FINAL reply.
+
+        The bot can ask MORE THAN ONE question in a row — observed live on
+        Taskly's cookie task: "👉 Press the button to confirm registration"
+        (→ "✅ Account registered"), and only THEN "Did you make 5
+        subscriptions?" (→ "✅ Yes, I made 5+ subscriptions"). The old single-tap
+        version tapped the first key, waited the full 8s for a verdict that never
+        came, returned False, and left the caller's 1.2s retry to tap the second
+        key — ~15s wasted per account. This follows the whole chain in ONE call.
+        """
         self.open_bot()
-        before_id = self._last_id()
-        before_txt = self._last_text()
+        for _round in range(3):
+            before_id = self._last_id()
+            before_txt = self._last_text()
 
-        btns, msg = self._buttons()
-        inline = _inline_buttons(msg) if msg is not None else []
-        pick = None
-        # 1. Exact label match on the reply keyboard (NFKC: FastPay's Confirm
-        #    is `𝗖𝗼𝗻𝗳𝗶𝗿𝗺`, which plain .lower() cannot match).
-        for label in _REGISTER_LABELS:
-            hit = next((b for b in btns if _norm_btn(b).strip() == label), None)
-            if hit:
-                pick = hit
-                break
-        # 2. Register/confirm-LIKE reply key (never a destructive/menu key).
-        if not pick:
-            pick = next((b for b in btns
-                         if ("regist" in _norm_btn(b) or "confirm" in _norm_btn(b))
-                         and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
-        # 2b. NEW: PayGo's mandatory 5-subscription confirmation ("Did you make 5
-        #     subscriptions after registration? …"). The affirmative key is not a
-        #     register key, so match it explicitly; after it the bot replies
-        #     "Your report has been received".
-        if not pick:
-            pick = next((b for b in btns
-                         if _is_subscription_confirm(b)
-                         and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
-        # 3. Inline button fallback.
-        inline_pick = None
-        if not pick:
-            for t, data, row in inline:
-                low = (t or "").lower()
-                if any(x in low for x in _REGISTER_BAD):
-                    continue
-                if "regist" in low or "confirm" in low or _is_subscription_confirm(t):
-                    inline_pick = row
+            btns, msg = self._buttons()
+            inline = _inline_buttons(msg) if msg is not None else []
+            pick = None
+            # 1. Exact label match on the reply keyboard (NFKC: FastPay's Confirm
+            #    is `𝗖𝗼𝗻𝗳𝗶𝗿𝗺`, which plain .lower() cannot match).
+            for label in _REGISTER_LABELS:
+                hit = next((b for b in btns if _norm_btn(b).strip() == label), None)
+                if hit:
+                    pick = hit
                     break
-        if not pick and inline_pick is None:
-            self.log(f"[tg] register key not found; visible buttons: {btns[:20]}")
-            return False
-
-        if pick:
-            self._send(pick)
-            self.log(f"[tg] tapped register key: {pick}")
-        else:
-            try:
-                inline_pick.click()
-                self.log(f"[tg] tapped inline register key: {inline_pick.text}")
-            except Exception as exc:
-                self.log(f"[tg] inline register click failed: {exc}")
+            # 2. Register/confirm-LIKE reply key (never a destructive/menu key).
+            if not pick:
+                pick = next((b for b in btns
+                             if ("regist" in _norm_btn(b) or "confirm" in _norm_btn(b))
+                             and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
+            # 2b. PayGo/Taskly's mandatory 5-subscription confirmation.
+            if not pick:
+                pick = next((b for b in btns
+                             if _is_subscription_confirm(b)
+                             and not any(x in _norm_btn(b) for x in _REGISTER_BAD)), None)
+            # 3. Inline button fallback.
+            inline_pick = None
+            if not pick:
+                for t, data, row in inline:
+                    low = (t or "").lower()
+                    if any(x in low for x in _REGISTER_BAD):
+                        continue
+                    if "regist" in low or "confirm" in low or _is_subscription_confirm(t):
+                        inline_pick = row
+                        break
+            if not pick and inline_pick is None:
+                if _round == 0:
+                    self.log(f"[tg] register key not found; visible buttons: {btns[:20]}")
                 return False
 
-        verdict = "unknown"
-        new_text = ""
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
-            time.sleep(0.5)
-            for m in self._messages(limit=4):
-                if getattr(m, "out", False):
-                    continue
-                txt = (getattr(m, "text", "") or "").strip()
-                if not txt:
-                    continue
-                if int(getattr(m, "id", 0) or 0) > before_id or txt != before_txt:
-                    new_text = txt
-                    break
-            if new_text:
-                verdict = classify_report_reply(new_text)
-                if verdict != "unknown":
-                    break
+            if pick:
+                self._send(pick)
+                self.log(f"[tg] tapped register key: {pick}")
+            else:
+                try:
+                    inline_pick.click()
+                    self.log(f"[tg] tapped inline register key: {inline_pick.text}")
+                except Exception as exc:
+                    self.log(f"[tg] inline register click failed: {exc}")
+                    return False
 
-        if verdict == "rejected":
-            self.log(f"[tg] ❌ bot REJECTED the report — NOT recording Submitted | '{new_text[:160]}'")
-            return False
-        if verdict == "accepted":
-            self.log("[tg] submitted=True (verdict=accepted)")
-            return True
-        self.log("[tg] no fresh verdict after register send — treating as UNCONFIRMED (not rejected).")
+            # Short poll — the bot answers in ~1s. 5s is plenty (the old 8s stall
+            # was pure dead time before the caller's retry).
+            verdict = "unknown"
+            new_text = ""
+            deadline = time.time() + 5.0
+            while time.time() < deadline:
+                time.sleep(0.25)
+                for m in self._messages(limit=4):
+                    if getattr(m, "out", False):
+                        continue
+                    txt = (getattr(m, "text", "") or "").strip()
+                    if not txt:
+                        continue
+                    if int(getattr(m, "id", 0) or 0) > before_id or txt != before_txt:
+                        new_text = txt
+                        break
+                if new_text:
+                    # A follow-up QUESTION (e.g. the 5-subscription confirm) is not
+                    # a final verdict — stop waiting NOW and tap its key next round
+                    # instead of burning the full 5s poll.
+                    if _is_subscription_confirm(new_text) or "subscription" in new_text.lower():
+                        break
+                    verdict = classify_report_reply(new_text)
+                    if verdict != "unknown":
+                        break
+
+            if verdict == "rejected":
+                self.log(f"[tg] ❌ bot REJECTED the report — NOT recording Submitted | '{new_text[:160]}'")
+                return False
+            if verdict == "accepted":
+                self.log("[tg] submitted=True (verdict=accepted)")
+                return True
+            # Not final: the bot most likely asked ANOTHER question (e.g. the
+            # 5-subscription confirm) — tap its key next round instead of
+            # returning False and paying the caller's retry stall.
+            self.log(f"[tg] register round {_round + 1}: no final verdict yet "
+                     f"('{new_text[:70]}') — checking for a follow-up key…")
+        self.log("[tg] no fresh verdict after register chain — treating as UNCONFIRMED (not rejected).")
         return False
 
     def get_last_task_verdict(self):
         return getattr(self, "last_task_verdict", None)
-
-
-
-# ==============================================================================
-# Pooled warm workers — same shape/API as tg_bot.PooledTelegramBot
-# ==============================================================================
-def _mtproto_owner_loop(q_in, q_out, session_path, tg_id, bot_target, log):
-    """Owner thread: one Telethon client per session, commands run FIFO."""
-    bot = None
-    while True:
-        cmd, target, args, kwargs = q_in.get()
-        if cmd == "shutdown":
-            try:
-                if bot is not None:
-                    bot.disconnect()
-            except Exception:
-                pass
-            try:
-                # Tuple-shaped like every other reply: _call unpacks
-                # ``ok, res = q_out.get()``, so a bare bool here used to
-                # surface as "TypeError: cannot unpack non-iterable bool
-                # object" on any racing/in-flight call (Slot #5, 2026-09-24).
-                q_out.put((True, True))
-            except Exception:
-                pass
-            break
-        try:
-            tgt = target or bot_target
-            if bot is None or bot.bot_target != tgt:
-                if bot is not None:
-                    bot.close()
-                bot = MtprotoTasklyBot(session_path=session_path, tg_id=tg_id,
-                                       bot_target=tgt, log=kwargs.get("log", log) or log)
-            fn = getattr(bot, cmd)
-            res = fn(*args, **kwargs)
-            q_out.put((True, res))
-        except Exception as e:
-            q_out.put((False, e))
-
-
-class MtprotoPooledBot:
-    """Warm pooled MTProto bot — mirrors ``tg_bot.PooledTelegramBot``.
-
-    The pool key is the session file. No browser, so no SingletonLock, warm
-    idle reaping or RAM ceiling — instances are cheap enough to keep all up.
-    """
-
-    _pool = {}
-    _pool_lock = threading.Lock()
-    _WARM_IDLE_SECS = 1800
-
-    def __init__(self, profile_dir=None, bot_name=None, bot_target="taskly",
-                 headless=True, log=print, session_path=None, tg_id=None):
-        self.session_path = session_path or profile_dir
-        if not self.session_path:
-            raise RuntimeError("MtprotoPooledBot needs session_path (or profile_dir)")
-        self.tg_id = tg_id or os.path.basename(str(self.session_path)).split(".")[0]
-        self.bot_target = bot_target
-        cfg = TG_BOTS.get(bot_target, TG_BOTS["taskly"])
-        self.bot_name = bot_name or cfg["name"]
-        self.headless = bool(headless)
-        self.log = log
-        self.profile_dir = self.session_path  # contract parity
-        self._key = self.session_path
-        self._reap_idle()
-        with MtprotoPooledBot._pool_lock:
-            self._ent = MtprotoPooledBot._ensure_locked(
-                self._key, self.session_path, self.tg_id, bot_target, log)
-
-    @classmethod
-    def _ensure_locked(cls, key, session_path, tg_id, bot_target, log):
-        """Return the live pool entry for ``key``, rebuilding a dead one.
-
-        Must hold ``_pool_lock``. A dead owner (reaped/dropped under a live
-        lease by mem-shed or idle eviction) is rebuilt transparently so the
-        next command reconnects instead of talking to a dead queue.
-        """
-        ent = cls._pool.get(key)
-        try:
-            alive = ent is not None and ent["thread"].is_alive()
-        except Exception:
-            alive = False
-        if not alive:
-            if ent is not None:
-                try:
-                    cls._pool.pop(key, None)
-                except Exception:
-                    pass
-            q_in: queue.Queue = queue.Queue()
-            q_out: queue.Queue = queue.Queue()
-            t = threading.Thread(
-                target=_mtproto_owner_loop,
-                args=(q_in, q_out, session_path, tg_id,
-                      bot_target, log), daemon=True)
-            t.start()
-            ent = {"thread": t, "q_in": q_in, "q_out": q_out,
-                   "last_used": time.time()}
-            cls._pool[key] = ent
-        ent["last_used"] = time.time()
-        return ent
-
-    @staticmethod
-    def _leased_keys() -> set:
-        """Pool keys currently leased to a live cycle (never reap these)."""
-        try:
-            from tg_accounts import tg_manager
-            return set(tg_manager.leased_ids())
-        except Exception:
-            return set()
-
-    @staticmethod
-    def _reap_idle() -> None:
-        victims = []
-        leased = MtprotoPooledBot._leased_keys()
-        with MtprotoPooledBot._pool_lock:
-            now = time.time()
-            for k, ent in list(MtprotoPooledBot._pool.items()):
-                # A live lease holds no pool traffic during long IG phases
-                # (2FA grind), so last_used goes stale while the cycle is
-                # very much alive — reaping it murders the task (2026-09-24).
-                if str(k) in leased or os.path.basename(str(k)) in leased:
-                    continue
-                try:
-                    if now - float(ent.get("last_used", now)) > MtprotoPooledBot._WARM_IDLE_SECS:
-                        victims.append((k, ent))
-                        del MtprotoPooledBot._pool[k]
-                except Exception:
-                    pass
-        for _k, ent in victims:
-            try:
-                ent["q_in"].put(("shutdown", None, (), {}))
-                ent["thread"].join(timeout=10)
-            except Exception:
-                pass
-
-    def _call(self, cmd, *args, **kwargs):
-        with MtprotoPooledBot._pool_lock:
-            self._ent = MtprotoPooledBot._ensure_locked(
-                self._key, self.session_path, self.tg_id,
-                self.bot_target, self.log)
-            ent = self._ent
-        ent["q_in"].put((cmd, self.bot_target, args, kwargs))
-        try:
-            item = ent["q_out"].get(timeout=180)
-        except queue.Empty:
-            raise RuntimeError(f"MTProto bot thread hung on '{cmd}' (180s)")
-        # A non-tuple here means a stale sentinel from a reaped owner, never
-        # a real reply — fail loud with the cause, not "cannot unpack
-        # non-iterable bool object".
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise RuntimeError(
-                f"MTProto bot session for '{self.tg_id}' was reaped mid-task "
-                f"(stale pool reply) on '{cmd}' — retry the task")
-        ok, res = item
-        if not ok:
-            raise res
-        return res
-
-    def start(self):
-        return self._call("open", log=self.log)
-
-    def open(self):
-        return self.start()
-
-    def logged_in(self):
-        try:
-            return self._call("logged_in")
-        except Exception:
-            return None
-
-    def open_bot(self):
-        return self._call("open_bot")
-
-    @property
-    def last_task_verdict(self):
-        try:
-            return self._call("get_last_task_verdict")
-        except Exception:
-            return getattr(self, "_last_task_verdict", None)
-
-    def choose_task(self, task=TG_DEFAULT_TASK):
-        res = self._call("choose_task", task)
-        try:
-            self._last_task_verdict = self._call("get_last_task_verdict")
-        except Exception:
-            pass
-        return res
-
-    def start_task(self):
-        return self._call("start_task")
-
-    def submit_2fa_key(self, key, allow_local_fallback=True):
-        return self._call("submit_2fa_key", key, allow_local_fallback=allow_local_fallback)
-
-    def request_email_code(self, timeout=45.0):
-        return self._call("request_email_code", timeout=timeout)
-
-    def press_get_code(self, wait=6.0):
-        return self._call("press_get_code", wait=wait)
-
-    def submit_cookie(self, cookie, timeout=20.0):
-        return self._call("submit_cookie", cookie, timeout=timeout)
-
-    def mark_registered(self):
-        return self._call("mark_registered")
-
-    def reset_to_main_menu(self, timeout=30):
-        return self._call("reset_to_main_menu", timeout=timeout)
-
-    def cancel_task(self):
-        return self._call("cancel_task")
-
-    def clear_orphan_task(self):
-        try:
-            return self._call("clear_orphan_task")
-        except Exception:
-            return False
-
-    def _sleep_flood(self, exc, what: str = "request") -> int:
-        secs = MtprotoTasklyBot._flood_wait_seconds(exc)
-        if secs <= 0:
-            return 0
-        try:
-            import tg_accounts as _tgm
-            mgr = getattr(_tgm, "tg_manager", None)
-            if mgr is not None:
-                mgr._reload()
-                try:
-                    max_rec = int(os.environ.get("INSTA_TG_FLOOD_MAX_RECORD", "120") or 120)
-                except Exception:
-                    max_rec = 120
-                capped = max(1, min(int(secs), max_rec))
-                for a in mgr.accounts:
-                    if a.get("id") == self.tg_id:
-                        a["flood_until"] = int(time.time() + capped)
-                        break
-                mgr.save()
-        except Exception:
-            pass
-        try:
-            cap = int(os.environ.get("INSTA_TG_FLOOD_MAX_SLEEP", "25") or 25)
-        except Exception:
-            cap = 25
-        wait = max(1, min(secs, cap))
-        self.log(f"[tg] ⏳ FloodWait {secs}s on {what} — pausing {wait}s, then the account is parked for {secs}s.")
-        time.sleep(wait)
-        return wait
-
-    def close(self, ok=True):
-        try:
-            return self._call("close", ok=ok)
-        except Exception:
-            return False
-
-    @classmethod
-    def _match_keys(cls, key: str) -> list:
-        """Pool keys identifying ``key`` (session path, profile dir or id).
-
-        ``_reap_wedged_tg_browser`` passes the *profile dir* while the pool
-        is keyed by *session file* — without flexible matching that reap was
-        a silent no-op for MTProto and wedged owners lived forever.
-        """
-        if not key:
-            return []
-        cands = {str(key)}
-        try:
-            cands.add(os.path.basename(str(key)))
-            base = os.path.basename(str(key)).split(".")[0]
-            cands.add(base)
-        except Exception:
-            pass
-        found = []
-        for k in list(cls._pool.keys()):
-            try:
-                kb = os.path.basename(str(k)).split(".")[0]
-            except Exception:
-                kb = ""
-            if k in cands or str(k) in cands or kb in cands:
-                found.append(k)
-        return found
-
-    @classmethod
-    def drop_profile(cls, key: str) -> None:
-        if not key:
-            return
-        with cls._pool_lock:
-            ents = [cls._pool.pop(k, None) for k in cls._match_keys(key)]
-            ents = [e for e in ents if e is not None]
-        for ent in ents:
-            try:
-                ent["q_in"].put(("shutdown", None, (), {}))
-                ent["thread"].join(timeout=10)
-            except Exception:
-                pass
-
-    @classmethod
-    def drop_all(cls, skip_leased: bool = False) -> None:
-        """Shut down pooled owners. ``skip_leased=True`` keeps live leases.
-
-        The memory watchdog MUST pass ``skip_leased``: killing a leased
-        owner's thread mid-task poisons its queue and the cycle dies with a
-        cryptic unpack error instead of finishing (2026-09-24). Engine
-        shutdown paths keep the default (kill everything).
-        """
-        leased = cls._leased_keys() if skip_leased else set()
-        victims = []
-        with cls._pool_lock:
-            for k in list(cls._pool.keys()):
-                try:
-                    if (str(k) in leased
-                            or os.path.basename(str(k)) in leased
-                            or os.path.basename(str(k)).split(".")[0] in leased):
-                        continue
-                except Exception:
-                    pass
-                ent = cls._pool.pop(k, None)
-                if ent is not None:
-                    victims.append(ent)
-        for ent in victims:
-            try:
-                ent["q_in"].put(("shutdown", None, (), {}))
-                ent["thread"].join(timeout=5)
-            except Exception:
-                pass
-
-    @classmethod
-    def close_inspectors(cls, *a, **kw) -> int:
-        """No browsers to shed — no-op (kept for worker parity)."""
-        return 0
 
 
 def probe_task_availability(bot_target, task, level_timeout=8.0, tries=2):
@@ -2141,3 +1577,11 @@ def probe_task_availability(bot_target, task, level_timeout=8.0, tries=2):
                 pass
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:200]}
+
+
+# Pooled warm workers now live in mtproto_pool (pure code move). Re-exported
+# here so existing callers (``pipelines/telegram/tg_support.py``, ``worker.py``)
+# keep importing them from ``mtproto_bot``. This late import is required to
+# avoid a cycle: mtproto_pool imports MtprotoTasklyBot from this module, which
+# is defined by the time execution reaches here.
+from mtproto_pool import MtprotoPooledBot, _mtproto_owner_loop  # noqa: E402,F401

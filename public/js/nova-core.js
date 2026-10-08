@@ -95,47 +95,68 @@ function initThemeNav() {
     'view-tg-tasklycookie': '#/tasklycookie',
     'view-tg-fastpay2fa': '#/fastpay2fa',
     'view-tg-paygopool': '#/paygopool',
+    'view-tg-failover': '#/failover',
     'view-tg-paygocookie': '#/paygocookie',
     'view-tg-paygo2fa': '#/paygo2fa',
   };
 
   function routeForItem(item) {
     const bot = item.getAttribute('data-bot');
-    if (bot) return '#/tg/' + bot;
+    if (bot) {
+      const task = item.getAttribute('data-task');
+      return '#/tg/' + bot + (task ? '/' + encodeURIComponent(task) : '');
+    }
     return VIEW_ROUTES[item.getAttribute('data-view')] || '#/meta';
   }
 
-  function showView(viewId, bot) {
+  function showView(viewId, bot, task) {
     document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
     let item = null;
     if (bot) {
-      item = document.querySelector('.nav-item[data-view="' + viewId + '"][data-bot="' + bot + '"]');
+      const items = Array.prototype.slice.call(
+        document.querySelectorAll('.nav-item[data-view="' + viewId + '"][data-bot="' + bot + '"]'));
+      if (task) {
+        item = items.find(i => i.getAttribute('data-task') === task) || null;
+      }
+      if (!item) item = items[0] || null;
     }
     if (!item) item = document.querySelector('.nav-item[data-view="' + viewId + '"]');
     if (item) item.classList.add('active');
+    // Auto-expand the per-bot group that contains the active item.
+    try {
+      const grp = item && item.closest('[data-bot-menu]');
+      if (grp) {
+        grp.classList.remove('collapsed');
+        const p = document.querySelector('.nav-parent[data-bot-group="' + grp.getAttribute('data-bot-menu') + '"]');
+        if (p) p.setAttribute('aria-expanded', 'true');
+      }
+    } catch (e) {}
     document.querySelectorAll('.view-panel').forEach(p => p.classList.remove('active'));
     const targetPanel = document.getElementById(viewId);
     if (targetPanel) targetPanel.classList.add('active');
-    // TG submenu: the page IS the bot (no picker).
-    if (bot && typeof window.__setTgBot === 'function') window.__setTgBot(bot);
+    // TG submenu: the page IS the bot (and, for classic pages, the task).
+    if (bot && typeof window.__setTgBot === 'function') window.__setTgBot(bot, task || '');
     try {
-      window.dispatchEvent(new CustomEvent('nova:view-changed', { detail: { viewId, bot } }));
+      window.dispatchEvent(new CustomEvent('nova:view-changed', { detail: { viewId, bot, task: task || '' } }));
     } catch (e) {}
   }
 
   function applyHash() {
-    const h = (window.location.hash || '').toLowerCase();
-    const m = h.match(/^#\/tg\/([a-z]+)/);
+    const raw = window.location.hash || '';
+    const m = raw.match(/^#\/tg\/([a-zA-Z0-9_-]+)(?:\/(.+))?$/);
     if (m) {
-      const bot = m[1];
+      const bot = m[1].toLowerCase();
+      let task = '';
+      try { task = m[2] ? decodeURIComponent(m[2]) : ''; } catch (e) { task = ''; }
       if (document.querySelector('.nav-item[data-view="view-tg-classic"][data-bot="' + bot + '"]')) {
-        showView('view-tg-classic', bot);
+        showView('view-tg-classic', bot, task);
         return;
       }
     }
+    const h = raw.toLowerCase();
     for (const [viewId, route] of Object.entries(VIEW_ROUTES)) {
       if (h === route.toLowerCase()) {
-        showView(viewId, null);
+        showView(viewId, null, '');
         return;
       }
     }
@@ -163,6 +184,27 @@ function initThemeNav() {
       tgToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     });
   }
+
+  // Per-bot collapsible groups inside the BOTS section (parent toggles its tasks).
+  document.querySelectorAll('.nav-parent[data-bot-group]').forEach(btn => {
+    const menu = document.querySelector('[data-bot-menu="' + btn.getAttribute('data-bot-group') + '"]');
+    if (!menu) return;
+    btn.addEventListener('click', () => {
+      const collapsed = menu.classList.toggle('collapsed');
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  });
+
+  // Sidebar show/hide toggle (persisted across reloads).
+  const sidebarCollapse = document.getElementById('sidebar-collapse-btn');
+  const sidebarExpand = document.getElementById('sidebar-expand-btn');
+  function setSidebarCollapsed(collapsed) {
+    document.body.classList.toggle('sidebar-collapsed', collapsed);
+    try { localStorage.setItem('nova_sidebar_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+  }
+  try { if (localStorage.getItem('nova_sidebar_collapsed') === '1') setSidebarCollapsed(true); } catch (e) {}
+  if (sidebarCollapse) sidebarCollapse.addEventListener('click', () => setSidebarCollapsed(true));
+  if (sidebarExpand) sidebarExpand.addEventListener('click', () => setSidebarCollapsed(false));
 
   // Guide page → back to TG Classic (route-driven so history stays coherent)
   const guideBack = document.getElementById('guide-back-tg');

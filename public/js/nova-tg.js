@@ -24,10 +24,14 @@
   }
   function $(id) { return document.getElementById(id); }
 
-  // Cookie tasks (PayGo "Create Inst (Cookies)") verify via the exported IG
-  // cookie and have NO 2FA/password/email step (see tg_flows.py). The
-  // "Extra email" toggle therefore does not apply to them.
-  function isCookieTask(task) { return /cookie/i.test(String(task || '')); }
+  // Cookie tasks verify via the exported IG cookie and have NO email step
+  // (see tg_flows.py). The "Extra email" toggle therefore does not apply to
+  // them. NOTE: Taskly's label is "🍪 Create Inst (No mail)" — no literal word
+  // "cookie" — so match the 🍪 marker too, or the guard silently misses it.
+  function isCookieTask(task) {
+    var t = String(task || '');
+    return /cookie/i.test(t) || t.indexOf('🍪') !== -1;
+  }
   // Native Taskly-2FA (📱 Create Inst (2FA)) has NO mailbox step at all —
   // bot email + bot code — so extra-email is meaningless for it too.
   function isNativeTask(task) {
@@ -247,11 +251,28 @@
     }
   }
 
-  // Called by the sidebar submenu: switch this page to a bot.
-  window.__setTgBot = function (bot) {
+  // Called by the sidebar submenu: switch this page to a bot (and, for classic
+  // pages, pre-select the task chosen in the sidebar — tasks are separate
+  // sidebar entries now, not an in-panel picker).
+  window.__setTgBot = function (bot, task) {
     bot = BOT_META[bot] ? bot : 'taskly';
     state.bot = bot;
     renderTaskOptions(bot);
+    if (task) {
+      var list = (BOT_META[bot] || BOT_META.taskly).tasks || [];
+      var valid = false;
+      for (var i = 0; i < list.length; i++) { if (list[i][0] === task) { valid = true; break; } }
+      var hidden = $('tg-task');
+      if (valid && hidden) {
+        hidden.value = task;
+        var radios = document.querySelectorAll('#tg-task-options input[name="tg-task-radio"]');
+        for (var r = 0; r < radios.length; r++) { radios[r].checked = (radios[r].value === task); }
+        try { hidden.dispatchEvent(new Event('change')); } catch (e) { applyFlowGuards(); }
+        var lbl = '';
+        for (var k = 0; k < list.length; k++) { if (list[k][0] === task) { lbl = list[k][1]; break; } }
+        updateTaskNote(task, lbl);
+      }
+    }
     updateBotBadge(bot);
     applyFlowGuards();
     state.log = (botLogs[bot] || []).slice();
@@ -433,7 +454,7 @@
         /* Task Selector Container */
         '<div id="tg-task-service-container" class="creator-service creator-task-service" style="margin-bottom:0.9rem;">' +
           '<div class="creator-service-title"><i class="fa-solid fa-list-check" style="color:var(--accent-purple);"></i> SELECT TASK</div>' +
-          '<div class="creator-options" id="tg-task-options"></div>' +
+          '<div class="creator-options" id="tg-task-options" style="display:none;"></div>' +
           '<div class="creator-service-note" id="tg-task-note"></div>' +
           '<input type="hidden" id="tg-task" value="">' +
         '</div>' +
