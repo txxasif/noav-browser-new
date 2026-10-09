@@ -455,9 +455,10 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       // (recorded as `followed` on the account so the PayGo pool can skip it).
       // Dashboard switch; default ON (unchanged behaviour for older clients).
       const follow = opts.follow !== false;
-      // Follow transport: 'ui' (browser, default) or 'api' (private API, no UI).
+      // Follow transport: 'ui' (browser, default), 'api' (private API), or 'multi' (multi-insta engine)
       const sw = (v) => (v === true ? '1' : '0');
-      const followMode = String(opts.follow_mode || '').toLowerCase() === 'api' ? 'api' : 'ui';
+      const rawMode = String(opts.follow_mode || '').toLowerCase();
+      const followMode = (rawMode === 'api' || rawMode === 'multi' || rawMode === 'multi_insta') ? rawMode : 'ui';
       // Global password: request override, else the saved dashboard setting.
       const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
       // Optional fixed username (workspace field). Also env-only.
@@ -982,5 +983,51 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
     });
     return true;
   }
+
+  // 12. POST /api/multi-insta/follow — run multi_insta.exe engine follow pipeline for testing
+  if (pathname === '/api/multi-insta/follow' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let opts = {};
+      try {
+        opts = JSON.parse(body || '{}');
+      } catch (e) {}
+      const targetFollows = Math.max(1, Math.min(20, parseInt(opts.count || opts.target || 5, 10)));
+      const isHeadless = Boolean(opts.headless);
+      const args = [path.join(ROOT_DIR, 'multi_insta_engine.py'), '--target', String(targetFollows)];
+      if (isHeadless) args.push('--headless');
+      if (opts.pool) {
+        args.push('--pool', String(parseInt(opts.pool, 10) || 1));
+      } else if (opts.account_id || opts.id || opts.account) {
+        args.push('--account', String(opts.account_id || opts.id || opts.account));
+      } else if (opts.cookie) {
+        args.push('--cookie', String(opts.cookie));
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ERROR', error: 'Must provide account_id, cookie, or pool' }));
+        return;
+      }
+
+      console.log(`[MultiInsta] Running follow engine test: ${PYTHON_BIN} ${args.join(' ')}`);
+      const proc = spawn(PYTHON_BIN, args, { cwd: ROOT_DIR });
+      let stdout = '';
+      let stderr = '';
+      proc.stdout.on('data', d => { stdout += d.toString(); });
+      proc.stderr.on('data', d => { stderr += d.toString(); });
+      proc.on('close', code => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          status: code === 0 ? 'SUCCESS' : 'ERROR',
+          code,
+          stdout,
+          stderr
+        }));
+      });
+    });
+    return true;
+  }
+
   return false;
 };
+

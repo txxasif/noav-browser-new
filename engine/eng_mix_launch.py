@@ -572,7 +572,7 @@ class EngineLaunchMixin:
             launch_kwargs.update(
                 screen={"width": viewport["width"], "height": viewport["height"]},
                 locale="en-US",
-                timezone_id=(self._device_ident or {}).get("timezone") or resolve_timezone(),
+                timezone_id=(self._device_ident or {}).get("timezone") or "America/New_York",
                 color_scheme="light",
                 extra_http_headers={
                     "Accept-Language": "en-US,en;q=0.9",

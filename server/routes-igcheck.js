@@ -206,6 +206,42 @@ module.exports = function handleIgCheck(req, res, urlObj, pathname, ctx) {
     return true;
   }
 
+  // ---- POST /api/meta-insta/xlsx-to-csv {xlsx_base64} -> {csv_text, rows} ----
+  // Lets the Import modal accept the .xlsx backups older builds produced: the
+  // sheet is converted to the standard full-backup CSV and then follows the
+  // exact same preview/import path as a .csv file.
+  if (pathname === '/api/meta-insta/xlsx-to-csv' && req.method === 'POST') {
+    (async () => {
+      let body;
+      try {
+        body = JSON.parse(await readBody(req, 80 * 1024 * 1024));
+      } catch (e) {
+        sendJson(req, res, { status: 'ERROR', error: 'Invalid body: ' + e.message }, 400);
+        return;
+      }
+      const b64 = String((body && body.xlsx_base64) || '');
+      if (!b64) {
+        sendJson(req, res, { status: 'ERROR', error: 'Empty file: nothing to read.' }, 400);
+        return;
+      }
+      const tmp = path.join(os.tmpdir(), `ig_xlsx_import_${Date.now()}.xlsx`);
+      try {
+        fs.writeFileSync(tmp, Buffer.from(b64, 'base64'));
+      } catch (e) {
+        sendJson(req, res, { status: 'ERROR', error: 'Could not stage upload: ' + e.message }, 500);
+        return;
+      }
+      const r = await runPythonJson(PYTHON_BIN, ROOT_DIR, 'ig_backup.py', ['xlsx2csv', '--file', tmp], 120000);
+      try { fs.unlinkSync(tmp); } catch (e) {}
+      if (!r || !r.ok) {
+        sendJson(req, res, { status: 'ERROR', error: 'Could not read the .xlsx: ' + ((r && r.error) || 'no output') }, 400);
+        return;
+      }
+      sendJson(req, res, { status: 'SUCCESS', csv_text: r.csv_text, rows: r.rows });
+    })();
+    return true;
+  }
+
   // ---- POST /api/meta-insta/import-full {csv_text, exclude_damaged, skip_existing, limit, order} ----
   if (pathname === '/api/meta-insta/import-full' && req.method === 'POST') {
     (async () => {

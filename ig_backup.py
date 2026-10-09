@@ -150,7 +150,16 @@ def do_import(file_path: str, exclude_damaged: bool, skip_existing: bool,
         return {"ok": False, "error": f"file not found: {file_path}"}
     if os.path.getsize(file_path) > 100 * 1024 * 1024:
         return {"ok": False, "error": "file too large (max 100 MB)"}
-    with open(file_path, "r", newline="", encoding="utf-8-sig") as f:
+    if file_path.lower().endswith(".xlsx"):
+        import io
+        try:
+            _text = xlsx_to_csv_text(file_path)
+        except Exception as exc:
+            return {"ok": False, "error": f"could not read the .xlsx: {exc}"}
+        _fh = io.StringIO(_text, newline="")
+    else:
+        _fh = open(file_path, "r", newline="", encoding="utf-8-sig")
+    with _fh as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames or not {"username"}.intersection(
                 set(reader.fieldnames or [])) and "instagram_username" not in (reader.fieldnames or []):
@@ -283,6 +292,122 @@ def do_mark_dead(usernames) -> dict:
     return {"ok": True, "marked": marked, "already_damaged": already, "missing": missing}
 
 
+# ---------------------------------------------------------------------------
+# XLSX -> backup CSV (stdlib only: works in the shipped build, no openpyxl).
+# Accepts the spreadsheet forms the older builds / Google Sheets produce:
+#   * with or without a header row (headerless = FULL_COLUMNS order),
+#   * dates turned into Excel serial numbers (dob / created_at),
+#   * counts stored as floats ("0.0"), blank cells skipped by the writer.
+# ---------------------------------------------------------------------------
+_XL_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+
+
+def _xl_col_index(ref: str) -> int:
+    n = 0
+    for ch in ref:
+        if not ch.isalpha():
+            break
+        n = n * 26 + (ord(ch.upper()) - 64)
+    return n - 1
+
+
+def _xl_num_text(txt: str) -> str:
+    try:
+        f = float(txt)
+    except (TypeError, ValueError):
+        return txt or ""
+    return str(int(f)) if f == int(f) else repr(f)
+
+
+def _xl_serial_to_dt(txt: str):
+    import datetime as _dt
+    try:
+        return _dt.datetime(1899, 12, 30) + _dt.timedelta(days=float(txt))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def xlsx_rows(path: str) -> list:
+    """Return the first worksheet as a list of rows (lists of strings)."""
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            for si in root.findall(_XL_NS + "si"):
+                shared.append("".join(t.text or "" for t in si.iter(_XL_NS + "t")))
+        sheets = sorted((n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n)),
+                        key=lambda n: int(re.findall(r"\d+", n)[0]))
+        if not sheets:
+            raise ValueError("no worksheet found in the .xlsx")
+        out = []
+        for row in ET.fromstring(z.read(sheets[0])).iter(_XL_NS + "row"):
+            cells = {}
+            for c in row.findall(_XL_NS + "c"):
+                ref = c.get("r") or ""
+                idx = _xl_col_index(ref) if ref else len(cells)
+                t = c.get("t")
+                v = c.find(_XL_NS + "v")
+                if t == "s" and v is not None and (v.text or "").isdigit():
+                    val = shared[int(v.text)] if int(v.text) < len(shared) else ""
+                elif t == "inlineStr":
+                    val = "".join(x.text or "" for x in c.iter(_XL_NS + "t"))
+                elif t in ("str", "b", "e"):
+                    val = (v.text or "") if v is not None else ""
+                else:
+                    val = _xl_num_text(v.text) if v is not None and v.text is not None else ""
+                cells[idx] = val
+            if cells and any(str(x).strip() for x in cells.values()):
+                width = max(cells) + 1
+                out.append([cells.get(i, "") for i in range(width)])
+        return out
+
+
+def xlsx_to_csv_text(path: str) -> str:
+    """Convert a backup .xlsx into the standard full-backup CSV text."""
+    import calendar
+    rows = xlsx_rows(path)
+    if not rows:
+        raise ValueError("the spreadsheet is empty")
+    first = [str(x).strip().lower() for x in rows[0]]
+    has_header = any(h in ("id", "username", "instagram_username") for h in first)
+    if has_header:
+        cols = first
+        body = rows[1:]
+    else:
+        cols = list(FULL_COLUMNS)
+        body = rows
+    idx = {name: i for i, name in enumerate(cols) if name in FULL_COLUMNS}
+    if "username" not in idx and "instagram_username" not in idx:
+        raise ValueError("not a Meta Creator backup: no username column")
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(FULL_COLUMNS)
+    for r in body:
+        rec = {}
+        for name in FULL_COLUMNS:
+            i = idx.get(name)
+            rec[name] = str(r[i]).strip("\ufeff") if i is not None and i < len(r) else ""
+        if not (rec["username"] or rec["instagram_username"]):
+            continue
+        if rec["dob"] and rec["dob"].replace(".", "", 1).isdigit():
+            d = _xl_serial_to_dt(rec["dob"])
+            if d:
+                rec["dob"] = f"{d.year}-{calendar.month_name[d.month]}-{d.day}"
+        if rec["created_at"] and rec["created_at"].replace(".", "", 1).isdigit():
+            d = _xl_serial_to_dt(rec["created_at"])
+            if d:
+                rec["created_at"] = d.strftime("%Y-%m-%d %H:%M:%S")
+        if rec["attempts"]:
+            rec["attempts"] = _xl_num_text(rec["attempts"])
+        w.writerow([rec[c] for c in FULL_COLUMNS])
+    return buf.getvalue()
+
+
 def main(argv) -> int:
     ap = argparse.ArgumentParser(description="IG Creator full backup/restore")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -299,6 +424,8 @@ def main(argv) -> int:
                        help="import at most N rows (0 = all)")
     p_imp.add_argument("--order", default="newest", choices=["newest", "oldest"],
                        help="which end of the file the --limit rows come from")
+    p_x2c = sub.add_parser("xlsx2csv", help="convert a backup .xlsx to full-backup CSV text")
+    p_x2c.add_argument("--file", required=True)
     p_clear = sub.add_parser("clear-kind", help="delete one workspace list (meta|ig)")
     p_clear.add_argument("--kind", default="ig", choices=["ig", "meta"])
     p_purge = sub.add_parser("purge-damaged", help="delete only damaged rows in one list (meta|ig)")
@@ -308,6 +435,12 @@ def main(argv) -> int:
     args = ap.parse_args(argv)
     if args.cmd == "export":
         summary = do_export(args.kind, bool(args.exclude_damaged), args.out)
+    elif args.cmd == "xlsx2csv":
+        try:
+            _csv = xlsx_to_csv_text(args.file)
+            summary = {"ok": True, "csv_text": _csv, "rows": max(0, _csv.count("\n") - 1)}
+        except Exception as exc:
+            summary = {"ok": False, "error": str(exc)[:200]}
     elif args.cmd == "mark-dead":
         try:
             names = json.loads(args.usernames_json)

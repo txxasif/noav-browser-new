@@ -26,8 +26,10 @@ class ExploreFollowMixin:
         # Profile first (bio / avatar / first post via API), THEN follow: an account
         # with a face and a post before it follows anyone looks like a person.
         self._ig_profile_first()
-        api = str(os.environ.get("INSTA_FOLLOW_MODE", "ui")).strip().lower() == "api"
-        if _off("INSTA_FOLLOW_AFTER_LOGIN") or (_off("INSTA_FOLLOW_EXPLORE") and not api):
+        mode = str(os.environ.get("INSTA_FOLLOW_MODE", "ui")).strip().lower()
+        api = mode == "api"
+        multi = mode in ("multi", "multi_insta")
+        if _off("INSTA_FOLLOW_AFTER_LOGIN") or (_off("INSTA_FOLLOW_EXPLORE") and not api and not multi):
             return super().ig_follow_suggested(max_follows=max_follows, humanize=humanize)
         if getattr(self, "_ig_follow_done", False):
             return super().ig_follow_suggested(max_follows=max_follows, humanize=humanize)
@@ -39,6 +41,8 @@ class ExploreFollowMixin:
             return 0
         if api:
             return self._ig_follow_via_api(need)
+        if multi:
+            return self._ig_follow_via_multi_insta(need)
 
         try:
             from pool_prepare import follow_explore, IGDeadEnd
@@ -105,6 +109,72 @@ class ExploreFollowMixin:
         self.log(f'[👥][page-api] Follow pass complete: {done}/{need} (API only, no UI fallback).')
         self.ig_followed_count = done
         return done
+
+    def _ig_follow_via_multi_insta(self, need: int) -> int:
+        """Follow ``need`` profiles using the extracted multi_insta.exe engine:
+        pure Selenium Chrome/Edge with sessionid-only injection and direct
+        DOM JS click events.
+        """
+        self._ig_follow_done = True
+        self.ig_followed_count = 0
+        cookie_str = ""
+        try:
+            p = self._ig_tab()
+            cookies = p.context.cookies(["https://www.instagram.com"])
+            cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies if c.get("name") and c.get("value"))
+        except Exception:
+            pass
+
+        if not cookie_str:
+            cookie_str = getattr(self, "ig_cookies", "") or getattr(self, "cookie", "") or ""
+
+        if "sessionid=" not in cookie_str:
+            self.log("[⚠️][multi-insta] No Instagram sessionid available — skipping Multi-Insta follow.")
+            return 0
+
+        done = 0
+        try:
+            from multi_insta_engine import run_multi_insta_follow
+            is_headless = bool(getattr(self, "headless", True))
+            self.log(f"[👥][multi-insta] Starting Multi-Insta engine follow (target={need}, headless={is_headless})...")
+            done, updated_cookies = run_multi_insta_follow(
+                cookie_string=cookie_str,
+                target_follows=need,
+                headless=is_headless,
+                log_fn=self.log,
+            )
+            if updated_cookies:
+                self.ig_cookies = updated_cookies
+        except Exception as exc:
+            self.log(f"[⚠️][multi-insta] Multi-Insta follow failed: {exc}")
+
+        # The engine drives a SECOND browser on the same sessionid; Instagram can
+        # drop that session in the Playwright context. Restore it so a created +
+        # followed account is not thrown away for a missing cookie.
+        self._ig_restore_sessionid(cookie_str, getattr(self, "ig_cookies", "") or "")
+
+        self.log(f"[👥][multi-insta] Follow pass complete: {done}/{need} (Multi-Insta engine).")
+        self.ig_followed_count = done
+        return done
+
+    def _ig_restore_sessionid(self, *cookie_strs: str) -> None:
+        """Re-add ``sessionid`` to the Playwright context if it vanished."""
+        try:
+            ctx = self._ig_tab().context
+            if any(c.get("name") == "sessionid" and c.get("value")
+                   for c in ctx.cookies(["https://www.instagram.com"])):
+                return
+            for cs in reversed([c for c in cookie_strs if c]):
+                for part in cs.split(";"):
+                    part = part.strip()
+                    if part.startswith("sessionid=") and len(part) > len("sessionid=") + 10:
+                        ctx.add_cookies([{"name": "sessionid", "value": part.split("=", 1)[1],
+                                          "domain": ".instagram.com", "path": "/",
+                                          "secure": True, "httpOnly": True}])
+                        self.log("[🔁][multi-insta] sessionid missing after engine — restored it into the browser.")
+                        return
+        except Exception as exc:
+            self.log(f"[⚠️][multi-insta] sessionid restore skipped: {str(exc)[:100]}")
 
     def _ig_profile_first(self) -> None:
         if getattr(self, "_ig_profile_done", False):

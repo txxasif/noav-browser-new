@@ -625,7 +625,7 @@ class IgJoinMixin:
 
         # 5. Handle Post-Terms Transition (wait for provisioning to complete, dismiss Save modal, leave registered cards)
         ok = False
-        deadline = time.time() + 60
+        deadline = time.time() + 120
         while time.time() < deadline and self.w.is_running:
             if "sessionid" in self._ig_cookie_names():
                 ok = True
@@ -651,15 +651,23 @@ class IgJoinMixin:
                     except Exception:
                         pass
             if "agree to instagram" in _text or "terms and policies" in _text or "i agree" in _text:
-                for sel in ('button:has-text("I agree")', 'div[role="button"]:has-text("I agree")'):
-                    try:
-                        b = p.locator(sel).first
-                        if b.count() > 0 and b.is_visible():
-                            self._tap_or_click(p, b)
-                            p.wait_for_timeout(3000)
-                            break
-                    except Exception:
-                        pass
+                # Avoid re-clicking if button is already spinning/loading
+                _is_loading = False
+                try:
+                    if p.locator('[aria-label="Loading"], [role="progressbar"], svg[aria-label="Loading"]').count() > 0:
+                        _is_loading = True
+                except Exception:
+                    pass
+                if not _is_loading:
+                    for sel in ('button:has-text("I agree"):not([disabled])', 'div[role="button"]:has-text("I agree"):not([aria-disabled="true"])'):
+                        try:
+                            b = p.locator(sel).first
+                            if b.count() > 0 and b.is_visible() and (b.get_attribute("aria-label") or "") != "Loading":
+                                self._tap_or_click(p, b)
+                                p.wait_for_timeout(3000)
+                                break
+                        except Exception:
+                            pass
 
             # Modal: "Save your login info" / "Save your password"
             if "save your login info" in _text or "save login info" in _text or "save your password" in _text:

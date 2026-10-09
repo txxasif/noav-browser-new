@@ -206,12 +206,13 @@ function miCreatorPanelHtml(def) {
           <span class="slider"></span>
         </label>
       </div>
-      <div class="creator-field creator-field--switch">
-        <label>Follow via API</label>
-        <label class="switch" title="Off = follow through the browser UI (default). On = follow through Instagram's private API with no UI clicks (API only, no browser fallback). Only used while Follow (5) is on.">
-          <input type="checkbox" data-role="follow-api">
-          <span class="slider"></span>
-        </label>
+      <div class="creator-field">
+        <label>Follow Mode</label>
+        <select class="form-control" data-role="follow-mode" title="Method used to follow 5 profiles: Web (in-browser UI clicks), Private API (fast in-tab API requests), or Multi-Insta (standalone Selenium engine from multi_insta.exe).">
+          <option value="ui" selected>Web (Browser UI)</option>
+          <option value="api">Private API</option>
+          <option value="multi">Multi-Insta Engine</option>
+        </select>
       </div>
       <div class="creator-field creator-field--switch">
         <label>Bio via API</label>
@@ -630,6 +631,7 @@ function createCreatorWorkspace(root, def, state, shared) {
     target: q('target'),
     headless: q('headless'),
     follow: q('follow'),
+    followMode: q('follow-mode'),
     followApi: q('follow-api'),
     apiBio: q('api-bio'),
     apiAvatar: q('api-avatar'),
@@ -1008,7 +1010,7 @@ function createCreatorWorkspace(root, def, state, shared) {
         api_bio: Boolean(els.apiBio && els.apiBio.checked),
         api_avatar: Boolean(els.apiAvatar && els.apiAvatar.checked),
         api_post: Boolean(els.apiPost && els.apiPost.checked),
-        follow_mode: (els.followApi && els.followApi.checked) ? 'api' : 'ui',
+        follow_mode: (els.followMode && els.followMode.value) || ((els.followApi && els.followApi.checked) ? 'api' : 'ui'),
         new_username: (els.username.value || '').trim() || undefined,
         mail_provider: (mailRadio && mailRadio.value) || 'mailtd',
         captcha_mode: (captchaRadio && captchaRadio.value) || 'extension',
@@ -1198,7 +1200,35 @@ function createCreatorWorkspace(root, def, state, shared) {
       }
       if (badge) {
         badge.style.display = 'inline-flex';
-        badge.innerHTML = `<span><i class="fa-solid fa-file-csv"></i> ${escapeHtml(f.name)}</span>`;
+        badge.innerHTML = `<span><i class="fa-solid fa-file-${/\.xlsx$/i.test(f.name || '') ? 'excel' : 'csv'}"></i> ${escapeHtml(f.name)}</span>`;
+      }
+      if (/\.xlsx$/i.test(f.name || '')) {
+        // Older builds exported the backup as .xlsx — convert it server-side to
+        // the standard CSV text, then use the normal preview/import path.
+        const xr = new FileReader();
+        xr.onload = async (ev) => {
+          try {
+            const bytes = new Uint8Array(ev.target.result);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+              bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            const r = await (await fetch('/api/meta-insta/xlsx-to-csv', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ xlsx_base64: btoa(bin) }),
+            })).json();
+            if (r.status !== 'SUCCESS') throw new Error(r.error || 'could not read the .xlsx');
+            window.__miStagedText = String(r.csv_text || '');
+          } catch (e) {
+            window.__miStagedText = '';
+            if (preview()) preview().innerHTML = '<span style="color: #f87171;">' + escapeHtml(e.message) + '</span>';
+            return;
+          }
+          refreshBackupPreview();
+        };
+        xr.readAsArrayBuffer(f);
+        return;
       }
       const reader = new FileReader();
       reader.onload = (ev) => {

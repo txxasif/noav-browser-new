@@ -584,13 +584,13 @@
       </div>
       <div id="ig-backup-pane-import" style="display: none; padding: 1.25rem 1.5rem; flex-direction: column; gap: 0.6rem;">
         <div style="font-size: 0.8rem; color: var(--text-dim); line-height: 1.5;">
-          Add accounts from a CSV file exported earlier. The whole file imports in one go.
+          Add accounts from a CSV or XLSX backup exported earlier (older builds exported XLSX). The whole file imports in one go.
         </div>
         <div class="insta-dropzone" id="ig-backup-dropzone" style="min-height: 92px; padding: 1rem;">
-          <input type="file" id="ig-backup-file-input" accept=".csv" style="display: none;">
+          <input type="file" id="ig-backup-file-input" accept=".csv,.xlsx" style="display: none;">
           <div style="text-align: center;">
             <i class="fa-solid fa-cloud-arrow-up" style="font-size: 1.4rem; color: var(--accent-purple); margin-bottom: 0.35rem;"></i>
-            <strong style="display: block; font-size: 0.82rem; color: var(--text-main);">Drop your CSV here or click to browse</strong>
+            <strong style="display: block; font-size: 0.82rem; color: var(--text-main);">Drop your CSV / XLSX here or click to browse</strong>
             <div id="ig-backup-file-badge" class="insta-file-badge" style="display: none; margin-top: 0.5rem;"></div>
           </div>
         </div>
@@ -789,17 +789,17 @@
   <script src="js/nova-core.js?v=8" defer></script>
   <script src="js/nova-license.js?v=2" defer></script>
   <script src="js/nova-diag.js?v=3" defer></script>
-  <script src="js/nova-meta-insta.js?v=6" defer></script>
+  <script src="js/nova-meta-insta.js?v=7" defer></script>
   <!-- ?v=N cache-busts the dashboard scripts. Without a changing query, a
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
        disagreed with the pool card). Bump these when shipping JS changes. -->
   <script src="js/nova-tg.js?v=18" defer></script>
   <script src="js/nova-pool-panel.js?v=1" defer></script>
   <script src="js/nova-taskly2fa.js?v=8" defer></script>
-  <script src="js/nova-tasklycookie.js?v=3" defer></script>
+  <script src="js/nova-tasklycookie.js?v=4" defer></script>
   <script src="js/nova-fastpay2fa.js?v=5" defer></script>
   <script src="js/nova-paygopool.js?v=8" defer></script>
-  <script src="js/nova-failover.js?v=12" defer></script>
+  <script src="js/nova-failover.js?v=13" defer></script>
   <script src="js/nova-paygocookie.js?v=2" defer></script>
   <script src="js/nova-paygo2fa.js?v=4" defer></script>
   <script src="js/nova-igcheck.js?v=1" defer></script>

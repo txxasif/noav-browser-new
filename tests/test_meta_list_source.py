@@ -356,12 +356,12 @@ class ExploreFollowMixinTests(unittest.TestCase):
             pass
         self.R, self.pp = R, pp
         self._old = pp.follow_explore
-        for k in ("INSTA_FOLLOW_EXPLORE", "INSTA_FOLLOW_AFTER_LOGIN", "INSTA_FOLLOW_COUNT"):
+        for k in ("INSTA_FOLLOW_EXPLORE", "INSTA_FOLLOW_AFTER_LOGIN", "INSTA_FOLLOW_COUNT", "INSTA_FOLLOW_MODE"):
             os.environ.pop(k, None)
 
     def tearDown(self):
         self.pp.follow_explore = self._old
-        for k in ("INSTA_FOLLOW_EXPLORE", "INSTA_FOLLOW_AFTER_LOGIN", "INSTA_FOLLOW_COUNT"):
+        for k in ("INSTA_FOLLOW_EXPLORE", "INSTA_FOLLOW_AFTER_LOGIN", "INSTA_FOLLOW_COUNT", "INSTA_FOLLOW_MODE"):
             os.environ.pop(k, None)
 
     def test_full_explore_success_skips_the_rail(self):
@@ -422,6 +422,15 @@ class ExploreFollowMixinTests(unittest.TestCase):
         with self.assertRaises(IGDeadEnd):
             r.ig_follow_suggested(max_follows=5)
         self.assertEqual(r.rail_calls, [])        # do not keep tapping a blocked account
+
+    def test_multi_insta_mode_routes_to_engine(self):
+        os.environ["INSTA_FOLLOW_MODE"] = "multi"
+        r = self.R()
+        called = []
+        r._ig_follow_via_multi_insta = lambda need: (called.append(need) or need)
+        self.assertEqual(r.ig_follow_suggested(max_follows=5), 5)
+        self.assertEqual(called, [5])
+        self.assertEqual(r.rail_calls, [])
 
 
 class _ToastPage:

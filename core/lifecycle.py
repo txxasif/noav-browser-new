@@ -80,7 +80,18 @@ class LifecycleMixin:
         self.ig_login()
         self.ig_click_meta_card()
         self.ig_complete_join()                   # username = bot Login / chosen
-        self.ig_dismiss_onboarding()
+        # Fail fast: with no sessionid the onboarding/follow passes only run on a
+        # logged-out page (0 follows, ~minutes wasted) — go straight to direct login.
+        try:
+            _cookies = self.w.context.cookies()
+            _names = {c["name"] for c in _cookies if "instagram" in (c.get("domain") or "").lower()} or {c["name"] for c in self.w.context.cookies(Urls.IG_HOME)}
+            _has_sid = "sessionid" in _names
+        except Exception:
+            _has_sid = False
+        if _has_sid:
+            self.ig_dismiss_onboarding()
+        else:
+            self.log('[⚠️] No sessionid after join — skipping onboarding/follow passes.')
         ig_page = self._ig_tab()
         if self._has_human_check(ig_page):
             try:
@@ -90,7 +101,8 @@ class LifecycleMixin:
 
         # Require a full IG session (sessionid) before parking
         try:
-            names = [c["name"] for c in self.w.context.cookies(Urls.IG_HOME)]
+            _cookies = self.w.context.cookies()
+            names = [c["name"] for c in _cookies if "instagram" in (c.get("domain") or "").lower()] or [c["name"] for c in self.w.context.cookies(Urls.IG_HOME)]
         except Exception:
             names = []
         if "sessionid" not in set(names):

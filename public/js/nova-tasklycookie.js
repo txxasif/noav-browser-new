@@ -137,6 +137,41 @@
         '</div>' +
       '</div>' +
 
+      '<div class="card-panel" style="margin-top:1rem;">' +
+        '<div class="paygo-feature-card paygo-feature-automine" id="tcp-auto-card" style="flex-direction:column;align-items:stretch;">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:1.25rem;width:100%;">' +
+            '<div class="paygo-feature-main">' +
+              '<div class="paygo-feature-icon"><i class="fa-solid fa-cookie-bite"></i></div>' +
+              '<div class="paygo-feature-text">' +
+                '<div class="paygo-feature-title">AUTO-MINE — Taskly Cookie ⇄ PayGo Cookie' +
+                  '<span class="paygo-feature-badge automine-badge">Autonomous Scheduler</span>' +
+                '</div>' +
+                '<div class="paygo-feature-desc">Runs Taskly "🍪 Create Inst (No mail)" first; when its hour is sold out (or its menu is hidden) it auto-switches to PayGo "📱 Create Inst (Cookies)"; when both are exhausted it waits for the :00 refill. Accounts already following 5 skip the browser.</div>' +
+              '</div>' +
+            '</div>' +
+            '<div class="paygo-feature-controls">' +
+              '<span id="tcp-auto-pill" class="paygo-status-pill">Auto-Mine Off</span>' +
+              '<button id="tcp-auto-start" type="button" class="btn btn-secondary btn-sm" title="Evaluate and start the cookie drain NOW — does not wait for :00"><i class="fa-solid fa-play"></i> Start Now</button>' +
+              '<label class="switch" title="Auto-Mine the two COOKIE tasks only: Taskly Cookie leads, PayGo Cookie fallback, hourly :00 refill">' +
+                '<input type="checkbox" id="tcp-auto-sw"><span class="slider"></span>' +
+              '</label>' +
+            '</div>' +
+          '</div>' +
+          '<div class="paygo-automine-config" id="tcp-auto-config-row">' +
+            '<div class="paygo-automine-slots">' +
+              '<span><i class="fa-solid fa-users-gear" style="color:var(--accent-cyan);"></i> Parallel Slots:</span>' +
+              '<input id="tcp-auto-conc" class="form-control paygo-conc-input" type="number" min="1" max="10" value="6">' +
+              '<span style="font-size:0.72rem;color:var(--text-muted);">(parallel drain slots)</span>' +
+            '</div>' +
+            '<div class="paygo-automine-explainer">' +
+              '<i class="fa-solid fa-circle-info"></i>' +
+              '<span id="tcp-auto-state">Taskly Cookie leads. A sold-out / hidden menu switches automatically; both sold out waits for :00.</span>' +
+            '</div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+
+
       /* ---- live log ---- */
       '<div class="card-panel" style="margin-top:1rem;">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.6rem;">' +
@@ -155,6 +190,66 @@
       (window.NovaDiag ? NovaDiag.renderHtml('tcp', 'tasklycookie') : '');
 
     wire();
+  }
+
+  function fmtWait(sec) {
+    sec = Math.max(0, parseInt(sec || 0, 10));
+    var mm = Math.floor(sec / 60), ss = sec % 60;
+    return mm + 'm ' + (ss < 10 ? '0' + ss : ss) + 's';
+  }
+
+  function refreshAuto() {
+    fetch('/api/tg/cookie-auto/status', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (j) {
+        var st = j && j.status ? j.status : null;
+        if (!st) return;
+        var sw = $('tcp-auto-sw'); if (sw) sw.checked = !!st.enabled;
+        var conc = st.concurrency || 6;
+        var pill = $('tcp-auto-pill');
+        if (pill) {
+          if (st.state === 'running') {
+            pill.textContent = '⚡ ' + (st.target || 'Draining') + ' (' + conc + ' slots)';
+            pill.style.background = 'rgba(16,185,129,0.18)'; pill.style.borderColor = 'rgba(16,185,129,0.4)';
+            pill.style.color = '#34d399'; pill.style.fontWeight = '700';
+          } else if (st.state === 'waiting') {
+            pill.textContent = '🛑 Both sold out — waiting for :00';
+            pill.style.background = 'rgba(239,68,68,0.14)'; pill.style.borderColor = 'rgba(239,68,68,0.35)';
+            pill.style.color = '#f87171'; pill.style.fontWeight = '700';
+          } else if (st.state === 'pool_empty') {
+            pill.textContent = '⏳ Waiting for IG Creator accounts…';
+            pill.style.background = 'rgba(56,189,248,0.14)'; pill.style.borderColor = 'rgba(56,189,248,0.35)';
+            pill.style.color = '#38bdf8'; pill.style.fontWeight = '700';
+          } else if (st.state === 'switching') {
+            pill.textContent = '🔁 Switching…';
+            pill.style.background = 'rgba(245,158,11,0.14)'; pill.style.borderColor = 'rgba(245,158,11,0.35)';
+            pill.style.color = '#fbbf24'; pill.style.fontWeight = '700';
+          } else if (st.enabled) {
+            pill.textContent = '⏳ Armed — Taskly leads (refill in ' + fmtWait(st.wait_seconds) + ')';
+            pill.style.background = 'rgba(245,158,11,0.14)'; pill.style.borderColor = 'rgba(245,158,11,0.35)';
+            pill.style.color = '#fbbf24'; pill.style.fontWeight = '600';
+          } else {
+            pill.textContent = 'Auto-Mine Off';
+            pill.style.background = 'rgba(255,255,255,0.04)'; pill.style.borderColor = 'rgba(255,255,255,0.08)';
+            pill.style.color = 'var(--text-muted)'; pill.style.fontWeight = '600';
+          }
+        }
+        var stateEl = $('tcp-auto-state');
+        if (stateEl) {
+          var fmtAvail = function (id) {
+            var v = st.avail ? st.avail[id] : null;
+            if (v === true) return 'available';
+            if (v === false) return 'exhausted' + (st.reason && st.reason[id] ? ' (' + st.reason[id] + ')' : '');
+            return '…';
+          };
+          stateEl.textContent = 'IG Creator pool: ' + (st.pool || 0) + ' account(s)'
+            + '  ·  Taskly Cookie: ' + fmtAvail('taskly')
+            + '  ·  PayGo Cookie: ' + fmtAvail('paygo')
+            + '  ·  next refill in ' + fmtWait(st.wait_seconds);
+        }
+        var concEl = $('tcp-auto-conc'); if (concEl && st.concurrency) concEl.value = st.concurrency;
+      })
+      .catch(function () {});
   }
 
   function append(line) {
@@ -305,6 +400,7 @@
         var c = $('tcp-kpi-conc'); if (c) c.textContent = String((s.engine && s.engine.concurrency) || 0);
       })
       .catch(function () {});
+    refreshAuto();
   }
 
   function handleEvent(d) {
@@ -350,6 +446,31 @@
         applySource();
       });
       applySource();
+    }
+    if ($('tcp-auto-sw')) {
+      $('tcp-auto-sw').addEventListener('change', function () {
+        var sw = this;
+        var conc = parseInt(($('tcp-auto-conc') || {}).value || 6, 10);
+        post('/api/tg/cookie-auto/toggle', { enabled: sw.checked, concurrency: conc });
+      });
+    }
+    if ($('tcp-auto-conc')) {
+      $('tcp-auto-conc').addEventListener('change', function () {
+        var conc = Math.max(1, Math.min(10, parseInt(this.value || 6, 10)));
+        this.value = conc;
+        var sw = $('tcp-auto-sw');
+        post('/api/tg/cookie-auto/toggle', { enabled: sw ? sw.checked : true, concurrency: conc });
+      });
+    }
+    if ($('tcp-auto-start')) {
+      $('tcp-auto-start').addEventListener('click', function () {
+        var btn = this;
+        var conc = parseInt(($('tcp-auto-conc') || {}).value || 6, 10);
+        btn.disabled = true;
+        post('/api/tg/cookie-auto/start', { concurrency: conc });
+        setTimeout(function () { btn.disabled = false; }, 3000);
+        setTimeout(refreshAuto, 500);
+      });
     }
     if ($('tcp-start')) $('tcp-start').addEventListener('click', start);
     if ($('tcp-stop')) $('tcp-stop').addEventListener('click', stop);

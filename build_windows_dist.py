@@ -288,6 +288,7 @@ SYNC_ROOT_FILES = [
     "run_cookie_cycle.py",  # one-shot PayGo Cookies task cycle (Meta -> IG -> cookie submit)
     "pool_common.py",       # shared pool-drain helpers (all pool runners import this)
     "pool_prepare.py",      # explore-page follow + in-page rename + Meta-list source (run_cookie_cycle imports this)
+    "multi_insta_engine.py",  # standalone Multi-Insta Follow Engine (extracted from multi_insta.exe)
     "tg_runners.py",        # runner registry (flow runner name -> callable)
     "mtproto_client.py",    # low-level Telethon client/session/login helpers
     "mtproto_pool.py",      # pooled warm-worker wrapper (MtprotoPooledBot)
@@ -1117,7 +1118,7 @@ def ensure_python_deps():
     if not os.path.isdir(sp):
         log("WARN", f"_internal site-packages not found at {sp} — skipping dep install")
         return
-    needed = ("telethon", "pyaes", "rsa")
+    needed = ("telethon", "pyaes", "rsa", "selenium")  # selenium: Multi-Insta follow engine
     missing = [n for n in needed if not os.path.isdir(os.path.join(sp, n))]
     if not missing:
         log("OK", f"Python deps present in shipped runtime ({', '.join(needed)})")

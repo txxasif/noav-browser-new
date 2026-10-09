@@ -1483,6 +1483,10 @@ class IgHelpersMixin:
     def _ig_cookie_names(self) -> List[str]:
         """Fetch all current cookie names for instagram.com."""
         try:
+            cookies = self.w.context.cookies()
+            ig_names = [c["name"] for c in cookies if "instagram" in (c.get("domain") or "").lower()]
+            if ig_names:
+                return ig_names
             return [c["name"] for c in self.w.context.cookies(Urls.IG_HOME)]
         except Exception:
             return []
