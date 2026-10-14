@@ -12,6 +12,7 @@ Build selection (module/bot subsets ship ONLY the selected code+UI):
   --meta-only                Meta Creator only (shorthand for --modules meta)
   --bots taskly,paygo        Ship only these TG bots (needs the tg module)
   --no-protect               Readable dev build (skip .pyc + JS obfuscation)
+  --patch-only               Rebuild only the patch zip (keeps the existing full portable zip)
   -h / --help                Print this help and exit
 
 Examples:
@@ -168,7 +169,6 @@ MODULE_PUBLIC_JS = {
            "public/js/nova-tasklycookie.js",
            "public/js/nova-fastpay2fa.js", "public/js/nova-paygopool.js",
            "public/js/nova-paygocookie.js", "public/js/nova-paygo2fa.js",
-           "public/js/nova-failover.js",
            "public/js/nova-pool-panel.js",
            "public/js/nova-manager.js", "public/js/nova-fastpay.js"],
 }
@@ -197,7 +197,7 @@ MODULE_VIEWS = {
     "ig": ["view-ig-creator", "view-ig-checker"],
     "tg": ["view-tg-classic", "view-tg-taskly2fa", "view-tg-tasklycookie",
            "view-tg-fastpay2fa", "view-tg-paygopool", "view-tg-paygocookie",
-           "view-tg-paygo2fa", "view-tg-failover", "view-tg-manager", "view-guide"],
+           "view-tg-paygo2fa", "view-tg-manager", "view-guide"],
 }
 
 
@@ -599,7 +599,8 @@ def sync_sources():
             json.dump({
                 "meta_only": is_meta_only(),
                 "modules": selected_modules(),
-                "bots": selected_bots()
+                "bots": selected_bots(),
+                "nord_rotate": False
             }, fh, indent=2)
     except Exception as exc:
         log("WARN", f"could not write build_mode.json: {exc}")
@@ -861,7 +862,6 @@ REQUIRED_TG = [
     "MetaCreator/pipelines/telegram/tg_worker.py",
     "MetaCreator/public/js/nova-tg.js",
     "MetaCreator/public/js/nova-pool-panel.js",
-    "MetaCreator/public/js/nova-failover.js",
     "MetaCreator/public/js/nova-manager.js",
 ]
 REQUIRED_BOT = {
@@ -1206,7 +1206,21 @@ def main():
     else:
         log("PROTECT", "--no-protect: shipping readable source (dev build).")
 
-    zip_path, size_mb, sha256 = build_portable_zip(protect_mode)
+    if "--patch-only" in sys.argv:
+        # Rebuild ONLY the patch zip; keep the existing full portable zip (and its manifest hash).
+        import hashlib
+        zip_path = os.path.join(variant_dist_dir(), f"MetaCreator-Windows-{get_dist_tag()}-Portable.zip")
+        if not os.path.exists(zip_path):
+            sys.exit(f"--patch-only needs an existing full zip: {zip_path}")
+        h = hashlib.sha256()
+        with open(zip_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        sha256 = h.hexdigest()
+        size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+        log("ZIP", "--patch-only: keeping the existing full portable zip.")
+    else:
+        zip_path, size_mb, sha256 = build_portable_zip(protect_mode)
     patch_path, patch_size_mb, patch_sha256 = build_patch_zip()
 
     update_dist_manifest(zip_path, sha256, patch_path, patch_sha256)

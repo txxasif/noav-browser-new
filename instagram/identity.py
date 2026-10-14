@@ -216,6 +216,16 @@ class IgIdentityMixin:
                     pass
 
     def ig_link_email_to_instagram(self, target_email: Optional[str] = None, code_fetcher=None) -> bool:
+        """Link the email to Instagram, then retire its mailcf session.
+
+        This is the last step that needs the mailbox, so the address goes dead once it succeeds.
+        """
+        linked = self._ig_link_email_impl(target_email, code_fetcher)
+        if linked:
+            self.retire_mail_session()
+        return linked
+
+    def _ig_link_email_impl(self, target_email: Optional[str] = None, code_fetcher=None) -> bool:
         """Ensure the account email is linked and confirmed directly on the Instagram profile.
         Essential for Telegram Taskly submissions to prevent rejection:
         'Your report was rejected because the Instagram account was registered without an email address.'
@@ -484,7 +494,7 @@ class IgIdentityMixin:
                 except Exception:
                     full_body = self._page_tail(p, 600).lower()
 
-                if any(k in full_body for k in ("already in use", "already linked", "already associated", "already added", "already registered", "another account", "not available", "enter a valid email", "being used")):
+                if any(k in full_body for k in ("already in use", "already linked", "already associated", "already added", "already registered", "already taken", "taken", "another account", "not available", "enter a valid email", "being used")):
                     self.log(f'<font color="#FFA500"><b>[⚠️] Email {em} is already linked/in use by Accounts Center — dismissing modal and proceeding directly to 2FA…</b></font>')
                     self._dismiss_contact_modal(p)
                     self._ac_leave_subpage(p)

@@ -218,6 +218,12 @@ class EngineBaseMixin:
         page.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
 
     def _human_click(self, page, locator, timeout=25000):
+        if hasattr(self, "_tap_or_click"):
+            try:
+                if self._tap_or_click(page, locator, timeout=timeout):
+                    return
+            except Exception:
+                pass
         box = locator.bounding_box(timeout=timeout)
         if not box:
             locator.click(timeout=timeout)
@@ -246,9 +252,19 @@ class EngineBaseMixin:
                         ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
                     const d = Object.getOwnPropertyDescriptor(proto, 'value');
                     if (d && d.set) { d.set.call(el, v); } else { el.value = v; }
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.dispatchEvent(new Event('blur', { bubbles: true }));
+                    try {
+                        el.dispatchEvent(new InputEvent('input', {
+                            bubbles: true,
+                            cancelable: true,
+                            composed: true,
+                            inputType: 'insertReplacementText',
+                            data: v
+                        }));
+                    } catch(e) {
+                        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                    }
+                    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                    el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
                 }""",
                 text,
             )

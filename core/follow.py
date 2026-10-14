@@ -20,7 +20,7 @@ def _off(name: str, default: str = "1") -> bool:
 
 
 class ExploreFollowMixin:
-    def ig_follow_suggested(self, max_follows: int = 2, humanize: bool = False):
+    def ig_follow_suggested(self, max_follows: int = 2, humanize: bool = True):
         # Same gates as the original, so disabled/duplicate/zero-count cases
         # never touch the browser.
         # Profile first (bio / avatar / first post via API), THEN follow: an account
@@ -78,15 +78,14 @@ class ExploreFollowMixin:
         return done + rest
 
     def _ig_follow_via_api(self, need: int) -> int:
-        """Follow ``need`` operator-list targets through Instagram's web API,
-        called from INSIDE the live tab (real TLS/cookies/headers — see
-        instagram/ig_page_api.py). No UI clicks.
+        """Follow ``need`` operator-list targets through the SAME cookie-based API client the
+        Taskly Cookie page uses (instagram/ig_api_cycle.follow_targets: mobile transport first,
+        web fallback), built from the live browser session's cookies. No UI clicks.
 
-        Switch: INSTA_FOLLOW_MODE=api. API-only by design — a shortfall is NOT
-        retried with UI clicks, so the operator's choice is what actually ran.
+        Switch: INSTA_FOLLOW_MODE=api. API-only by design — a shortfall is NOT retried with UI
+        clicks, so the operator's choice is what actually ran.
         """
-        from instagram import ig_page_api
-        from instagram.ig_api import pick_follow_targets
+        from instagram import ig_api_cycle
         from pool_prepare import IGDeadEnd
         self._ig_follow_done = True
         self.ig_followed_count = 0
@@ -94,19 +93,24 @@ class ExploreFollowMixin:
         try:
             p = self._ig_tab()
             if "instagram.com" not in (p.url or ""):
-                self.log(f'[👥][page-api] Not on Instagram ({p.url}) — no follow.')
+                self.log(f'[👥][api] Not on Instagram ({p.url}) — no follow.')
             else:
                 user = getattr(self, "ig_username", None) or getattr(self, "username", None) or ""
-                # a few spares: unresolvable / failed targets move on to the next
-                names = pick_follow_targets(need + 4, exclude=(user,) if user else ())
-                done = int(ig_page_api.follow_targets(p, names, need, self.log) or 0)
-        except ig_page_api.PageApiDead as exc:
-            raise IGDeadEnd(f"API follow: session dead ({exc})")
+                jar = [c for c in self.w.context.cookies()
+                       if "instagram" in (c.get("domain") or "").lower()]
+                cookie = "; ".join(f"{c['name']}={c['value']}" for c in jar)
+                if "sessionid=" not in cookie:
+                    raise IGDeadEnd("API follow: no sessionid in the browser session")
+                rec = {"cookies": cookie, "username": user, "id": user,
+                       "password": getattr(self, "password", "") or ""}
+                client = ig_api_cycle.client_for(rec, username=user, password=rec["password"])
+                done = int(ig_api_cycle.follow_targets(
+                    client, need, self.log, exclude=(user,) if user else (), self_username=user) or 0)
         except IGDeadEnd:
             raise
         except Exception as exc:
             self.log(f'[⚠️] API follow failed: {str(exc)[:120]}')
-        self.log(f'[👥][page-api] Follow pass complete: {done}/{need} (API only, no UI fallback).')
+        self.log(f'[👥][api] Follow pass complete: {done}/{need} (API only, no UI fallback).')
         self.ig_followed_count = done
         return done
 

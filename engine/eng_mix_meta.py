@@ -96,23 +96,179 @@ class EngineMetaMixin:
             pass
         return None
 
-    def _dismiss_meta_welcome_gate(self, page):
-        """Click through the desktop "Welcome to Meta AI" → Continue gate.
+    _BLOCKING_DIALOG_JS = """() => {
+        for (const d of document.querySelectorAll('[role="dialog"]')) {
+            const r = d.getBoundingClientRect();
+            if (!r.width || !r.height) continue;
+            const t = (d.innerText || '').slice(0, 400).toLowerCase();
+            if (t.indexOf('allow the use of cookies from') >= 0) return 'cookie';
+            if (t.indexOf('welcome to meta ai') >= 0) return 'welcome';
+            if (t.indexOf('save your login info') >= 0 || t.indexOf('save login info') >= 0) return 'save_login';
+        }
+        return '';
+    }"""
+    _COOKIE_BUTTONS = ("Decline optional cookies", "Only allow essential cookies",
+                       "Allow essential and optional cookies", "Allow all cookies")
 
-        Desktop meta.ai (and only desktop — the mobile profile skips it)
-        renders a `role=dialog` holding "Welcome to Meta AI" with a Continue
-        button that covers the signup UI. Scoped to that dialog's text so a
-        "Continue" anywhere else (e.g. the auth.meta.com email step) is never
-        touched. Returns True when a gate was dismissed.
-        """
+    def _dismiss_blocking_dialogs(self, page, rounds=4) -> int:
+        """Clear whatever consent modal covers the signup form, however many stack up.
+
+        EU sessions (e.g. Sweden) can show "Allow the use of cookies from Meta on this browser?"
+        on auth.meta.com and, behind or after it, a second cookie modal and/or the "Welcome to Meta AI"
+        gate. One cheap evaluate per call; with nothing to clear it returns 0 immediately, so the
+        non-EU flow pays ~1 ms. Returns how many modals were dismissed."""
+        cleared = 0
+        for _ in range(max(1, rounds)):
+            try:
+                kind = page.evaluate(self._BLOCKING_DIALOG_JS)
+            except Exception:
+                return cleared
+            if not kind:
+                return cleared
+            if kind == "welcome":
+                if not self._dismiss_meta_welcome_gate(page):
+                    return cleared
+                cleared += 1
+                continue
+            if kind == "save_login":
+                clicked = False
+                dlg = page.locator('[role="dialog"]')
+                for nm in ("Save", "Not now"):
+                    for scope in (dlg, page):
+                        try:
+                            btn = scope.get_by_role("button", name=nm, exact=True).first
+                            if btn.count() and btn.is_visible():
+                                btn.click(timeout=4000)
+                                clicked = True
+                                break
+                        except Exception:
+                            continue
+                    if clicked:
+                        break
+                if not clicked:
+                    try:
+                        clicked = bool(page.evaluate("""() => {
+                            for (const b of document.querySelectorAll('button, div[role="button"], span')) {
+                                const t = (b.innerText || '').trim().toLowerCase();
+                                if (t === 'save' || t === 'not now') {
+                                    b.click(); return true;
+                                }
+                            }
+                            const x = document.querySelector('[aria-label="Close"], [aria-label="close"]');
+                            if (x) { x.click(); return true; }
+                            return false;
+                        }"""))
+                    except Exception:
+                        pass
+                if not clicked:
+                    return cleared
+                cleared += 1
+                self.log('[💾] "Save your login info?" dialog dismissed.')
+                for _w in range(8):
+                    page.wait_for_timeout(350)
+                    try:
+                        if page.evaluate(self._BLOCKING_DIALOG_JS) != "save_login":
+                            break
+                    except Exception:
+                        return cleared
+                continue
+            clicked = False
+            dlg = page.locator('[role="dialog"]')
+            for nm in self._COOKIE_BUTTONS:
+                for scope in (dlg, page):
+                    try:
+                        btn = scope.get_by_role("button", name=nm, exact=True).first
+                        if btn.count() and btn.is_visible():
+                            btn.click(timeout=4000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+                if clicked:
+                    break
+            if not clicked:
+                return cleared
+            cleared += 1
+            self.log('[🍪] Cookie modal dismissed.')
+            for _w in range(8):                       # wait (<=3s) for it to go away or a 2nd one to stack
+                page.wait_for_timeout(350)
+                try:
+                    if page.evaluate(self._BLOCKING_DIALOG_JS) != "cookie":
+                        break
+                except Exception:
+                    return cleared
+        return cleared
+
+    def _click_modal_signup(self, page) -> bool:
+        """Press "Sign up" in the meta.ai "Sign in to get started" modal (never the Instagram/Facebook
+        variants). True when it was pressed."""
+        try:
+            dialog = page.locator('div[role="dialog"]').first
+            if dialog.count() == 0 or not dialog.is_visible():
+                return False
+            # has-text, not text-is: the live button wraps its label in child nodes, so text-is matches
+            # nothing (verified 2026-10-12). Instagram/Facebook variants are excluded.
+            btn = dialog.locator(
+                'button:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook")), '
+                '[role="button"]:has-text("Sign up"):not(:has-text("Instagram")):not(:has-text("Facebook"))'
+            ).first
+            if btn.count() == 0 or not btn.is_visible():
+                return False
+            try:
+                btn.tap(timeout=3000)
+            except Exception:
+                btn.click(force=True, timeout=3000)
+            self.log('[✔] Pressed modal "Sign up" again after the consent gate.')
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _close_stray_privacy_tabs(page):
+        """The EU gate's focused "AI at Meta" link can open facebook.com/privacy/... in a new tab on
+        Continue. Close only such privacy tabs (never the signup page or any other tab)."""
+        try:
+            for other in list(page.context.pages):
+                if other is page:
+                    continue
+                u = (other.url or "").lower()
+                if "facebook.com/privacy" in u or "facebook.com/legal" in u:
+                    other.close()
+        except Exception:
+            pass
+
+    def _dismiss_meta_welcome_gate(self, page):
+        """Click through the "Welcome to Meta AI" -> Continue gate.
+
+        Desktop meta.ai renders it on load; EU sessions (also mobile) get it ~2s AFTER "Sign up",
+        stacked on the sign-in dialog. Scoped to that dialog's text so a "Continue" anywhere else
+        is never touched. After the click the gate stays in the DOM for a moment with Continue
+        disabled: wait for it to close instead of clicking again (re-clicks fell through to the
+        runner's 25s fallback timeouts and hung the funnel for minutes, 2026-10-12).
+        Returns True when the gate was dismissed (gone from the page)."""
         try:
             gate = page.locator('div[role="dialog"]:has-text("Welcome to Meta AI")').first
-            if gate.count() > 0 and gate.is_visible():
-                btn = gate.get_by_role("button", name="Continue").first
-                if btn.count() > 0 and btn.is_visible():
-                    self._human_click(page, btn, 3000)
-                    page.wait_for_timeout(800)
-                    return True
+            if gate.count() == 0 or not gate.is_visible():
+                return False
+            btn = gate.get_by_role("button", name="Continue").first
+            if btn.count() == 0 or not btn.is_visible():
+                return False
+            if btn.is_enabled():
+                try:
+                    btn.click(timeout=2500)
+                except Exception:
+                    btn.click(force=True, timeout=1500)
+            for _ in range(20):                      # <= ~5s for the gate to close
+                page.wait_for_timeout(250)
+                try:
+                    if gate.count() == 0 or not gate.is_visible():
+                        break
+                except Exception:
+                    break
+            else:
+                return False
+            self._close_stray_privacy_tabs(page)
+            return True
         except Exception:
             pass
         return False
@@ -277,13 +433,22 @@ class EngineMetaMixin:
 
             self.log('[✅] Clicked "Sign up" on meta.ai modal; awaiting auth step…')
             reached_step = False
+            _resign = 0
             # meta.ai's "Sign up" is a <button> with no href: it can open the
             # auth step IN PLACE (no URL change). Waiting the full 12s for a
             # redirect then re-loading meta.ai wasted ~18s EVERY run. Poll every
             # 600ms and accept either a real redirect OR the same-page method
             # chooser / email field as success.
-            for _ in range(12):
+            for _ in range(24):          # exits at the redirect; EU needs the extra room (gate ~2s, re-press, redirect)
                 page.wait_for_timeout(600)
+                # EU (e.g. Sweden): the "Welcome to Meta AI" gate opens AFTER "Sign up" and blocks the
+                # redirect until Continue is pressed (non-EU never shows it: one cheap locator count).
+                if self._dismiss_blocking_dialogs(page):
+                    # The gate's Continue drops back to the "Sign in to get started" modal: Sign up
+                    # has to be pressed again (capped, so a stuck page cannot loop here).
+                    if _resign < 2 and "meta.ai" in (page.url or "") and self._click_modal_signup(page):
+                        _resign += 1
+                    continue
                 cur = page.url or ""
                 if "meta.ai" not in cur:
                     # Meta sometimes bounces the signup to Instagram (aymh
@@ -380,6 +545,7 @@ class EngineMetaMixin:
             # showing — otherwise a login page's username field would
             # false-positive here.
             for _ in range(6):
+                self._dismiss_blocking_dialogs(page)
                 # Never accept an Instagram page as the Meta email step.
                 if self._is_ig_bounce_url(page.url):
                     self.log('[⚠️] Meta funnel landed on Instagram — aborting Meta entry.')

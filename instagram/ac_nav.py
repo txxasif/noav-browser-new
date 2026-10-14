@@ -369,25 +369,11 @@ class IgAcNavMixin:
                     settings_reached = self._ac_open_settings_from_profile(p)
 
                 if not settings_reached:
-                    self.log('[🔄] Step 2: gear unavailable — opening IG /accounts/settings/ directly…')
-                    try:
-                        p.goto("https://www.instagram.com/accounts/settings/",
-                               wait_until="domcontentloaded", timeout=30000)
-                        for _ in range(8):
-                            p.wait_for_timeout(1000)
-                            # FAST bail: a login wall / chooser is terminal.
-                            if self._walled_or_chooser(p):
-                                raise IGDeadEnd(
-                                    "IG login wall/chooser during AC nav (fast dead end)")
-                            cur_url = p.url or ""
-                            if "/accounts/settings" in cur_url or p.locator(
-                                    'a[href*="accountscenter"], [aria-label*="Accounts Center" i]').count() > 0:
-                                settings_reached = True
-                                break
-                    except IGDeadEnd:
-                        raise
-                    except Exception as exc:
-                        self.log(f'[ac] Step 2 direct-settings note: {exc}')
+                    # No direct jump to /accounts/settings/ (bot-check trigger): one more
+                    # click attempt on the gear after a pause, then give up on this try.
+                    self.log('[🔄] Step 2: gear still unavailable — one more click attempt (no URL jump)…')
+                    p.wait_for_timeout(2500)
+                    settings_reached = self._ac_open_settings_from_profile(p)
 
                 if not settings_reached:
                     self.log(f'[⚠️] AC entry failed: Settings never opened (at {cur_url[:80]})')
@@ -1067,7 +1053,10 @@ class IgAcNavMixin:
         # of the flow so the timing profile is consistent, not fixed.
         try:
             self._human_pause(0.6, 1.8)
-            p.mouse.wheel(0, 420)
+            if hasattr(self, "_touch_scroll"):
+                self._touch_scroll(p, 420)
+            else:
+                p.mouse.wheel(0, 420)
             self._human_pause(0.4, 1.2)
         except Exception:
             pass
@@ -1122,6 +1111,14 @@ class IgAcNavMixin:
         # "Confirm you're human to use your profile" checkpoint (terminal, per
         # the IG runbook) or an unrecoverable login wall.
         if "accountscenter.instagram.com" not in (p.url or ""):
+            # Direct open of the Accounts Center HOME page only. The section and the password
+            # form are still reached by clicks from there (never a deep link to the form).
+            try:
+                p.goto("https://accountscenter.instagram.com/", wait_until="domcontentloaded", timeout=30000)
+                p.wait_for_timeout(2000)
+                self.log('[ac] opened Accounts Center home directly; moving to the section by clicks.')
+            except Exception as exc:
+                self.log(f'[ac] direct Accounts Center open note: {exc}')
             for _try in range(3):
                 if self._is_human_confirm_page(p):
                     # Operator 2026-10-07: DO NOT click "Continue" / solve — DEAD END.

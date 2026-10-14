@@ -41,6 +41,8 @@ class _Base(unittest.TestCase):
             "id": rec_id, "status": "MetaCreated", "platform": "Meta",
             "email": f"{rec_id}@x.test", "meta_password": "pw", "password": "pw",
             "created_at": created, "cookies": "",
+            # Only API-created inboxes are drainable (store.py), so fixtures are API inboxes.
+            "mail_tokens": {"mailfish_email": f"{rec_id}@x.test", "mailfish_api": True},
         }
         rec.update(over)
         store.add(rec)
@@ -105,7 +107,8 @@ class MetaListStoreTests(_Base):
 
     def test_ig_pool_restore_still_returns_created(self):
         store.add({"id": "ig1", "status": "Created", "platform": "Meta+Instagram",
-                   "cookies": "sessionid=abc; " * 12, "created_at": "2026-10-08 08:00:00"})
+                   "cookies": "sessionid=abc; " * 12, "created_at": "2026-10-08 08:00:00",
+                   "mail_tokens": {"mailfish_email": "ig1@x.test", "mailfish_api": True}})
         a = store.pop_ig_creator_account()
         self.assertEqual(a["id"], "ig1")
         store.restore_ig_creator_account("ig1", rotate=True)
@@ -462,6 +465,15 @@ class _ToastPage:
             first = None
             def scroll_into_view_if_needed(self, **k): pass
             def click(self, **k): page.taps += 1
+            def evaluate(self, js, arg=None):
+                # Tap via JS (el.click) registers the follow; reading the text shows the new state.
+                if "el.click" in js:
+                    page.taps += 1
+                    return None
+                if "innerText" in js:
+                    return "following" if page.taps > 0 else "follow"
+                return None
+            def setAttribute(self, *a): pass
         l = L(); l.first = l
         return l
 

@@ -21,6 +21,7 @@ Import-safe for ``worker.py`` (lazy ``AISlotWorker`` import — no cycle).
 from __future__ import annotations
 
 import json
+from urllib.parse import urlparse
 import os
 import re
 import sys
@@ -56,11 +57,13 @@ from run_cookie_cycle import (  # noqa: E402
 )
 from pool_common import (  # noqa: E402
     _cookies_for_playwright,
+    _mail_tokens_for_account,
     _mail_tokens_from_extra,
     _mailtd_list,
     _mailtd_http_list,
     _mailtd_http_body,
-    _mailtd_http_code,
+    _mail_http_code,
+    _mail_ids,
     _make_pool_fetch_code,
     _purge_pool_account,
     _browser_logged_in,
@@ -84,9 +87,90 @@ def log(slot_id, m):
     print(f"[paygo2fa:{slot_id}] {m}", flush=True)
 
 
+def _pin_creation_device(runner, acc):
+    """Make the drain browser present the phone this account was created on.
+
+    A fresh browser picks a new fingerprint each run, which Meta sees as a new device
+    ("Someone tried to modify settings on your Meta Account" + an email code). The
+    launcher already derives the whole identity (Android version, GPU, screen) from a
+    pinned ``device_model``, so pinning it reproduces the creation phone. Returns a
+    short description for the log ('' when the record has no saved device).
+    """
+    model = str((acc or {}).get("device_model") or "").strip()
+    ua = str((acc or {}).get("device_ua") or "").strip()
+    if model:
+        runner.device_model = model
+    if ua:
+        runner.device_ua = ua
+    return model
+
+
+def _restore_session_storage(page, acc):
+    """Re-apply the creation-time localStorage for the Instagram origin we are ON.
+
+    localStorage is per-origin, so it can only be written from a page already on that
+    origin (the old code ran this before any page existed and the error was swallowed).
+    Returns how many keys were written.
+    """
+    sf = (acc or {}).get("session_file")
+    if not (sf and os.path.exists(sf)):
+        return 0
+    try:
+        with open(sf, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        host = (urlparse(page.url or "").hostname or "").lower()
+    except Exception:
+        return 0
+    origins = (data.get("origins") or []) if isinstance(data, dict) else []
+    written = 0
+    for o in origins:
+        try:
+            o_host = (urlparse(o.get("origin") or "").hostname or "").lower()
+            items = o.get("localStorage") or []
+            if not (o_host and o_host == host and items):
+                continue
+            pairs = {i.get("name"): i.get("value") for i in items if i.get("name")}
+            if pairs:
+                page.evaluate(
+                    "(kv) => { for (const [k, v] of Object.entries(kv)) { try { localStorage.setItem(k, v); } catch (e) {} } }",
+                    pairs)
+                written += len(pairs)
+        except Exception:
+            continue
+    return written
+
+
+def _ac_session_ok(page, runner=None, wait_s: float = 12.0) -> bool:
+    """True when the injected session opened Accounts Center (the screens seen in the DevTools runs:
+    the change-password form, its account chooser, or the section list). A logged-out session is
+    bounced to instagram.com (login wall / saved-account chooser)."""
+    end = time.time() + wait_s
+    markers = ("current password", "choose an account", "login & recovery", "login and security",
+               "password and security", "check your email", "change password")
+    while time.time() < end:
+        try:
+            url = (page.url or "").lower()
+            body = (page.inner_text("body", timeout=2500) or "").lower()
+        except Exception:
+            time.sleep(0.4)
+            continue
+        if "accountscenter.instagram.com" not in url:
+            if "instagram.com" in url and ("use another profile" in body or "/accounts/login" in url
+                                           or ("log in" in body and "open app" in body)):
+                return False
+            time.sleep(0.4)
+            continue
+        if "can't make this change" in body:
+            return True          # a real, logged-in account (the device block is handled later)
+        if any(m in body for m in markers):
+            return True
+        time.sleep(0.4)
+    return False
+
+
 def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=False,
                             captcha_mode="extension", mail_provider="mailtd",
-                            stop_event=None, add_email=False,
+                            stop_event=None, add_email=True,
                             tg_task=None, tg_bot="paygo", use_ig_pool=True):
     """Run ONE pooled PayGo-2FA cycle. Returns ``(ok, detail)``."""
     import store
@@ -123,13 +207,22 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
         store.recover_stale_submitting()
     except Exception:
         pass
-    avail = store.count_ig_creator_accounts()
+    avail = store.count_ig_creator_accounts(need_mail=True)     # 2FA reads the email code: needs a readable mailbox
     if avail <= 0:
         log(slot_id, "[pool] No available IG Creator accounts in pool to drain.")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error",
                     "detail": "Pool empty: No IG Creator accounts left to drain."})
         return False, "no_pool_accounts"
     log(slot_id, f"[pool] Found {avail} available IG Creator account(s) in pool.")
+    try:
+        _b = store.ig_pool_breakdown()
+        if _b["total"] > avail:
+            log(slot_id, f"[pool] {_b['total']} created, {avail} drainable now — skipped: "
+                         f"{_b['no_mailbox']} with no readable mailbox (the 2FA code cannot be read), "
+                         f"{_b['in_use_or_done']} in use / already submitted / dead, "
+                         f"{_b['challenged']} set aside after a challenge, {_b['no_cookies']} without cookies.")
+    except Exception:
+        pass
 
     bot = None
     tg_acct = None
@@ -139,6 +232,9 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
     worker = None
     ok = False
     rec_id = None
+    prefetched = None      # pool account claimed + verified BEFORE the bot task starts
+    preauth_for = None     # id of the account whose Meta email challenge was already cleared
+    session_ok_for = None  # id of the account whose session the pre-phase already verified on Accounts Center
 
     try:
         if not tg_manager.usable():
@@ -195,6 +291,93 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
         except Exception:
             pass
 
+        # -- PRE-PHASE: everything that does not need the bot's credentials runs
+        #    BEFORE the bot task timer starts: browser launch, a verified pool
+        #    session, and Meta's one-time "Check your email" challenge (the slowest
+        #    step - seconds to minutes on tempmail.fish). Meta then skips the code on
+        #    the later password change, so the real task window is spent only on
+        #    steps that must happen inside it.
+        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
+                    "detail": "Pool 2FA: launching browser with the pooled IG session…"})
+        worker = worker_factory(slot_id=slot_id, is_headless=is_headless)
+        runner = MetaInstaRunner(
+            worker, twofa=True, telegram=False, tg_task=task,
+            captcha_mode="none", mail_provider="mailtd", target="telegram",
+        )
+        if os.path.exists(SELFIE_PATH):
+            runner.selfie_path = SELFIE_PATH
+        runner._install_screenshot_hooks()
+
+        # Claim the account BEFORE launching so the browser can present its own phone.
+        _first = store.pop_ig_creator_account(prefer_non_follow5=True, need_mail=True)
+        _pending = _first
+        if _first is not None:
+            prefetched = _first        # restored by the finally block if anything fails
+            _phone = _pin_creation_device(runner, _first)
+            log(slot_id, f"[📱] Browser will present the account's own phone: {_phone or 'no saved model (random)'}.")
+        runner._launch()
+        ctx = getattr(getattr(runner, "w", None), "context", None)
+        if ctx is None:
+            raise RuntimeError("browser context unavailable after launch")
+
+        for _pre in range(6):
+            if _stopped():
+                raise RuntimeError("stopped")
+            if _pending is not None:
+                _c, _pending = _pending, None
+            else:
+                _c = store.pop_ig_creator_account(prefer_non_follow5=True, need_mail=True)
+            if not _c or not _c.get("cookies"):
+                prefetched = None      # nothing usable was claimed (no cookies = unusable record)
+                break
+            prefetched = _c
+            try:
+                ctx.clear_cookies()
+            except Exception:
+                pass
+            ctx.add_cookies(_cookies_for_playwright(_c["cookies"]))
+            _pg = runner._ig_tab()
+            # ONE load, straight to the change-password form on Accounts Center (what the hand-driven
+            # DevTools runs did). It doubles as the session check, so the Instagram feed is never
+            # opened (that was 2-3 extra page loads per account) and the later password step finds
+            # the page already there.
+            try:
+                _pg.goto("https://accountscenter.instagram.com/password_and_security/password/change/",
+                         referer="https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+            except Exception as exc:
+                log(slot_id, f"[⚠️] Accounts Center load note (pre-phase): {exc}")
+            if _ac_session_ok(_pg, runner):
+                session_ok_for = _c["id"]
+                log(slot_id, f"[pool] Pre-claimed IG Creator account {_c['id']} (session verified on Accounts Center).")
+                break
+            _purge_pool_account(store, _c, log, slot_id, emit_event, "browser session not logged in")
+            prefetched = None
+
+        if prefetched is not None:
+            _pre_tokens = _mail_tokens_for_account(prefetched)
+            runner.mail = None
+            runner.mail_tokens = _pre_tokens
+            _pre_ids = set()
+            if _pre_tokens:
+                try:
+                    _pre_ids = _mail_ids(_pre_tokens)
+                except Exception:
+                    _pre_ids = set()
+            runner.fetch_code = _make_pool_fetch_code(runner, _pre_ids)
+            _pre_pw = prefetched.get("password") or prefetched.get("meta_password") or ""
+            # Opt-in (PAYGO_PREAUTH=1). Live checks showed the email challenge only appears when the
+            # change is SUBMITTED (or not at all on the Meta row), never on typing, so this step cost
+            # 6-22 s per account without clearing anything.
+            if _pre_tokens and _pre_pw and os.environ.get("PAYGO_PREAUTH", "0") == "1":
+                _t_pa = time.monotonic()
+                try:
+                    if runner.ig_ac_preauth(_pre_pw):
+                        preauth_for = prefetched["id"]
+                except Exception as exc:
+                    log(slot_id, f"[⚠️] AC pre-auth error (continuing without it): {str(exc)[:100]}")
+                log(slot_id, f"[🔐] AC pre-auth {'done' if preauth_for else 'not completed'} in "
+                             f"{int(time.monotonic() - _t_pa)}s - before the bot task starts.")
+
         if not bot.choose_task(task):
             _v = getattr(bot, "last_task_verdict", None) or "hidden"
             raise RuntimeError(f"Could not select {task} in {bot_id} [task_unavailable:{_v}]")
@@ -209,22 +392,7 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
         clog(f"creds: name='{creds.get('first_name')}' login='{login}'")
         log(slot_id, f"[creds] PayGo issued target username: '{login}'")
 
-        # -- Browser (launch ONCE; reused across pool-account retries) --------
-        emit_event({"type": "slot_event", "slot_id": slot_id, "status": "launching",
-                    "detail": "Pool 2FA: launching browser with the pooled IG session…"})
-        worker = worker_factory(slot_id=slot_id, is_headless=is_headless)
-        runner = MetaInstaRunner(
-            worker, twofa=True, telegram=False, tg_task=task,
-            captcha_mode="none", mail_provider="mailtd", target="telegram",
-        )
-        if os.path.exists(SELFIE_PATH):
-            runner.selfie_path = SELFIE_PATH
-        runner._install_screenshot_hooks()
-        runner._launch()
-        ctx = getattr(getattr(runner, "w", None), "context", None)
-        if ctx is None:
-            raise RuntimeError("browser context unavailable after launch")
-
+        # (browser + pool session + Meta email challenge were prepared in the PRE-PHASE above)
         runner.tg_creds = dict(creds)
         runner.tg_creds["login"] = login
         runner.new_username = login
@@ -254,7 +422,11 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             for _scan in range(10):
                 if _stopped():
                     raise RuntimeError("stopped")
-                cand = store.pop_ig_creator_account()
+                # 5-follow accounts are reserved for the cookie tasks: take them only when nothing else is left.
+                if prefetched is not None:
+                    cand, prefetched = prefetched, None
+                else:
+                    cand = store.pop_ig_creator_account(prefer_non_follow5=True, need_mail=True)
                 if not cand or not cand.get("cookies"):
                     break
                 cand_id = cand["id"]
@@ -262,25 +434,24 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                 log(slot_id, f"[pool] Claimed IG Creator account {cand_id} (current username: '{cand_user}')")
 
                 # 1) Load the pooled session into the browser and VERIFY it is
-                #    logged in BEFORE renaming.
-                try:
-                    ctx.clear_cookies()
-                except Exception:
-                    pass
-                ctx.add_cookies(_cookies_for_playwright(cand["cookies"]))
+                #    logged in BEFORE renaming (skip redundant reload if pre-authenticated).
                 page = runner._ig_tab()
-                try:
-                    page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                if cand_id != preauth_for and cand_id != session_ok_for:
+                    # A different account than the one the pre-phase verified: load ITS session and
+                    # check it on Accounts Center (one load) — never through the Instagram feed.
                     try:
-                        page.wait_for_selector('[role="dialog"], div[aria-modal="true"]', timeout=3500)
+                        ctx.clear_cookies()
                     except Exception:
                         pass
-                    runner._dismiss_ig_sheets(page)
-                except Exception as exc:
-                    log(slot_id, f"[⚠️] IG tab load note: {exc}")
-                if not _browser_logged_in(page):
-                    _purge_pool_account(store, cand, log, slot_id, emit_event, "browser session not logged in")
-                    continue
+                    ctx.add_cookies(_cookies_for_playwright(cand["cookies"]))
+                    try:
+                        page.goto("https://accountscenter.instagram.com/password_and_security/password/change/",
+                                  referer="https://www.instagram.com/", wait_until="domcontentloaded", timeout=45000)
+                    except Exception as exc:
+                        log(slot_id, f"[⚠️] Accounts Center load note: {exc}")
+                    if not _ac_session_ok(page, runner):
+                        _purge_pool_account(store, cand, log, slot_id, emit_event, "browser session not logged in")
+                        continue
 
                 # 2) Rename via the direct Web API.
                 log(slot_id, f"⚡ [api] Changing username: '{cand_user}' -> '{login}' via direct IG Web API…")
@@ -296,15 +467,11 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                     runner.ig_username = login
                     runner.username = login
                     runner.new_username = login
+                    # No deep link to Accounts Center here: the next step opens it by UI clicks.
                     try:
-                        page.goto(f"https://www.instagram.com/{login}/", wait_until="domcontentloaded", timeout=45000)
-                        try:
-                            page.wait_for_selector('[role="dialog"], div[aria-modal="true"]', timeout=3000)
-                        except Exception:
-                            pass
                         runner._dismiss_ig_sheets(page)
                     except Exception as exc:
-                        log(slot_id, f"[⚠️] post-rename IG sync note: {exc}")
+                        log(slot_id, f"[⚠️] post-rename Accounts Center navigation note: {exc}")
                     break
                 if _is_ig_checkpoint_error(name_msg):
                     _ig_spam_streak[0] += 1
@@ -343,7 +510,7 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                 raise RuntimeError("Failed to obtain a valid working IG Creator account from pool")
 
             acc_id = pool_acc["id"]
-            mail_tokens = _mail_tokens_from_extra(pool_acc.get("extra"))
+            mail_tokens = _mail_tokens_for_account(pool_acc)
             if not mail_tokens:
                 log(slot_id, "[⚠️] Account has no stored mail.td tokens — the AC email "
                              "re-auth step may fail (2FA setup might still proceed).")
@@ -361,8 +528,7 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             if mail_tokens:
                 try:
                     # HTTP snapshot of existing messages (fast ~0.3s, no extra browser tab)
-                    msgs = _mailtd_http_list(mail_tokens)
-                    preexisting_mail_ids = {str(m.get("id")) for m in msgs if m.get("id")}
+                    preexisting_mail_ids = _mail_ids(mail_tokens)
                     log(slot_id, f"[📧] Inbox snapshotted via HTTP — {len(preexisting_mail_ids)} "
                                  f"existing message(s) ignored; waiting for a fresh code.")
                 except Exception as exc:
@@ -390,7 +556,7 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             # before dying, all logged as reason=unknown). Fail fast here:
             # purge + cancel the unused TG task instead.
             try:
-                _pw_alive = _browser_logged_in(runner._ig_tab())
+                _pw_alive = _ac_session_ok(runner._ig_tab(), runner, wait_s=4.0)
             except Exception:
                 _pw_alive = True
             if not _pw_alive:
@@ -409,13 +575,18 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             # that latency behind the AC navigation instead of paying it after
             # the challenge is detected.
             _pw_otp = {"code": None, "stop": False}
-            if mail_tokens:
+            _preauthed = (preauth_for is not None and preauth_for == acc_id)
+            if _preauthed:
+                log(slot_id, "[🔐] Email challenge already cleared before the task — "
+                             "skipping the OTP prefetch for the password step.")
+            if mail_tokens and not _preauthed and os.environ.get("PAYGO_OTP_PREFETCH", "0") == "1":
                 def _pw_prefetch():
                     try:
-                        c = _mailtd_http_code(
-                            runner, mail_tokens, preexisting_mail_ids, "instagram", 60,
+                        c = _mail_http_code(
+                            runner, mail_tokens, preexisting_mail_ids, "instagram", 180,
                             subject_hint=("authenticate your profile|authenticate|security "
-                                          "code|meta account code|instagram|security"))
+                                          "code|meta account code|instagram|security"),
+                            should_stop=lambda: _pw_otp["stop"])
                         if c and not _pw_otp["stop"]:
                             _pw_otp["code"] = c
                             log(slot_id, f"[📧] password OTP pre-fetched ({c[:2]}****) — ready for the challenge.")
@@ -448,7 +619,27 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             cur_pw = pool_acc.get("password") or runner.password
             target_pw = (runner.tg_creds or {}).get("password") or runner.new_password
             pw_ok = True
-            if not mail_tokens and target_pw and target_pw != cur_pw:
+            # The bot-email step runs right after the password change (see below): Instagram emails
+            # its confirmation code to the bot's mailbox and "📥 Get code" hands it back. Only when
+            # that step is switched off (PAYGO_SKIP_EMAIL=1) is Get code pressed here instead, in
+            # parallel with the password change, so the bot's ~2 min mailbox search starts early.
+            _skip_email = os.environ.get("PAYGO_SKIP_EMAIL", "0") == "1"
+            _get_code_pressed = {"v": False, "t": None}
+            if _skip_email:
+                def _early_get_code():
+                    try:
+                        _adv0 = getattr(bot, "press_get_code", None)
+                        if callable(_adv0):
+                            _adv0()
+                            _get_code_pressed["v"] = True
+                            log(slot_id, "[✉️] Bot Get code pressed (in parallel with the password change).")
+                    except Exception as exc:
+                        log(slot_id, f"[⚠️] early Get code failed ({str(exc)[:80]}) — will retry before 2FA.")
+                _t_gc = threading.Thread(target=_early_get_code, daemon=True)
+                _get_code_pressed["t"] = _t_gc
+                _t_gc.start()
+            if (not mail_tokens and target_pw and target_pw != cur_pw
+                    and os.environ.get("PAYGO_SKIP_PW_NO_TOKEN", "0") == "1"):
                 # No stored inbox -> the AC password re-auth OTP can never be
                 # read. Skip the change (it would only stall on the challenge
                 # and burn the bot window) and continue to the email/2FA steps.
@@ -459,6 +650,9 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                 ok_pw = False
                 why = "unknown"
                 for _pw_try in range(2):
+                    if _pw_try > 0:
+                        # A retry must not replay the first try's cached (used) OTP.
+                        _pw_otp["code"] = None
                     try:
                         log(slot_id, f"[🔑] Changing account password to the TG task password… (try {_pw_try + 1}/2)")
                         runner.password = cur_pw
@@ -468,17 +662,50 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                         log(slot_id, f"[⚠️] password change error: {exc}")
                     if ok_pw:
                         runner.password = target_pw
+                        # Persist NOW: a stop/crash before 2FA must not leave the record
+                        # on the old password (IG has already changed it).
+                        pool_acc["password"] = target_pw
+                        try:
+                            store.update_account(pool_acc["id"], {"password": target_pw,
+                                                                  "meta_password": target_pw})
+                        except Exception:
+                            pass
                         log(slot_id, "[🔑] Password updated to the TG task password.")
                         break
                     why = getattr(runner, "_pw_fail_reason", None) or "unknown"
                     log(slot_id, f"[⚠️] Password change failed (reason={why}) on try {_pw_try + 1}/2.")
+                    if why in ("device_block", "rejected", "otp_not_delivered", "otp_not_accepted"):
+                        break  # none of these can pass on a retry (new-device check / wrong password / no email)
                     time.sleep(1.5)
+                if not ok_pw and getattr(runner, "_pw_fail_reason", None) == "device_block":
+                    # Blocked on a new device ("You can't make this change at the moment"): this
+                    # account cannot finish the task. Remove it from the list, take the next one,
+                    # and do NOT run the 2FA step.
+                    _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                        "password change blocked (new-device check)")
+                    pool_acc = None
+                    raise RuntimeError("password change blocked (new-device check) — account removed, next account")
                 if not ok_pw:
-                    pw_ok = False
-                    log(slot_id, f"[⚠️] Password change failed (reason={why}) — continuing "
-                                 f"(the bot accepts the registration; current pw in store may be stale).")
-                    emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
-                                "detail": f"Password change failed (reason={why}) — continuing"})
+                    # GATE: the password step is a precondition for 2FA. Without it the
+                    # AC re-auth fails ("Current password is invalid") and the 2FA key
+                    # captured on that page is never accepted. Park the account (so the
+                    # drain doesn't re-claim it at once) and stop this cycle.
+                    log(slot_id, f"[⚠️] Password change failed (reason={why}) — removing this account; "
+                                 f"taking the next one.")
+                    if why == "otp_not_delivered":
+                        # Instagram never emailed the challenge code: the account itself is fine, so
+                        # park it (back in the pool with a cool-down) instead of deleting it.
+                        try:
+                            store.mark_ig_creator_challenged(pool_acc["id"])
+                        except Exception:
+                            pass
+                        pool_acc = None
+                        raise RuntimeError("password change failed (reason=otp_not_delivered) — "
+                                           "account parked (not deleted), next account")
+                    _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                        f"password change failed ({why})")
+                    pool_acc = None
+                    raise RuntimeError(f"password change failed (reason={why}) — account removed, next account")
 
             # Password step done — stop the background inbox poll and restore a
             # FRESH fetch_code (the cached password OTP must not be reused by a
@@ -494,8 +721,6 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             #     Try to link it, but NEVER let it burn the bot window: on
             #     miss/fail continue to the 2FA submit regardless (worst case the
             #     registration still pays).
-            _get_code_pressed = {"v": False}
-
             def _fetch_bot_email_code():
                 _get_code_pressed["v"] = True
                 log(slot_id, f"[tg] Requesting email verification code from {bot_id} (📥 Get code)…")
@@ -522,21 +747,18 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                     pass
             log(slot_id, f"[✉️] Bot creds email resolved: {bot_em or 'NONE'}")
 
-            if bot_em and pw_ok:
+            if bot_em and pw_ok and not _skip_email:
                 log(slot_id, f"[✉️] Linking bot-issued email {bot_em} via 📥 Get code…")
                 import time as _time
                 _em_t0 = _time.time()
                 try:
-                    linked = runner.ig_link_email_to_instagram(
+                    linked = runner.ig_link_email_fast(
                         bot_em, code_fetcher=_fetch_bot_email_code)
                 except IGDeadEnd as exc:
                     linked = False
                     log(slot_id, f"[⚠️] Bot email rejected ({exc}) — continuing to 2FA.")
                 except Exception as exc:
                     _em = str(exc)
-                    # "This email is already linked" (or any already-linked /
-                    # confirmed message) is NOT fatal: once the bot's OTP has been
-                    # used to confirm the email, just move on to 2FA.
                     if "already" in _em.lower() or "linked" in _em.lower():
                         log(slot_id, f"[✉️] Email already linked ({_em[:80]}) — ignoring, continuing to 2FA.")
                     else:
@@ -544,33 +766,39 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                     linked = False
                 log(slot_id, f"[✉️] Bot email linkage result: {linked} "
                              f"({int(_time.time() - _em_t0)}s, continuing to 2FA)")
-            elif bot_em and not pw_ok:
-                # Password was NOT changed -> do NOT link the bot email. Adding it
-                # rewrites the account's contact point, so the NEXT password OTP
-                # would go to the bot inbox (unreadable) and the account becomes
-                # permanently un-drainable. Skip the link and go straight to 2FA.
-                log(slot_id, "[✉️] Password not changed — skipping the bot-email link "
-                             "(it would rewrite the account email and break the next OTP).")
-            else:
-                log(slot_id, "[✉️] No bot-issued email provided in task credentials — skipping email link step.")
-
-            # The bot's 2FA task only opens its "send the 2FA Key" prompt AFTER
-            # 📥 Get code is pressed for the bot-issued email. When IG reports
-            # that email is ALREADY linked/in use (the common pool case),
-            # ig_link_email_to_instagram never calls the code fetcher above — so
-            # the press never happened and submit_2fa_key later came back with no
-            # one-time code ("Telegram bot did not return a one-time code",
-            # observed 2026-10-07). Always advance the bot past the email step
-            # before the 2FA submit; the bot answers "already linked" and moves on.
-            if not _get_code_pressed["v"]:
+            _t_gc2 = _get_code_pressed.get("t")
+            if _t_gc2 is not None:
+                _t_gc2.join(timeout=20)
+            if bot_em and not _get_code_pressed["v"]:
+                # The bot's 2FA task only opens its "send the 2FA Key" prompt AFTER
+                # 📥 Get code is pressed for the bot-issued email. When IG reports
+                # that the email is ALREADY linked/in use/taken, ig_link_email_to_instagram
+                # returns before requesting OTP — so advance the bot past the email step
+                # so it unlocks the 2FA key prompt and proceeds directly to 2FA.
+                # Never press Get code when the bot already asks for the 2FA key: that sends the
+                # text "Get code" as a key -> "Invalid key format" (observed live).
+                _asks_key = False
                 try:
-                    _adv = getattr(bot, "press_get_code", None)
-                    if callable(_adv):
-                        _adv()
-                    elif bot_em and callable(getattr(bot, "request_email_code", None)):
-                        bot.request_email_code(timeout=10)
-                except Exception as exc:
-                    log(slot_id, f"[⚠️] Get-code advance failed ({exc}) — continuing to 2FA.")
+                    _last = str(getattr(bot, "_last_text", lambda: "")() or "").lower()
+                    _asks_key = ("2fa key" in _last) or ("enter your 2fa" in _last)
+                except Exception:
+                    _asks_key = False
+                if _asks_key:
+                    log(slot_id, f"[✉️] {bot_id} is already asking for the 2FA key — not pressing Get code.")
+                    _get_code_pressed["v"] = True
+                else:
+                    log(slot_id, f"[✉️] Advancing {bot_id} via 📥 Get code so bot accepts 2FA key…")
+                    try:
+                        _adv = getattr(bot, "press_get_code", None)
+                        if callable(_adv):
+                            _adv()
+                        elif callable(getattr(bot, "request_email_code", None)):
+                            bot.request_email_code(timeout=8)
+                        _get_code_pressed["v"] = True
+                    except Exception as exc:
+                        log(slot_id, f"[⚠️] Get-code advance failed ({exc}) — continuing to 2FA.")
+            elif not bot_em:
+                log(slot_id, "[✉️] No bot-issued email provided in task credentials — continuing to 2FA.")
 
             # (2) 2FA SECOND — setup + submit the key so the bot issues the one-time
             #     code, then confirm it on IG. Runs right after email: whichever
@@ -579,7 +807,7 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
             #     for the 2FA key since Get code was consumed in step 1.
             if mail_tokens:
                 try:
-                    preexisting_mail_ids.update(str(m.get("id")) for m in _mailtd_http_list(mail_tokens))
+                    preexisting_mail_ids.update(_mail_ids(mail_tokens))
                 except Exception:
                     pass
             runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids, bot=bot)
@@ -629,50 +857,78 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
 
         acc_id = pool_acc["id"]
         log(slot_id, f"[🔑] 2FA key captured; submitting to {bot_id}…")
-        code = bot.submit_2fa_key(secret, allow_local_fallback=False)
+        code = None
+        try:
+            code = bot.submit_2fa_key(secret, allow_local_fallback=True)
+        except Exception as exc:
+            log(slot_id, f"[⚠️] {bot_id} submit_2fa_key note ({exc}) — keeping 2FA submit modal active")
+            code = None
+
         if not code:
-            raise RuntimeError(f"{bot_id} did not return an OTP code for the 2FA key")
+            import re as _re, pyotp as _pyotp
+            _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
+            # APK parity (eo.java:215): if <8s remain in the 30s window, wait for rollover
+            _rem = 30 - (int(time.time()) % 30)
+            if _rem < 8:
+                time.sleep(_rem + 1)
+            code = _pyotp.TOTP(_s).now()
+            log(slot_id, f"[🔑] Bot code delayed or missing — generated local TOTP {code}; keeping 2FA submit modal active!")
+
         if _2fa_already_on:
             # 2FA was already enabled with the parked seed — there is no IG setup
             # dialog to confirm. The bot holds the key and derived the code; we
             # just cross-check that the seed is the one generating it (advisory).
             log(slot_id, "✔ 2FA already enabled on the pooled account (parked seed) — no IG confirm needed.")
         else:
-            log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG…")
+            log(slot_id, f"[tg] Received OTP from {bot_id}; confirming on IG (do NOT dismiss submit screen)…")
             if not runner.ig_2fa_confirm(code):
-                # The bot's TOTP was stale/wrong (observed 2026-10-05 01:37 —
-                # the bot returned 524511 in <1s and IG rejected it while the
-                # next cycle's code confirmed fine). We hold the SAME secret, so
-                # compute the code locally and retry; if it is the same 30s
-                # window, wait for the roll, then retry once more.
+                # Bot code and local TOTP come from the SAME seed, so one retry after the
+                # next 30 s roll is the only useful second try. Both rejected = IG holds a
+                # seed we don't have; more retries only burn the bot window.
                 ok2 = False
                 try:
-                    import re as _re
-                    import pyotp
+                    import re as _re, pyotp as _pyotp
                     _s = _re.sub(r"[^A-Za-z2-7]", "", str(secret or "")).upper()
-                    for _t in range(3):
-                        local = pyotp.TOTP(_s).now()
-                        if local != str(code):
-                            log(slot_id, f"[🔑] Bot code rejected — retrying with local TOTP {local}…")
-                            if runner.ig_2fa_confirm(local):
-                                ok2 = True
-                                break
-                        # Same window: wait for the next 30s slot.
-                        time.sleep(31 - (int(time.time()) % 30))
+                    time.sleep(max(1, 31 - (int(time.time()) % 30)))
+                    local = _pyotp.TOTP(_s).now()
+                    log(slot_id, f"[🔑] Retrying with fresh local TOTP {local} (keeping submit screen)…")
+                    ok2 = bool(runner.ig_2fa_confirm(local))
                 except Exception as exc:
                     log(slot_id, f"[⚠️] local TOTP retry error: {exc}")
                 if not ok2:
-                    raise RuntimeError("Instagram rejected the 2FA code")
+                    _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                        "2FA code rejected by Instagram")
+                    pool_acc = None
+                    raise RuntimeError("Instagram rejected the 2FA code (bot + local TOTP) — account removed, next account")
             log(slot_id, "✔ 2FA enabled on the pooled account.")
+
+        pool_acc["twofa_secret"] = secret
+        try:
+            store.update_account(acc_id, {"twofa_secret": secret})
+        except Exception:
+            pass
 
 
         # -- Step: register confirm ------------------------------------------
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "twofa",
                     "detail": "Confirming Account Registered with PayGoBot…"})
-        submitted = bot.mark_registered()
-        if not submitted:
-            log(slot_id, "register receipt not seen — one more tap…")
+        # PayGo 2FA has no register button: once the code is confirmed on Instagram the bot
+        # verifies by itself and replies "2FA enabled! Report accepted." (seen live 2026-10-12).
+        _wait = getattr(bot, "wait_report_accepted", None)
+        if callable(_wait):
+            submitted = bool(_wait(timeout=240))
+            if not submitted:
+                # The bot answered "You did not set up 2FA. The report was automatically rejected."
+                # (or never answered): this account cannot be paid. Remove it, take the next one.
+                _purge_pool_account(store, pool_acc, log, slot_id, emit_event,
+                                    "bot rejected the 2FA report")
+                pool_acc = None
+                raise RuntimeError("PayGo bot rejected the 2FA report — account removed, next account")
+        else:
             submitted = bot.mark_registered()
+            if not submitted:
+                log(slot_id, "register receipt not seen — one more tap…")
+                submitted = bot.mark_registered()
         if not submitted:
             # Account is now 2FA-enabled but not paid — restore it so it is not
             # silently lost, and let the slot retry.
@@ -768,6 +1024,12 @@ def run_paygo_pool_2fa_cycle_once(slot_id=95, worker_factory=None, is_headless=F
                 pass
         return False, detail
     finally:
+        if prefetched is not None:
+            try:
+                store.restore_ig_creator_account(prefetched["id"], rotate=True)
+                log(slot_id, f"[pool] Returned pre-claimed account {prefetched['id']} to the pool (task did not start).")
+            except Exception:
+                pass
         try:
             if lease_stop is not None:
                 lease_stop.set()

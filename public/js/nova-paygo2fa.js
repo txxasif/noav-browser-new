@@ -106,6 +106,8 @@
             '<input id="pg2fa-target" class="form-control" type="number" min="0" value="0"></div>' +
           '<div class="creator-field creator-field--switch"><label>Headless</label>' +
             '<label class="switch" title="Run browsers headless (recommended)"><input type="checkbox" id="pg2fa-headless" checked><span class="slider"></span></label></div>' +
+          '<div class="creator-field creator-field--switch"><label>Attach Email</label>' +
+            '<label class="switch" title="Attach bot-issued email to Instagram before 2FA"><input type="checkbox" id="pg2fa-add-email" checked><span class="slider"></span></label></div>' +
           '<div class="creator-field creator-field--switch"><label>Auto-consume</label>' +
             '<label class="switch" title="Always on: a used pooled account is removed after submit"><input type="checkbox" checked disabled><span class="slider"></span></label></div>' +
         '</div>' +
@@ -167,6 +169,7 @@
         append('> start (pool=' + avail + ', tg=' + connected + '/' + enabled.length +
                ', parallel=' + conc + ', target=' + (target || '∞') +
                ', ' + (state.headless ? 'headless' : 'visible') + ')');
+        var addEm = !!($('pg2fa-add-email') ? $('pg2fa-add-email').checked : true);
         var _doPost = function () { post('/api/tg/start', {
           concurrency: conc,
           target: target,
@@ -174,7 +177,7 @@
           captcha: 'extension',
           tg_task: 'PayGo 2FA',
           tg_bot: 'paygo',
-          add_email: false,
+          add_email: addEm,
           use_ig_pool: true
         }); };
         if (typeof window.__tgTaskCheck === 'function') {

@@ -1,0 +1,11 @@
+name = "meta-otp-receiver"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Existing namespace "OTP_KV" on the account, bound as OTP_STORE.
+[[kv_namespaces]]
+binding = "OTP_STORE"
+id = "e9d541be230c4bcb97968a0e85db2cc2"
+
+# Set the admin secret (used by the creator's /register call):
+#   npx wrangler secret put ADMIN_TOKEN

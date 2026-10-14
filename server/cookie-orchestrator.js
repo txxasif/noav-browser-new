@@ -24,12 +24,15 @@ const paygoOrchestrator = require('./paygo-orchestrator');
 // Priority order (first = preferred).
 const TARGETS = [
   { id: 'taskly', bot: 'taskly', task: 'Taskly Cookie', label: 'Taskly Cookie (No mail)' },
-  { id: 'paygo', bot: 'paygo', task: '📱 Create Inst (Cookies)', label: 'PayGo Cookie' },
+  // PayGo Cookie is not part of Auto-Mine: when Taskly is exhausted for the hour the previous run resumes.
 ];
 
 const PROBE_TTL_MS = 20000;    // re-probe availability at most every 20s
 const SWITCH_GUARD_MS = 15000; // let a freshly started drain boot before re-eval
-const HOUR_GRACE_MS = 90000;   // at :00 let an in-flight task finish before switching
+const PREEMPT_WINDOW_MIN = 10; // Taskly may take over a running bot only in the first minutes of an hour (stock refill)
+const STOP_GRACE_MS = 240000;    // sold out: accounts already mid-cycle may finish this long before the engine is force-killed
+const PREEMPT_GRACE_MS = 30000; // :00 refill / target switch: Taskly is time-critical, so a shorter window
+const RESTORE_HOLD_MS = 60000; // after resuming a parked run, don't park it again for a minute (no flapping)
 
 class CookieOrchestrator {
   constructor() {
@@ -42,6 +45,9 @@ class CookieOrchestrator {
     this.reason = { taskly: '', paygo: '' };
     this.hourKey = null;
     this.current = null;   // target id a cookie drain is running (or null)
+    this._parked = null;   // the user's run config, held while a cookie drain has the slot
+    this._restoredUntil = 0;
+    this._preemptedHour = null; // hour key of the last :00 takeover attempt (once per hour)
     this.timer = null;
     this._probing = false;
     this._lastProbe = 0;
@@ -62,6 +68,13 @@ class CookieOrchestrator {
     this.concurrency = parseInt(s.auto_cookie_concurrency || 6, 10);
     this.headless = s.auto_cookie_headless !== false;
     this.hourKey = this._nowHour();
+    // Sold-out is a fact about THIS hour; keep it across restarts so a fresh process does not
+    // re-try (and disrupt a running job to re-learn) a task that is already known sold out.
+    const saved = s.auto_cookie_state;
+    if (saved && saved.hour === this.hourKey && saved.avail) {
+      this.avail = Object.assign({ taskly: null, paygo: null }, saved.avail);
+      this.reason = Object.assign({ taskly: '', paygo: '' }, saved.reason || {});
+    }
     if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => this.tick().catch(() => {}), 5000);
     if (this.enabled) this._silencePaygoAuto();
@@ -89,15 +102,38 @@ class CookieOrchestrator {
     } catch (e) {}
     if (!this.enabled) {
       this.state = 'idle';
-      this._log('Auto-Mine OFF.');
+      this._log('Auto-Mine OFF — no more automatic switching.');
+      this._disableCleanup().catch(() => {});
     } else {
       this.state = 'monitoring';
-      this.avail = { taskly: null, paygo: null };
+      for (const id of Object.keys(this.avail)) {
+        if (!(this.avail[id] === false && this.reason[id] === 'soldout')) { this.avail[id] = null; this.reason[id] = ''; }
+      }
       this._lastProbe = 0;
       this._silencePaygoAuto();
-      this._log('Auto-Mine ON — Taskly Cookie leads, PayGo Cookie fallback (hourly :00).');
+      this._log('Auto-Mine ON — Taskly Cookie takes priority at every :00; other bots resume when it is exhausted.');
     }
     return this.getStatus();
+  }
+
+  // Switching Auto-Mine OFF while it has a bot paused: end the Taskly drain it started, free the Telegram
+  // profiles and resume that bot, so the user's run is not lost. With nothing paused the drain (if any)
+  // keeps running; it is then an ordinary run the user stops by hand.
+  async _disableCleanup() {
+    if (this.current && this._parked) {
+      await this.stopCurrentEngine(PREEMPT_GRACE_MS);
+      this.current = null;
+      await this._releaseTgLeases();
+    }
+    await this._restoreParked();
+  }
+
+  _persist() {
+    try {
+      if (this.ctx && this.ctx.writeSettings) {
+        this.ctx.writeSettings({ auto_cookie_state: { hour: this.hourKey, avail: this.avail, reason: this.reason } });
+      }
+    } catch (e) {}
   }
 
   getStatus() {
@@ -169,7 +205,8 @@ class CookieOrchestrator {
     try {
       const accs = this.ctx.getAccounts() || [];
       // Same strict filter the PayGo orchestrator uses for a drainable account:
-      // an IG-Creator-style record that actually carries a usable cookie string.
+      // an IG-Creator-style record that actually carries a usable cookie string. Every mail mode counts
+      // (store.py drain_ok no longer filters by mode; INSTA_DRAIN_MODE_FILTER=1 restores it).
       const n = accs.filter(a =>
         (a.platform === 'Meta+Instagram' || a.cookies) &&
         (a.status === 'Created' || !a.status) &&
@@ -180,6 +217,36 @@ class CookieOrchestrator {
     } catch (e) { this.pool = 0; return 0; }
   }
 
+  _minutesIntoHour() {
+    const n = new Date();
+    return n.getMinutes() + n.getSeconds() / 60;
+  }
+
+  // Free every Telegram profile lease (data/tg_accounts.json) after an engine was stopped, so the next
+  // run - the resumed bot or the Taskly drain - never waits on a profile a dead worker still "holds".
+  // Inspection holds (dashboard windows) are left alone.
+  async _releaseTgLeases() {
+    try {
+      const fs = require('fs');
+      const f = path.join(this.ctx.ROOT_DIR, 'data', 'tg_accounts.json');
+      if (!fs.existsSync(f)) return;
+      const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const list = Array.isArray(raw) ? raw : (raw.accounts || []);
+      let changed = 0;
+      for (const a of list) {
+        if (a.status !== 'busy') continue;
+        if (/inspect/i.test(String(a.lease_note || ''))) continue;
+        a.status = 'idle'; a.busy_bot = null; a.leased_at = null; a.lease_note = null;
+        delete a.lease_pid; delete a.probe_pid;
+        changed++;
+      }
+      if (changed) {
+        fs.writeFileSync(f, JSON.stringify(raw, null, 2), 'utf8');
+        this._log(`🔓 Released ${changed} Telegram profile lease(s).`);
+      }
+    } catch (e) {}
+  }
+
   _secondsToNextHour() {
     const now = new Date();
     const next = new Date(now);
@@ -188,15 +255,22 @@ class CookieOrchestrator {
   }
 
   _desired() {
-    // First target that is NOT confirmed unavailable (unknown counts as available).
-    for (const t of TARGETS) {
-      if (this.avail[t.id] !== false) return t;
+    // The preferred target (first in TARGETS) may be tried while its stock is unknown.
+    // A fallback target must be CONFIRMED available by a probe first: while a drain holds
+    // every profile the probe reports busy, and starting a blind fallback burns the hour.
+    for (let i = 0; i < TARGETS.length; i++) {
+      const t = TARGETS[i];
+      if (this.avail[t.id] === false) continue;
+      if (i > 0 && this.avail[t.id] !== true) continue;
+      return t;
     }
     return null;
   }
 
   async tick() {
     if (!this.enabled || !this.ctx) return;
+    // A graceful stop is in progress (the tick fires every 5s): do not start a second one.
+    if (this._stopPromise) { this.state = 'draining'; return; }
 
     // :00 rollover — counters reset, Taskly leads again.
     const hk = this._nowHour();
@@ -205,8 +279,9 @@ class CookieOrchestrator {
       this.avail = { taskly: null, paygo: null };
       this.reason = { taskly: '', paygo: '' };
       this._lastProbe = 0;
-      this._switchGuardUntil = Date.now() + HOUR_GRACE_MS; // let the in-flight task finish
+      this._switchGuardUntil = 0;                          // the refill is the moment to work: no grace period
       this._log('⏰ :00 rollover — counters reset; Taskly leads again.');
+      this._persist();
     }
 
     // A manual "Start Now" press ignores the hour grace / switch guard once.
@@ -230,18 +305,50 @@ class CookieOrchestrator {
     if (!want) {
       this.state = 'waiting';
       if (this.current) {
-        this._log('🛑 Both cookie tasks sold out / hidden — stopping the drain; waiting for the next hour (:00).');
-        await this.stopCurrentEngine();
+        // Sold out only blocks NEW bot tasks (they fail at task selection and cost nothing). Accounts that
+        // already started a task are mid-follow/2FA/cookie: killing the engine wastes them and leaves their
+        // bot task stuck. Stop gracefully (no new cycles, in-flight ones finish); force-kill only after
+        // STOP_GRACE_MS.
+        this._log('🛑 Taskly Cookie exhausted for this hour — no new tasks; letting in-flight accounts finish, then releasing the Telegram profiles (no more checks until the next :00).');
+        this.state = 'draining';
+        await this.stopCurrentEngine(STOP_GRACE_MS);
         this.current = null;
+        await this._releaseTgLeases();
       }
+      await this._restoreParked();
       return;
     }
 
     // Running the preferred target already → done.
     if (this.current === want.id) { this.state = 'running'; return; }
 
-    // A non-cookie bot is running (user's own) — do not touch it.
-    if (cur && !this.current) { this.state = 'monitoring'; return; }
+    // A non-cookie run (the user's) holds the slot. Taskly Cookie has priority, but ONLY at the hourly
+    // refill: in the first minutes after :00 it parks that run, reads the stock, and either takes the
+    // slot (the run resumes when Taskly is exhausted) or puts the run straight back when Taskly has
+    // nothing. Outside that window the running bot is left completely alone - no probing, no pausing -
+    // until the next :00 (or a manual "Start Now").
+    if (cur && !this.current) {
+      if (this.pool <= 0 || Date.now() < this._restoredUntil) { this.state = 'monitoring'; return; }
+      const inWindow = this._minutesIntoHour() < PREEMPT_WINDOW_MIN;
+      if (!(inWindow || forced) || this.avail[want.id] === false || this._preemptedHour === this.hourKey) {
+        this.state = 'monitoring';
+        return;
+      }
+      this._preemptedHour = this.hourKey;
+      this._parked = Object.assign({}, cur);
+      this._log(`⏸ :00 refill — pausing ${cur.tg_task || 'current run'} (${cur.tg_bot}); ${want.label} has priority.`);
+      await this.stopCurrentEngine(PREEMPT_GRACE_MS);
+      await this._releaseTgLeases();
+      this._lastProbe = 0;
+      await this.probeAll();
+      if (this.avail[want.id] !== true) {
+        this.state = 'monitoring';
+        this._log(`↩ ${want.label} has no stock (${this.reason[want.id] || 'unknown'}) — resuming ${cur.tg_task || 'the previous run'}.`);
+        await this._restoreParked();
+        return;
+      }
+      this._switchGuardUntil = 0;                 // start immediately
+    }
 
     // Guard: let a freshly started drain boot / an in-flight task finish.
     if (Date.now() < this._switchGuardUntil) { this.state = 'switching'; return; }
@@ -249,7 +356,7 @@ class CookieOrchestrator {
     // A different COOKIE drain is running → switch to the preferred one.
     if (this.current) {
       this._log(`🔁 ${this.current} exhausted (${this.reason[this.current] || 'limit'}) → switching to ${want.id}.`);
-      await this.stopCurrentEngine();
+      await this.stopCurrentEngine(PREEMPT_GRACE_MS);
       this.current = null;
     }
 
@@ -258,6 +365,7 @@ class CookieOrchestrator {
     if (this.pool <= 0) {
       this.state = 'pool_empty';
       this._log(`⏳ IG Creator pool empty (0 usable cookies). Waiting for the IG Creator to create accounts — auto-starts ${want.label} as soon as one is ready.`);
+      await this._restoreParked();
       return;
     }
 
@@ -265,6 +373,16 @@ class CookieOrchestrator {
     this.state = 'switching';
     await this.startTarget(want);
     this._switchGuardUntil = Date.now() + SWITCH_GUARD_MS;
+  }
+
+  // Resume the run that was parked for the cookie drain (no-op while a cookie drain runs).
+  async _restoreParked() {
+    if (!this._parked || this.current) return;
+    const cfg = this._parked;
+    this._parked = null;
+    this._restoredUntil = Date.now() + RESTORE_HOLD_MS;
+    this._log(`▶️ Cookie drain finished — resuming ${cfg.tg_task || 'the previous run'} (${cfg.tg_bot}).`);
+    this.startEngine(cfg);
   }
 
   // Manual "Start Now": probe + launch the preferred drain immediately,
@@ -278,9 +396,17 @@ class CookieOrchestrator {
   }
 
   async probeAll() {
+    // While an engine runs, its workers hold the Telegram session files. A probe is a
+    // second process on the same account, which SQLite reports as "database is locked".
+    // The running drain reports sold-out itself (see the stdout handler), so skip here.
+    const slot = this._slot();
+    if (slot && slot.proc) { this._lastProbe = Date.now(); return; }
     this._probing = true;
     try {
       for (const t of TARGETS) {
+        // Sold out for this hour (the drain saw 0/N): a later probe must not clear it.
+        // The :00 rollover in tick() resets the flag.
+        if (this.avail[t.id] === false && this.reason[t.id] === 'soldout') continue;
         const r = await this.probeOne(t);
         if (r && r.ok && !r.busy) {
           this.avail[t.id] = !!r.available;
@@ -293,6 +419,7 @@ class CookieOrchestrator {
         }
       }
       this._lastProbe = Date.now();
+      this._persist();
     } finally {
       this._probing = false;
     }
@@ -301,7 +428,7 @@ class CookieOrchestrator {
   async probeOne(t) {
     const script = this.ctx.resolveScript ? this.ctx.resolveScript('tg_task_probe.py')
       : path.join(this.ctx.ROOT_DIR, 'tg_task_probe.py');
-    const args = [script, '--bot', t.bot, '--task', t.task];
+    const args = ['--bot', t.bot, '--task', t.task];   // runPythonJson puts the script path first itself
     try {
       const res = await this.ctx.runPythonJson(this.ctx.PYTHON_BIN, this.ctx.ROOT_DIR, script, args, 45000);
       return res || null;
@@ -311,7 +438,11 @@ class CookieOrchestrator {
   }
 
   async startTarget(t) {
+    // API-mode switch from the Taskly Cookie page (saved server-side so auto-start honours it).
+    const st = (this.ctx.readSettings && this.ctx.readSettings()) || {};
     const cfg = {
+      ig_api: st.cookie_ig_api === true,
+      ig_api_mock: st.cookie_ig_api === true,   // this task only ever submits a MOCK 2FA key
       tg_bot: t.bot,
       tg_task: t.task,
       use_ig_pool: true,
@@ -326,29 +457,51 @@ class CookieOrchestrator {
     this.current = t.id;
   }
 
-  async stopCurrentEngine() {
+  // Graceful by default: data/stop_tg.flag makes the worker stop starting new cycles while in-flight ones
+  // finish ("Graceful stop requested — allowing in-flight tasks to finish..."); the worker then exits by
+  // itself. Only if it is still alive after graceMs is the whole process tree killed (worker + Chromium +
+  // Playwright driver — killing just the worker leaves the driver writing to a dead pipe: EPIPE spam).
+  stopCurrentEngine(graceMs = STOP_GRACE_MS) {
+    if (this._stopPromise) return this._stopPromise;
     const slot = this._slot();
-    if (!slot || !slot.proc) return;
+    if (!slot || !slot.proc) return Promise.resolve();
     const proc = slot.proc;
     proc.__preemptKilled = true;
-    return new Promise(resolve => {
+    try {
+      const fs = require('fs');
+      fs.mkdirSync(path.join(this.ctx.ROOT_DIR, 'data'), { recursive: true });
+      fs.writeFileSync(path.join(this.ctx.ROOT_DIR, 'data', 'stop_tg.flag'), '1', 'utf8');
+    } catch (e) {}
+    const killTree = (sig) => {
+      try {
+        if (process.platform === 'win32') {
+          if (this.ctx.killProcessGroup) this.ctx.killProcessGroup(proc);
+          else proc.kill();
+        } else {
+          try { process.kill(-proc.pid, sig); } catch (e) { proc.kill(sig); }
+        }
+      } catch (e) {}
+    };
+    this._stopPromise = new Promise(resolve => {
       let done = false;
-      const finish = () => { if (!done) { done = true; slot.proc = null; slot.config = null; resolve(); } };
+      let graceTimer = null, forceTimer = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(graceTimer); clearTimeout(forceTimer);
+        slot.proc = null; slot.config = null;
+        this._stopPromise = null;
+        resolve();
+      };
       proc.once('close', finish);
       proc.once('exit', finish);
-      const forceTimer = setTimeout(() => {
-        try {
-          if (process.platform !== 'win32') { try { process.kill(-proc.pid, 'SIGKILL'); } catch (e) {} }
-          else { try { proc.kill('SIGKILL'); } catch (e) {} }
-        } catch (e) {}
-        finish();
-      }, 8000);
-      try {
-        if (process.platform !== 'win32') {
-          try { process.kill(-proc.pid, 'SIGTERM'); } catch (e) { proc.kill('SIGTERM'); }
-        } else { proc.kill(); }
-      } catch (e) { finish(); }
+      graceTimer = setTimeout(() => {
+        this._log('⚠️ Engine still running after the graceful-stop window — force-stopping it.');
+        killTree('SIGTERM');
+        forceTimer = setTimeout(() => { killTree('SIGKILL'); finish(); }, 8000);
+      }, Math.max(0, graceMs));
     });
+    return this._stopPromise;
   }
 
   startEngine(cfg) {
@@ -373,6 +526,23 @@ class CookieOrchestrator {
         cwd: this.ctx.ROOT_DIR, windowsHide: true, detached: !isWin, env,
       });
       slot.proc.stdout.on('data', data => {
+        // A running drain holds every TG profile, so the probe reports busy and
+        // never sees the stock state. Trust the drain's own verdict: every creator
+        // reports the task unavailable (sold out, hidden or unoffered) → this target
+        // is done for the hour. The worker repeats that line each retry, so this is
+        // applied once per hour (avail stays false until the :00 reset).
+        const miss = String(data).match(/Task unavailable on ALL[^\n]*\(reason=(soldout|hidden|unoffered)\)/i)
+          // NOT the per-creator "[task_unavailable:x]" tag: one creator missing the task (menu glitch,
+          // orphan task, session reset) must not stop the drain while the others still see it. The
+          // worker prints "Task unavailable on ALL n creator(s)" once every creator agrees.
+          || (/available this hour: 0\//i.test(String(data)) ? ['', 'soldout'] : null);
+        if (this.current && miss && this.avail[this.current] !== false) {
+          const why = miss[1].toLowerCase();
+          this.avail[this.current] = false;
+          this.reason[this.current] = why;
+          this._log(`🚫 ${this.current} unavailable for every creator (${why}) — stopping it for this hour.`);
+          this._persist();
+        }
         for (const line of this.ctx.feedWorkerStdout(data, 'tg')) this.ctx.consumeWorkerLine(line, 'tg');
       });
       slot.proc.stderr.on('data', data => {
@@ -397,8 +567,11 @@ class CookieOrchestrator {
   }
 
   notifyUserStopped() {
+    // Keep the process handle: the stop route clears it once the worker is really dead. Dropping it here
+    // let Auto-Mine start a second engine seconds later while the stopped one was still finishing in-flight
+    // tasks (two workers on the same Telegram sessions: "wrong session ID", "database is locked").
     const slot = this._slot();
-    if (slot) { slot.proc = null; slot.config = null; }
+    if (slot) { slot.config = null; }
     this.current = null;
     if (this.enabled) this.state = 'monitoring';
   }

@@ -127,9 +127,7 @@
           '<div class="creator-field creator-field--switch" id="tcp-c2fa-wrap"><label>2FA + Cookie</label>' +
             '<label class="switch" title="ON (default for this task) = MOCK 2FA mode: rename → follow 5 → submit a MOCK 2FA key (no Accounts-Center, no OTP) → export cookie → submit. OFF = legacy rename + submit the stored cookie (no browser, no 2FA)."><input type="checkbox" id="tcp-cookie2fa" checked><span class="slider"></span></label></div>' +
           '<div class="creator-field creator-field--switch" id="tcp-igapi-wrap"><label>API mode</label>' +
-            '<label class="switch" title="ON = BROWSERLESS IG private-API path: rename, follow 5 (random from the fixed operator list), REAL 2FA, password, email and cookie all via the API — no browser. OFF = the existing browser logic (default)."><input type="checkbox" id="tcp-igapi"><span class="slider"></span></label></div>' +
-          '<div class="creator-field creator-field--switch" id="tcp-igapimock-wrap" style="display:none;"><label>Mock 2FA</label>' +
-            '<label class="switch" title="API mode only. ON = submit a MOCK 2FA key and skip the real 2FA enable. OFF (default) = REAL 2FA via the API."><input type="checkbox" id="tcp-igapimock"><span class="slider"></span></label></div>' +
+            '<label class="switch" title="ON = BROWSERLESS IG private-API path: rename, follow 5 (random from the fixed operator list), MOCK 2FA key, and cookie all via the API — no browser. OFF = the existing browser logic (default)."><input type="checkbox" id="tcp-igapi"><span class="slider"></span></label></div>' +
         '</div>' +
         '<div class="creator-service-note" style="margin-top:.6rem;">' +
           '<i class="fa-solid fa-circle-info" style="color:#229ED9;"></i> ' +
@@ -143,16 +141,16 @@
             '<div class="paygo-feature-main">' +
               '<div class="paygo-feature-icon"><i class="fa-solid fa-cookie-bite"></i></div>' +
               '<div class="paygo-feature-text">' +
-                '<div class="paygo-feature-title">AUTO-MINE — Taskly Cookie ⇄ PayGo Cookie' +
+                '<div class="paygo-feature-title">AUTO-MINE — Taskly Cookie priority' +
                   '<span class="paygo-feature-badge automine-badge">Autonomous Scheduler</span>' +
                 '</div>' +
-                '<div class="paygo-feature-desc">Runs Taskly "🍪 Create Inst (No mail)" first; when its hour is sold out (or its menu is hidden) it auto-switches to PayGo "📱 Create Inst (Cookies)"; when both are exhausted it waits for the :00 refill. Accounts already following 5 skip the browser.</div>' +
+                '<div class="paygo-feature-desc">At every :00 refill Taskly "🍪 Create Inst (No mail)" takes priority: any other running bot is paused and Taskly starts at once. When Taskly is exhausted for the hour, all Telegram profiles are released and the paused bot resumes; no more checks until the next :00. Mid-hour a running bot is never interrupted. Off = no automation: bots run only when you start them.</div>' +
               '</div>' +
             '</div>' +
             '<div class="paygo-feature-controls">' +
               '<span id="tcp-auto-pill" class="paygo-status-pill">Auto-Mine Off</span>' +
               '<button id="tcp-auto-start" type="button" class="btn btn-secondary btn-sm" title="Evaluate and start the cookie drain NOW — does not wait for :00"><i class="fa-solid fa-play"></i> Start Now</button>' +
-              '<label class="switch" title="Auto-Mine the two COOKIE tasks only: Taskly Cookie leads, PayGo Cookie fallback, hourly :00 refill">' +
+              '<label class="switch" title="Taskly Cookie takes priority at every :00 refill; the previous bot resumes when it is exhausted">' +
                 '<input type="checkbox" id="tcp-auto-sw"><span class="slider"></span>' +
               '</label>' +
             '</div>' +
@@ -208,12 +206,12 @@
         var conc = st.concurrency || 6;
         var pill = $('tcp-auto-pill');
         if (pill) {
-          if (st.state === 'running') {
-            pill.textContent = '⚡ ' + (st.target || 'Draining') + ' (' + conc + ' slots)';
+          if (st.state === 'running' || st.state === 'draining') {
+            pill.textContent = st.state === 'draining' ? '⏳ Sold out — finishing in-flight accounts' : '⚡ ' + (st.target || 'Draining') + ' (' + conc + ' slots)';
             pill.style.background = 'rgba(16,185,129,0.18)'; pill.style.borderColor = 'rgba(16,185,129,0.4)';
             pill.style.color = '#34d399'; pill.style.fontWeight = '700';
           } else if (st.state === 'waiting') {
-            pill.textContent = '🛑 Both sold out — waiting for :00';
+            pill.textContent = '🛑 Taskly exhausted — waiting for :00';
             pill.style.background = 'rgba(239,68,68,0.14)'; pill.style.borderColor = 'rgba(239,68,68,0.35)';
             pill.style.color = '#f87171'; pill.style.fontWeight = '700';
           } else if (st.state === 'pool_empty') {
@@ -244,7 +242,6 @@
           };
           stateEl.textContent = 'IG Creator pool: ' + (st.pool || 0) + ' account(s)'
             + '  ·  Taskly Cookie: ' + fmtAvail('taskly')
-            + '  ·  PayGo Cookie: ' + fmtAvail('paygo')
             + '  ·  next refill in ' + fmtWait(st.wait_seconds);
         }
         var concEl = $('tcp-auto-conc'); if (concEl && st.concurrency) concEl.value = st.concurrency;
@@ -289,7 +286,7 @@
         var target = parseInt(($('tcp-target') || {}).value || 0, 10);
         var c2fa = $('tcp-cookie2fa') ? $('tcp-cookie2fa').checked : true;
         var apiOn = (state.source === 'meta') ? false : ($('tcp-igapi') ? $('tcp-igapi').checked : false);
-        var apiMockOn = $('tcp-igapimock') ? $('tcp-igapimock').checked : false;
+        var apiMockOn = true;   // API mode always submits a MOCK 2FA key (no switch)
         var task = TASK;
         state.cookie2fa = c2fa;
         append('> start (' + (isMeta ? 'meta-list=' : 'pool=') + avail + ', tg=' + connected + '/' + enabled.length +
@@ -433,8 +430,6 @@
     ['tcp-c2fa-wrap', 'tcp-igapi-wrap'].forEach(function (id) {
       var w = $(id); if (w) w.style.display = meta ? 'none' : '';
     });
-    var mw = $('tcp-igapimock-wrap');
-    if (mw) mw.style.display = (!meta && $('tcp-igapi') && $('tcp-igapi').checked) ? '' : 'none';
   }
 
   function wire() {
@@ -477,21 +472,15 @@
     if ($('tcp-headless')) $('tcp-headless').addEventListener('change', function () { state.headless = this.checked; });
     if ($('tcp-igapi')) {
       try { if (localStorage.getItem('nova_tcp_igapi') === '1') $('tcp-igapi').checked = true; } catch (e) {}
-      var syncMock = function () {
-        var w = $('tcp-igapimock-wrap');
-        if (w) w.style.display = $('tcp-igapi').checked ? '' : 'none';
+      var pushApi = function () {
+        fetch('/api/tg/cookie-auto/ig-api', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ig_api: $('tcp-igapi').checked, ig_api_mock: $('tcp-igapi').checked }) }).catch(function () {});
       };
       $('tcp-igapi').addEventListener('change', function () {
         try { localStorage.setItem('nova_tcp_igapi', this.checked ? '1' : '0'); } catch (e) {}
-        syncMock();
+        pushApi();
       });
-      syncMock();
-    }
-    if ($('tcp-igapimock')) {
-      try { if (localStorage.getItem('nova_tcp_igapimock') === '1') $('tcp-igapimock').checked = true; } catch (e) {}
-      $('tcp-igapimock').addEventListener('change', function () {
-        try { localStorage.setItem('nova_tcp_igapimock', this.checked ? '1' : '0'); } catch (e) {}
-      });
+      pushApi();
     }
     if ($('tcp-cookie2fa')) {
       try { if (localStorage.getItem('nova_tcp_cookie2fa') === '0') { $('tcp-cookie2fa').checked = false; state.cookie2fa = false; } } catch (e) {}

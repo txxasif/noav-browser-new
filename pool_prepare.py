@@ -39,15 +39,21 @@ _FOLLOW_LABELS = ("follow", "follow back")
 # ──────────────────────────────────────────────────────────────────────────
 _JS_TAG_FOLLOW = """(labels) => {
   document.querySelectorAll('[data-mc-follow]').forEach(e => e.removeAttribute('data-mc-follow'));
-  const vh = window.innerHeight || 800;
-  const els = Array.from(document.querySelectorAll('button, div[role="button"]'));
+  const els = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
   for (const el of els) {
-    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
-    if (!labels.includes(t)) continue;
-    if (el.hasAttribute('data-mc-skip')) continue;
+    if (el.hasAttribute('data-mc-skip') || el.hasAttribute('data-mc-followed')) continue;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
     const r = el.getBoundingClientRect();
     if (r.width < 8 || r.height < 8) continue;
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+    const t = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    if (!t) continue;
+    if (t.includes('following') || t.includes('requested')) {
+      el.setAttribute('data-mc-skip', '1');
+      continue;
+    }
+    const isFollow = labels.includes(t) || t === 'follow' || t === 'follow back' ||
+                     (/^follow(\\s+back)?$/i.test(t));
+    if (!isFollow) continue;
     el.setAttribute('data-mc-follow', '1');
     return true;
   }
@@ -110,11 +116,73 @@ def _open_people_by_click(runner, page, log) -> bool:
         log("[👥] no in-app Discover-people entry found — falling back to a direct load.")
         page.goto("https://www.instagram.com/explore/people/",
                   wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(random.randint(2000, 3500))
         return True
     except Exception as exc:
         log(f"[👥] explore/people load failed: {str(exc)[:80]}")
         return False
 
+
+def _trusted_click_follow(runner, page, btn, log: Optional[Callable[[str], None]] = None) -> bool:
+    """Click a follow button using native browser/CDP input events (isTrusted=True).
+    Avoids synthetic dispatchEvent which triggers Instagram client-side bot detection.
+    """
+    try:
+        # 1. Bring smoothly into view
+        try:
+            btn.scroll_into_view_if_needed(timeout=2500)
+        except Exception:
+            try:
+                btn.evaluate("el => el.scrollIntoView({behavior: 'smooth', block: 'center'})")
+            except Exception:
+                pass
+        page.wait_for_timeout(random.randint(300, 700))
+
+        # 2. Try native pointer click / tap within bounding box (isTrusted=True)
+        try:
+            box = btn.bounding_box(timeout=1500)
+            if box and box.get("width", 0) > 4 and box.get("height", 0) > 4:
+                rx = box["x"] + box["width"] * random.uniform(0.30, 0.70)
+                ry = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+                # Touchscreen tap if touch is active on mobile emulation
+                if hasattr(page, "touchscreen") and getattr(page, "is_mobile", False):
+                    try:
+                        page.touchscreen.tap(rx, ry)
+                        return True
+                    except Exception:
+                        pass
+                # Real mouse move with micro-steps + hold duration (isTrusted=True)
+                try:
+                    page.mouse.move(rx, ry, steps=random.randint(2, 5))
+                    page.wait_for_timeout(random.randint(40, 100))
+                    page.mouse.down()
+                    page.wait_for_timeout(random.randint(60, 130))
+                    page.mouse.up()
+                    return True
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 3. Native Playwright click
+        try:
+            btn.click(timeout=2500, delay=random.randint(60, 130))
+            return True
+        except Exception:
+            pass
+
+        # 4. Clean DOM click fallback (better than synthetic dispatchEvent)
+        try:
+            btn.evaluate("el => el.click()")
+            return True
+        except Exception:
+            pass
+
+        return False
+    except Exception as exc:
+        if log:
+            log(f"[⚠️] follow click error: {str(exc)[:60]}")
+        return False
 
 
 def follow_explore(runner, page, need: int, log: Callable[[str], None],
@@ -137,7 +205,7 @@ def follow_explore(runner, page, need: int, log: Callable[[str], None],
         pass
     # Human beat before the first tap.
     try:
-        page.wait_for_timeout(random.randint(1500, 3000) if humanize else random.randint(800, 1500))
+        page.wait_for_timeout(random.randint(1800, 3500) if humanize else random.randint(1000, 2000))
     except Exception:
         return 0
 
@@ -172,6 +240,7 @@ def follow_explore(runner, page, need: int, log: Callable[[str], None],
     done = 0
     misses = 0
     attempts = 0
+    unconfirmed = 0
     max_attempts = max(need * 4, 12)
     while done < need and attempts < max_attempts:
         attempts += 1
@@ -195,34 +264,52 @@ def follow_explore(runner, page, need: int, log: Callable[[str], None],
             continue
         misses = 0
         btn = page.locator('[data-mc-follow="1"]').first
+
+        # Mark immediately so retries / delayed DOM queries never click the same profile
         try:
-            # multi_insta.exe parity: scroll into center view and execute direct DOM click
-            # to dispatch native click events to React without synthetic touch detection.
-            btn.evaluate("""el => {
-                el.scrollIntoView({block: 'center'});
-                el.click();
-            }""")
-        except Exception as exc:
-            try:
-                btn.click(timeout=2000, force=True)
-            except Exception:
-                pass
-        # IG's "Failed to Load." toast after a Follow tap = this account is
-        # follow-blocked right now. Exit immediately.
-        try:
-            page.wait_for_timeout(500)
-            if page.evaluate(_JS_FAILED_TO_LOAD):
-                try:
-                    runner.ig_followed_count = done
-                except Exception:
-                    pass
-                log(f"[❌] 'Failed to Load' toast detected after {done} follow(s) — exiting immediately.")
-                raise IGDeadEnd(f"follow 'Failed to Load' toast after {done} follow(s) — dead account")
-        except IGDeadEnd:
-            raise
+            btn.evaluate("el => el.setAttribute('data-mc-skip', '1')")
         except Exception:
             pass
-        # multi_insta.exe parity: count the follow upon click and skip to next row
+
+        # Perform trusted native CDP click / tap (isTrusted=True)
+        _trusted_click_follow(runner, page, btn, log)
+
+        # IG's "Failed to Load." toast after a Follow tap = this account is
+        # follow-blocked right now. Exit immediately.
+        # Wait up to 3.5s for the network request to complete and the button to flip to "Following" / "Requested"
+        confirmed = False
+        _state = ""
+        deadline = time.time() + 3.5
+        while time.time() < deadline:
+            page.wait_for_timeout(300)
+            try:
+                if page.evaluate(_JS_FAILED_TO_LOAD):
+                    try:
+                        runner.ig_followed_count = done
+                    except Exception:
+                        pass
+                    log(f"[❌] 'Failed to Load' toast detected after {done} follow(s) — exiting immediately.")
+                    raise IGDeadEnd(f"follow 'Failed to Load' toast after {done} follow(s) — dead account")
+            except IGDeadEnd:
+                raise
+            except Exception:
+                pass
+            try:
+                _state = str(btn.evaluate("el => (el.innerText || el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase()") or "")
+            except Exception:
+                _state = ""
+            if any(w in _state for w in ("following", "requested")):
+                confirmed = True
+                break
+
+        if not confirmed:
+            unconfirmed += 1
+            log(f"[⚠️] follow tap not confirmed (button reads '{_state[:20] or 'Follow'}') — not counted.")
+            if unconfirmed >= 5:
+                # Taps that never register after 5 tries mean the account is restricted
+                raise IGDeadEnd(f"follow taps not registering ({unconfirmed} unconfirmed) — account restricted")
+            continue
+
         done += 1
         log(f"[👥] followed {done}/{need} (explore/people).")
         try:
@@ -239,11 +326,11 @@ def follow_explore(runner, page, need: int, log: Callable[[str], None],
         except Exception:
             pass
         try:
-            runner._touch_scroll(page, dy=random.randint(120, 320))
+            runner._touch_scroll(page, dy=random.randint(140, 320))
         except Exception:
             pass
         try:
-            page.wait_for_timeout(random.randint(3000, 7000) if humanize else random.randint(2000, 4500))
+            page.wait_for_timeout(random.randint(3500, 7000) if humanize else random.randint(2200, 4500))
         except Exception:
             break
     try:

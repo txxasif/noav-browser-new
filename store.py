@@ -18,6 +18,39 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_config import ACCOUNTS_CSV, ACCOUNTS_JSON, ACCOUNTS_TXT, AI_DIR, DATA_DIR, Urls  # noqa: E402
 import db  # noqa: E402
 
+
+# Which accounts a drain may take depends on the drain:
+#   * cookie tasks need no mailbox -> every account with cookies (drain_ok = 1);
+#   * 2FA tasks read the account's mailbox for the email code -> only accounts that saved a READABLE mailbox
+#     (mailbox_ok). That is mail.td, tempmail.fish API, Yamin.bd, Guerrilla or Cloudflare; web-only ones are not.
+
+
+def _has_readable_mailbox(extra) -> int:
+    try:
+        ex = json.loads(extra) if isinstance(extra, str) and extra.strip().startswith("{") else (
+            extra if isinstance(extra, dict) else {})
+        mt = ex.get("mail_tokens") or {}
+        ok = (mt.get("mailfish_api") and mt.get("mailfish_email")
+              or mt.get("mailfish_email") and mt.get("mailfish_auth_key")
+              or mt.get("tempmail_token") and mt.get("tempmail_account_id")
+              or mt.get("yamin_email") or mt.get("guerrilla_email")
+              or mt.get("mailcf_email") and mt.get("mailcf_token"))
+        return 1 if ok else 0
+    except Exception:
+        return 0
+
+
+def _conn():
+    """The shared connection, with the drain SQL functions registered on it.
+
+    ``drain_ok(extra)`` is always 1 (cookie drain). ``mailbox_ok(extra)`` is 1 only for an account whose mailbox
+    can still be read (2FA drain).
+    """
+    conn = db.get_connection()
+    conn.create_function("drain_ok", 1, lambda extra: 1)
+    conn.create_function("mailbox_ok", 1, _has_readable_mailbox)
+    return conn
+
 _lock = threading.Lock()
 
 # A checkpoint-challenged rename is set aside for this long before it is retried
@@ -30,7 +63,7 @@ MAX_SUBMIT_ATTEMPTS = 3
 
 def _read() -> List[Dict[str, Any]]:
     """Legacy helper: return all accounts as a list of dictionaries (newest first)."""
-    conn = db.get_connection()
+    conn = _conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM accounts ORDER BY created_at DESC, rowid DESC")
     return [db.dict_from_row(r) for r in cur.fetchall()]
@@ -38,7 +71,7 @@ def _read() -> List[Dict[str, Any]]:
 
 def _write(recs: List[Dict[str, Any]]) -> None:
     """Legacy helper: write all accounts to SQLite and sync JSON/CSV/TXT."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             conn.execute("DELETE FROM accounts")
@@ -62,7 +95,7 @@ def add(rec: Dict[str, Any]) -> Dict[str, Any]:
     if "created_at" not in rec:
         rec["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    conn = db.get_connection()
+    conn = _conn()
     row = db.row_from_dict(rec)
     cols = ", ".join(db.COLUMNS)
     placeholders = ", ".join("?" for _ in db.COLUMNS)
@@ -79,7 +112,7 @@ def add(rec: Dict[str, Any]) -> Dict[str, Any]:
 
 def list_all() -> List[Dict[str, Any]]:
     """Retrieve all accounts (newest first)."""
-    conn = db.get_connection()
+    conn = _conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM accounts ORDER BY created_at DESC, rowid DESC")
     return [db.dict_from_row(r) for r in cur.fetchall()]
@@ -90,7 +123,7 @@ get_accounts = list_all  # alias for backwards compatibility
 
 def get(rec_id: str) -> Optional[Dict[str, Any]]:
     """Retrieve a single record by its id."""
-    conn = db.get_connection()
+    conn = _conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM accounts WHERE id = ? LIMIT 1", (rec_id,))
     row = cur.fetchone()
@@ -99,7 +132,7 @@ def get(rec_id: str) -> Optional[Dict[str, Any]]:
 
 def counts() -> Dict[str, Any]:
     """Return fast aggregated account statistics in a single query."""
-    conn = db.get_connection()
+    conn = _conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT
@@ -171,7 +204,7 @@ def counts() -> Dict[str, Any]:
 
 def pending_count() -> int:
     """Return count of unsubmitted Telegram accounts ready for claiming."""
-    conn = db.get_connection()
+    conn = _conn()
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM accounts WHERE target = 'telegram' AND status = 'Created' AND tg_submitted = 0")
     row = cur.fetchone()
@@ -180,7 +213,7 @@ def pending_count() -> int:
 
 def pop_pending(destination: str = "telegram") -> Optional[Dict[str, Any]]:
     """Atomically claim the oldest submittable pending account for the specified pipeline."""
-    conn = db.get_connection()
+    conn = _conn()
     now = time.time()
 
     with _lock:
@@ -262,7 +295,7 @@ def pop_pending(destination: str = "telegram") -> Optional[Dict[str, Any]]:
                 return None
 
 
-def count_ig_creator_accounts() -> int:
+def count_ig_creator_accounts(need_mail: bool = False) -> int:
     """Return count of available IG creator accounts with cookies in the pool.
 
     Applies the SAME filters as ``pop_ig_creator_account`` — including the
@@ -270,7 +303,7 @@ def count_ig_creator_accounts() -> int:
     reported "445 available" while pop returned none because every account was
     challenge-stamped, which made the drain log a false pool size and churn.)
     """
-    conn = db.get_connection()
+    conn = _conn()
     _challenge_cutoff = time.time() - _CHALLENGE_RETRY_SEC
     cur = conn.cursor()
     cur.execute(
@@ -280,15 +313,65 @@ def count_ig_creator_accounts() -> int:
           AND cookies IS NOT NULL AND cookies != ''
           AND (status = 'Created' OR status IS NULL)
           AND (challenged_at IS NULL OR challenged_at < ?)
-        """,
+          AND {_mail_clause}
+        """.format(_mail_clause=_MAIL_CLAUSE_2FA if need_mail else _MAIL_CLAUSE_COOKIE),
         (_challenge_cutoff,)
     )
     row = cur.fetchone()
     return row[0] if row else 0
 
 
-def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
-    """Atomically claim the freshest IG creator account with valid cookies from the pool."""
+def ig_pool_breakdown() -> Dict[str, int]:
+    """Why the drainable pool is smaller than the number of accounts created. Same rules as
+    ``count_ig_creator_accounts`` / ``pop_ig_creator_account``, split by the reason an account is skipped:
+    ``no_mailbox`` = no readable mailbox saved (the 2FA drain cannot read its email code; cookie drain still can),
+    ``in_use_or_done`` = status is not Created (claimed by a running slot, submitted, dead),
+    ``challenged`` = set aside after a rename challenge, ``no_cookies`` = nothing to log in with."""
+    conn = _conn()
+    cutoff = time.time() - _CHALLENGE_RETRY_SEC
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COUNT(*),
+          SUM(CASE WHEN cookies IS NULL OR cookies = '' THEN 1 ELSE 0 END),
+          SUM(CASE WHEN cookies != '' AND NOT (status = 'Created' OR status IS NULL) THEN 1 ELSE 0 END),
+          SUM(CASE WHEN cookies != '' AND (status = 'Created' OR status IS NULL)
+                    AND challenged_at IS NOT NULL AND challenged_at >= ? THEN 1 ELSE 0 END),
+          SUM(CASE WHEN cookies != '' AND (status = 'Created' OR status IS NULL)
+                    AND (challenged_at IS NULL OR challenged_at < ?) AND mailbox_ok(extra) = 0 THEN 1 ELSE 0 END),
+          SUM(CASE WHEN cookies != '' AND (status = 'Created' OR status IS NULL)
+                    AND (challenged_at IS NULL OR challenged_at < ?) AND mailbox_ok(extra) = 1 THEN 1 ELSE 0 END)
+        FROM accounts WHERE platform = 'Meta+Instagram'
+        """,
+        (cutoff, cutoff, cutoff),
+    )
+    r = [int(x or 0) for x in (cur.fetchone() or (0,) * 6)]
+    return {"total": r[0], "no_cookies": r[1], "in_use_or_done": r[2], "challenged": r[3],
+            "no_mailbox": r[4], "usable": r[5]}
+
+
+# 1 when the account already carries the 5 mandatory follows. `followed` is a real column; the extra-JSON
+# value is only a fallback for rows written before the column existed (the CASE guards invalid/NULL JSON).
+_FOLLOW5_SQL = ("(CASE WHEN COALESCE(followed, 0) >= 5 THEN 1 WHEN json_valid(extra) AND "
+                "CAST(COALESCE(json_extract(extra, '$.followed'), 0) AS INTEGER) >= 5 THEN 1 ELSE 0 END)")
+
+
+_MAIL_CLAUSE_COOKIE = "drain_ok(extra) = 1"
+_MAIL_CLAUSE_2FA = "mailbox_ok(extra) = 1"
+
+
+def pop_ig_creator_account(prefer_non_follow5: bool = False, prefer_follow5: bool = False,
+                           need_mail: bool = False) -> Optional[Dict[str, Any]]:
+    """Atomically claim the freshest IG creator account with valid cookies from the pool.
+
+    ``prefer_non_follow5``: accounts that already carry the 5 cookie-mandate
+    follows are reserved for the cookie tasks. With this flag they are taken
+    only when no other account is left in the pool.
+    ``prefer_follow5``: the opposite — the cookie tasks take the accounts that
+    already have the 5 follows first (no follow step needed), then the rest.
+    Neither flag excludes anything: the other group is still claimed when the preferred one is empty.
+    ``need_mail``: the 2FA drains only take accounts whose mailbox can still be read (see mailbox_ok).
+    """
     # Self-heal FIRST: reclaim claims abandoned by an abruptly-killed cycle so an
     # engine stop never permanently removes accounts from the pool. Cheap; the
     # lock is taken inside recover_stale_submitting (not held here).
@@ -296,9 +379,20 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
         recover_stale_submitting()
     except Exception:
         pass
-    conn = db.get_connection()
+    conn = _conn()
     now = time.time()
     _challenge_cutoff = now - _CHALLENGE_RETRY_SEC
+    # 5-follow accounts sort last only when asked; json_valid guards 'Dead: ...' extras.
+    # An account claimed in the last 60 s and put back with rotate=True (it failed a rename/submit) goes to
+    # the BACK: with the freshest-first order it was re-picked at once, ~10x per second, hammering IG with
+    # the same failing rename (observed 2026-10-12 23:06: 11 renames in 8 s on one account).
+    _recent = "CASE WHEN claimed_at IS NOT NULL AND claimed_at > {cut} THEN 1 ELSE 0 END ASC, ".format(cut=now - 60)
+    if prefer_follow5 and not prefer_non_follow5:
+        _order = _recent + _FOLLOW5_SQL + " DESC, created_at DESC, rowid DESC"
+    elif prefer_non_follow5 and not prefer_follow5:
+        _order = _recent + _FOLLOW5_SQL + " ASC, created_at DESC, rowid DESC"
+    else:
+        _order = _recent + "created_at DESC, rowid DESC"
     with _lock:
         with conn:
             cur = conn.execute(
@@ -308,6 +402,7 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
                   AND cookies IS NOT NULL AND cookies != ''
                   AND (status = 'Created' OR status IS NULL)
                   AND (challenged_at IS NULL OR challenged_at < ?)
+          AND {_mail_clause}
                 -- FRESHEST FIRST. The IG Creator's accounts are only viable for
                 -- ~1h before IG suspends them, so the drain must consume the
                 -- NEWEST ones while they are still alive. Ordering by claimed_at
@@ -317,8 +412,8 @@ def pop_ig_creator_account() -> Optional[Dict[str, Any]]:
                 -- ones sat untouched at the back). Recently-challenged accounts
                 -- are already excluded by challenged_at, and locked ones are
                 -- purged, so newest-first cannot tight-loop.
-                ORDER BY created_at DESC, rowid DESC LIMIT 1
-                """,
+                ORDER BY {_order} LIMIT 1
+                """.format(_order=_order, _mail_clause=_MAIL_CLAUSE_2FA if need_mail else _MAIL_CLAUSE_COOKIE),
                 (_challenge_cutoff,)
             )
             row = cur.fetchone()
@@ -341,6 +436,7 @@ _META_LIST_WHERE = """
         AND email IS NOT NULL AND email != ''
         AND (COALESCE(NULLIF(meta_password, ''), NULLIF(password, '')) IS NOT NULL)
         AND (challenged_at IS NULL OR challenged_at < ?)
+          AND drain_ok(extra) = 1
 """
 
 
@@ -349,7 +445,7 @@ def count_meta_list_accounts() -> int:
 
     Same challenge set-aside as the IG pool, so count and pop never disagree.
     """
-    conn = db.get_connection()
+    conn = _conn()
     cutoff = time.time() - _CHALLENGE_RETRY_SEC
     cur = conn.execute(f"SELECT COUNT(*) FROM accounts WHERE {_META_LIST_WHERE}", (cutoff,))
     row = cur.fetchone()
@@ -368,7 +464,7 @@ def pop_meta_list_account() -> Optional[Dict[str, Any]]:
         recover_stale_submitting()
     except Exception:
         pass
-    conn = db.get_connection()
+    conn = _conn()
     now = time.time()
     with _lock:
         with conn:
@@ -398,7 +494,7 @@ def mark_meta_list_challenged(rec_id: str) -> None:
     for ``INSTA_IG_CHALLENGE_RETRY_SEC`` — the account is not dead, IG just
     wants more than a password from this fresh device.
     """
-    conn = db.get_connection()
+    conn = _conn()
     now = time.time()
     with _lock:
         with conn:
@@ -422,7 +518,7 @@ def restore_ig_creator_account(rec_id: str, rotate: bool = False) -> None:
     next pop picks a DIFFERENT account (a tight re-pick loop is what made IG
     return ``{"spam":true}`` on every username change).
     """
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             # A Meta-LIST account (platform 'Meta', no IG session yet) must go
@@ -448,7 +544,7 @@ def peek_pool_accounts(limit: int = 6) -> list:
 
     Read-only — for the pre-flight health probe (never mutates status).
     """
-    conn = db.get_connection()
+    conn = _conn()
     cutoff = time.time() - _CHALLENGE_RETRY_SEC
     cur = conn.execute(
         """
@@ -457,6 +553,7 @@ def peek_pool_accounts(limit: int = 6) -> list:
           AND cookies IS NOT NULL AND cookies != ''
           AND (status = 'Created' OR status IS NULL)
           AND (challenged_at IS NULL OR challenged_at < ?)
+          AND drain_ok(extra) = 1
         ORDER BY created_at DESC, rowid DESC LIMIT ?
         """,
         (cutoff, int(limit)),
@@ -475,7 +572,7 @@ def purge_dead_sessions() -> int:
 
     Returns the number of rows deleted.
     """
-    conn = db.get_connection()
+    conn = _conn()
     n = 0
     with _lock:
         with conn:
@@ -503,7 +600,7 @@ def mark_ig_creator_challenged(rec_id: str) -> None:
     Without the stamp the drain churns the entire pool in one pass, re-trying
     accounts IG is already challenging.
     """
-    conn = db.get_connection()
+    conn = _conn()
     now = time.time()
     with _lock:
         with conn:
@@ -523,7 +620,7 @@ def mark_ig_creator_dead(rec_id: str, reason: str = "checkpoint_required") -> No
     full backup of the flagged row lost its inbox. ``is_damaged`` readers
     accept both the legacy ``'Dead: …'`` string and the merged dict form.
     """
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             cur = conn.execute("SELECT extra FROM accounts WHERE id = ?", (rec_id,))
@@ -552,7 +649,7 @@ def claim_specific(rec_id: str) -> Optional[Dict[str, Any]]:
     the same breath (fresh session, no queue aging). Returns None unless the
     record is still submittable (Created, not yet submitted).
     """
-    conn = db.get_connection()
+    conn = _conn()
     now = time.time()
     with _lock:
         with conn:
@@ -582,7 +679,7 @@ def finish_submit(rec_id: str, ok: bool, tg_id: Optional[str] = None, code: Opti
                   updated_username: Optional[str] = None, updated_password: Optional[str] = None,
                   updated_name: Optional[str] = None, tg_bot: Optional[str] = None) -> None:
     """Mark a claimed account Submitted (or revert to Created on failure)."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             cur = conn.execute("SELECT * FROM accounts WHERE id = ? LIMIT 1", (rec_id,))
@@ -634,7 +731,7 @@ def finish_submit(rec_id: str, ok: bool, tg_id: Optional[str] = None, code: Opti
 
 def finish_nitro_submit(rec_id: str, ok: bool, device_serial: Optional[str] = None, message: Optional[str] = None) -> None:
     """Mark an account as Submitted to Nitro Follower."""
-    conn = db.get_connection()
+    conn = _conn()
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
     with _lock:
@@ -667,7 +764,7 @@ def finish_nitro_submit(rec_id: str, ok: bool, device_serial: Optional[str] = No
 
 def finish_coinsta_submit(rec_id: str, ok: bool, device_serial: Optional[str] = None, message: Optional[str] = None) -> None:
     """Mark an account as ingested into Coinsta (cookie session live on a device)."""
-    conn = db.get_connection()
+    conn = _conn()
     now_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
     with _lock:
@@ -726,7 +823,7 @@ def recover_stale_submitting(timeout: float = CLAIM_TIMEOUT) -> int:
     new target is added.
     """
     now = time.time()
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             cur = conn.execute(
@@ -770,7 +867,7 @@ def prune_submitted_data(ids: Optional[List[str]] = None) -> Dict[str, Any]:
         return bool(r.get("tg_submitted") or r.get("nitro_submitted")) \
             or str(r.get("status") or "") == "Submitted"
 
-    conn = db.get_connection()
+    conn = _conn()
     removed = {"profiles": 0, "sessions": 0, "cookies": 0, "records": 0}
     with _lock:
         cur = conn.execute("SELECT id, profile_dir, session_file FROM accounts")
@@ -817,7 +914,7 @@ def prune_submitted_data(ids: Optional[List[str]] = None) -> Dict[str, Any]:
 
 def clear_completed() -> int:
     """Remove already submitted accounts to keep queue clean."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             cur = conn.execute("DELETE FROM accounts WHERE status = 'Submitted' OR tg_submitted = 1")
@@ -828,7 +925,7 @@ def clear_completed() -> int:
 
 def delete_record(rec_id: str) -> None:
     """Delete a single record by id and maintain file parity."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             conn.execute("DELETE FROM accounts WHERE id = ?", (rec_id,))
@@ -837,7 +934,7 @@ def delete_record(rec_id: str) -> None:
 
 def update_account(rec_id_or_username: str, updates: Dict[str, Any]) -> bool:
     """Safely update arbitrary fields on an account by id or username."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             cur = conn.execute(
@@ -866,7 +963,7 @@ def update_account(rec_id_or_username: str, updates: Dict[str, Any]) -> bool:
 
 def clear_all() -> None:
     """Clear all accounts across database and files."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             conn.execute("DELETE FROM accounts")
@@ -877,7 +974,7 @@ def clear_kind(kind: str) -> int:
     """Delete only one workspace list: 'meta' (status MetaCreated) or 'ig'
     (everything else). Telegram pool rows are never touched. Returns the
     number of deleted rows."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             if kind == "meta":
@@ -898,7 +995,7 @@ def purge_damaged(kind: str = "ig") -> int:
     healthy. Damaged = status Failed/Banned, a dead-session note, or 3+
     failed submits (same rule as the Health column and is_damaged()).
     Telegram pool rows are never touched. Returns the deleted count."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             scope = ("status = 'MetaCreated'" if kind == "meta"
@@ -916,7 +1013,7 @@ def purge_damaged(kind: str = "ig") -> int:
 
 def remove_banned_or_failed() -> int:
     """Remove accounts with status Failed, Banned, or excessive attempts."""
-    conn = db.get_connection()
+    conn = _conn()
     with _lock:
         with conn:
             cur = conn.execute(
@@ -956,7 +1053,7 @@ def check_and_purge_banned() -> int:
             pass
 
     if purged_ids:
-        conn = db.get_connection()
+        conn = _conn()
         with _lock:
             with conn:
                 placeholders = ", ".join("?" for _ in purged_ids)
@@ -968,7 +1065,7 @@ def check_and_purge_banned() -> int:
 
 def sync_files() -> None:
     """Keep accounts.json, accounts.csv and accounts.txt in sync with SQLite."""
-    conn = db.get_connection()
+    conn = _conn()
     cur = conn.cursor()
     # Strictly store only Meta and Instagram creator accounts (exclude telegram bot tasks)
     cur.execute("SELECT * FROM accounts WHERE target != 'telegram' OR target IS NULL ORDER BY created_at DESC, rowid DESC")
@@ -1029,3 +1126,150 @@ def sync_files() -> None:
                 f.write(content)
         except Exception:
             pass
+
+
+# ── Mr Follower ──────────────────────────────────────────────────────────────
+# Claims accounts that still owe follows under their OWN status, 'Submitting_Follow'.
+# The drains only take 'Created', so a claimed account is invisible to every other
+# cycle, and `recover_stale_submitting` (LIKE 'Submitting%') already reclaims it if
+# the run is killed. `followed` is the existing count column (>= 5 = "5 follows").
+FOLLOW_STATUS = "Submitting_Follow"
+# A failed account is left alone this long before Mr Follower retries it. Without it the
+# account is the oldest again the moment it is put back and gets hammered in a tight loop.
+FOLLOW_RETRY_S = int(os.environ.get("MRFOLLOW_RETRY_S", "600") or 600)
+
+
+def _follow_age_sql(now: float, min_age_s: float, max_age_s: float):
+    """SQL + args limiting created_at to [now-max_age, now-min_age]. NULL created_at counts as old."""
+    fmt = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))  # noqa: E731
+    sql, args = "", []
+    if min_age_s and min_age_s > 0:
+        sql += "AND (created_at IS NULL OR created_at <= ?) "
+        args.append(fmt(now - float(min_age_s)))
+    if max_age_s and max_age_s > 0:
+        sql += "AND created_at >= ? "
+        args.append(fmt(now - float(max_age_s)))
+    return sql, args
+
+
+def claim_for_follow(need: int = 5, max_age_s: float = 0, min_age_s: float = 0) -> Optional[Dict[str, Any]]:
+    """Claim the OLDEST usable IG account with ``followed < need``.
+
+    ``min_age_s`` > 0 leaves accounts younger than that alone (still settling after creation).
+    ``max_age_s`` > 0 skips accounts created longer ago than that (IG suspends them
+    after ~1h, so following them only burns requests). Returns the row, or None.
+    """
+    try:
+        recover_stale_submitting()
+    except Exception:
+        pass
+    conn = _conn()
+    now = time.time()
+    cutoff = now - _CHALLENGE_RETRY_SEC
+    age_sql, age_args = _follow_age_sql(now, min_age_s, max_age_s)
+    args: list = [cutoff, int(need), now - FOLLOW_RETRY_S] + age_args
+    for _try in range(5):
+        with _lock:
+            with conn:
+                row = conn.execute(
+                    "SELECT id FROM accounts WHERE platform = 'Meta+Instagram' "
+                    "AND cookies IS NOT NULL AND cookies != '' "
+                    "AND (status = 'Created' OR status IS NULL) "
+                    "AND (challenged_at IS NULL OR challenged_at < ?) "
+                    "AND COALESCE(followed, 0) < ? "
+                    "AND (claimed_at IS NULL OR claimed_at < ?) " + age_sql +
+                    "ORDER BY created_at ASC, rowid ASC LIMIT 1", args).fetchone()
+                if not row:
+                    return None
+                rec_id = row[0]
+                # Conditional: another PROCESS (a drain) may have taken it since the SELECT.
+                won = conn.execute(
+                    "UPDATE accounts SET status = ?, claimed_at = ? WHERE id = ? "
+                    "AND (status = 'Created' OR status IS NULL)",
+                    (FOLLOW_STATUS, now, rec_id)).rowcount
+                if won:
+                    res = db.dict_from_row(conn.execute(
+                        "SELECT * FROM accounts WHERE id = ? LIMIT 1", (rec_id,)).fetchone())
+        if won:
+            sync_files()
+            return res
+    return None
+
+
+def count_follow_backlog(need: int = 5, max_age_s: float = 0, min_age_s: float = 0) -> Dict[str, int]:
+    """Counts for the Mr Follower panel: waiting / in progress / done (>= need follows)."""
+    conn = _conn()
+    cutoff = time.time() - _CHALLENGE_RETRY_SEC
+    age_sql, age_args = _follow_age_sql(time.time(), min_age_s, max_age_s)
+    args = [int(need), cutoff, time.time() - FOLLOW_RETRY_S] + age_args
+    cur = conn.cursor()
+    waiting = cur.execute(
+        "SELECT COUNT(*) FROM accounts WHERE platform = 'Meta+Instagram' AND cookies != '' "
+        "AND (status = 'Created' OR status IS NULL) AND COALESCE(followed, 0) < ? "
+        "AND (challenged_at IS NULL OR challenged_at < ?) "
+        "AND (claimed_at IS NULL OR claimed_at < ?) " + age_sql, args).fetchone()[0]
+    busy = cur.execute("SELECT COUNT(*) FROM accounts WHERE status = ?", (FOLLOW_STATUS,)).fetchone()[0]
+    done = cur.execute(
+        "SELECT COUNT(*) FROM accounts WHERE platform = 'Meta+Instagram' "
+        "AND (status = 'Created' OR status IS NULL) AND COALESCE(followed, 0) >= ?",
+        (int(need),)).fetchone()[0]
+    return {"waiting": int(waiting or 0), "in_progress": int(busy or 0), "done": int(done or 0)}
+
+
+def finish_follow(rec_id: str, followed: int, ok: bool, dead_reason: str = "",
+                  progressed: bool = False) -> None:
+    """Put a claimed account back in the list with its new follow count.
+
+    ``ok`` (target reached): back to 'Created', follow count saved, claim cleared.
+    Not ok: back to 'Created' with the partial count; ``claimed_at`` is stamped so the
+    account rests for FOLLOW_RETRY_S before it is retried. It costs an attempt only when
+    nothing was gained (``progressed`` False); after MAX_SUBMIT_ATTEMPTS such failures it
+    is set to Failed. ``dead_reason`` marks the account dead.
+    """
+    if dead_reason:
+        mark_ig_creator_dead(rec_id, dead_reason)
+        return
+    conn = _conn()
+    with _lock:
+        with conn:
+            row = conn.execute("SELECT attempts FROM accounts WHERE id = ?", (rec_id,)).fetchone()
+            attempts = int((row[0] if row else 0) or 0)
+            if not ok and not progressed:
+                attempts += 1
+            status = "Failed" if attempts >= MAX_SUBMIT_ATTEMPTS else "Created"
+            conn.execute(
+                "UPDATE accounts SET status = ?, followed = ?, attempts = ?, claimed_at = ? WHERE id = ?",
+                (status, int(followed), attempts, None if ok else time.time(), rec_id))
+        sync_files()
+
+
+def release_follow_claims() -> int:
+    """Return every account Mr Follower holds to the list (runner start / exit / crash cleanup)."""
+    conn = _conn()
+    with _lock:
+        with conn:
+            n = conn.execute(
+                "UPDATE accounts SET status = 'Created', claimed_at = NULL WHERE status = ?",
+                (FOLLOW_STATUS,)).rowcount
+        if n:
+            sync_files()
+    return int(n or 0)
+
+
+def next_follow_eligible_in(need: int = 5, min_age_s: float = 0) -> Optional[int]:
+    """Seconds until the next account that owes follows becomes old enough (None = none waiting)."""
+    if not min_age_s or min_age_s <= 0:
+        return None
+    conn = _conn()
+    row = conn.execute(
+        "SELECT created_at FROM accounts WHERE platform = 'Meta+Instagram' AND cookies != '' "
+        "AND (status = 'Created' OR status IS NULL) AND COALESCE(followed, 0) < ? "
+        "AND created_at > ? ORDER BY created_at ASC LIMIT 1",
+        (int(need), time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - float(min_age_s))))).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        made = time.mktime(time.strptime(str(row[0])[:19], "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+    return max(0, int(made + float(min_age_s) - time.time()))

@@ -2921,3 +2921,28 @@ body.meta-only-mode .sidebar-nav > .nav-section-title:nth-of-type(3),
 body.meta-only-mode .sidebar-nav > .nav-section-title:nth-of-type(4) {
   display: none !important;
 }
+
+/* ---- Manager: live balances (Taskly + PayGo) ---- */
+.tgm-balhead { display: flex; flex-direction: column; gap: .6rem; margin-bottom: .8rem; }
+.tgm-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; }
+.tgm-stat { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: .6rem .8rem; }
+.tgm-stat span { display: block; font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.tgm-stat strong { font-size: 1.1rem; font-family: var(--font-mono); color: var(--text-main); }
+.tgm-stat.grand { border-color: rgba(74,222,128,.35); background: rgba(74,222,128,.06); }
+.tgm-stat.grand strong { color: #4ade80; }
+.tgm-progress { height: 5px; border-radius: 99px; background: rgba(148,163,184,.18); overflow: hidden; }
+.tgm-progress > div { height: 100%; background: linear-gradient(90deg, #229ED9, #4ade80); transition: width .3s; }
+.tgm-tablewrap { overflow-x: auto; border: 1px solid var(--border-color); border-radius: 10px; }
+.tgm-bal tbody tr:hover { background: rgba(255,255,255,.03); }
+.tgm-bal .r { text-align: right; }
+.tgm-bal th.tgm-sel, .tgm-bal td.tgm-sel { width: 36px; text-align: center; }
+.tgm-acct { display: flex; flex-direction: column; }
+.tgm-acct strong { color: var(--text-main); }
+.tgm-id { font-size: .7rem; color: var(--text-muted); font-family: var(--font-mono); }
+.tgm-amt { font-family: var(--font-mono); color: var(--text-main); font-weight: 600; }
+.tgm-pend { display: inline-block; margin-left: 6px; font-size: 10px; padding: 1px 6px; border-radius: 6px; color: #eab308; background: rgba(234,179,8,.12); }
+.tgm-na { color: var(--text-muted); }
+.tgm-tot { font-family: var(--font-mono); font-weight: 700; color: #4ade80; }
+.tgm-empty { text-align: center; color: var(--text-muted); padding: 1.2rem; }
+.tgm-start-card .tgm-chip:hover { transform: translateY(-1px); }
+@media (max-width: 720px) { .tgm-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

@@ -27,6 +27,7 @@ function optionalRoute(rel) {
   return () => false;
 }
 const handleIgCheck = optionalRoute('./server/routes-igcheck');
+const handleFollowMaker = optionalRoute('./server/routes-followmaker');
 const handleTg = optionalRoute('./server/routes-tg');
 
 const handleLicense = require('./server/routes-license');
@@ -72,6 +73,8 @@ const server = http.createServer((req, res) => {
   // `/api/meta-insta/export-full`. This module only claims exact paths.
   if (handleIgCheck(req, res, urlObj, pathname, ctx)) return;
   if (res.headersSent) return;
+  if (handleFollowMaker(req, res, urlObj, pathname, ctx)) return;
+  if (res.headersSent) return;
   if (handleMeta(req, res, urlObj, pathname, ctx)) return;
   if (res.headersSent) return;
   if (handleTg(req, res, urlObj, pathname, ctx)) return;
@@ -98,6 +101,20 @@ function handleShutdown() {
 
 process.on('SIGINT', handleShutdown);
 process.on('SIGTERM', handleShutdown);
+// Closing the terminal this server runs in sends SIGHUP. Without a handler the
+// server dies and its detached engines are left running as orphans.
+process.on('SIGHUP', handleShutdown);
+
+// Last-chance cleanup for any exit that skips handleShutdown (crash, uncaught error,
+// process.exit elsewhere): every engine this server started is killed with it.
+process.on('exit', () => {
+  for (const s of Object.values(ctx.engineSlots || {})) {
+    if (s && s.proc) {
+      try { ctx.killProcessGroup(s.proc, 'SIGKILL'); } catch (e) {}
+      s.proc = null;
+    }
+  }
+});
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
@@ -124,7 +141,9 @@ function killOrphanEngines() {
     }
     const live = new Set(rows.map(r => r.pid));
     // Only REAL engines: argv[0] is a python interpreter AND argv names worker.py.
-    const isEngine = a => /python/i.test(a) && /worker\.py\b/.test(a);
+    // Also balance checks (tg_balance.py): they open the same Telegram session files, and an
+    // orphaned one locks the account for the live workers ("session file was locked").
+    const isEngine = a => /python/i.test(a) && /(worker\.py|tg_balance\.py)\b/.test(a);
     // A worker is only legitimate if its parent is a LIVE server.js. Detached
     // workers get reparented to `systemd --user` (NOT pid 1) when the server
     // dies, so "any live parent" is wrong — the parent must be a node server.

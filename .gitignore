@@ -79,3 +79,9 @@ package-lock.json
 
 # License signing key — NEVER commit (set as Cloudflare Worker secret)
 worker/license/.signing_key.pem
+.followmaker_state.json
+
+# Local debug logs and large reference archives (not for git)
+androguard.log
+nord_rotate_stats.jsonl
+ref/

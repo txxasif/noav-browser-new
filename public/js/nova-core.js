@@ -89,13 +89,14 @@ function initThemeNav() {
     'view-meta-creator': '#/meta',
     'view-ig-creator': '#/ig',
     'view-ig-checker': '#/igcheck',
+    'view-follow-maker': '#/followmaker',
     'view-tg-manager': '#/manager',
     'view-guide': '#/guide',
+    'view-settings': '#/settings',
     'view-tg-taskly2fa': '#/taskly2fa',
     'view-tg-tasklycookie': '#/tasklycookie',
     'view-tg-fastpay2fa': '#/fastpay2fa',
     'view-tg-paygopool': '#/paygopool',
-    'view-tg-failover': '#/failover',
     'view-tg-paygocookie': '#/paygocookie',
     'view-tg-paygo2fa': '#/paygo2fa',
   };
@@ -122,6 +123,13 @@ function initThemeNav() {
     }
     if (!item) item = document.querySelector('.nav-item[data-view="' + viewId + '"]');
     if (item) item.classList.add('active');
+    // Open the Tools menu when one of its pages is active.
+    try {
+      if (item && item.closest('#tools-submenu')) {
+        document.getElementById('tools-submenu').classList.remove('collapsed');
+        document.getElementById('nav-tools-toggle').setAttribute('aria-expanded', 'true');
+      }
+    } catch (e) {}
     // Auto-expand the per-bot group that contains the active item.
     try {
       const grp = item && item.closest('[data-bot-menu]');
@@ -182,6 +190,16 @@ function initThemeNav() {
     tgToggle.addEventListener('click', () => {
       const collapsed = tgSub.classList.toggle('collapsed');
       tgToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    });
+  }
+
+  // Collapsible Tools menu
+  const toolsToggle = document.getElementById('nav-tools-toggle');
+  const toolsSub = document.getElementById('tools-submenu');
+  if (toolsToggle && toolsSub) {
+    toolsToggle.addEventListener('click', () => {
+      const collapsed = toolsSub.classList.toggle('collapsed');
+      toolsToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     });
   }
 
@@ -271,6 +289,12 @@ document.addEventListener('DOMContentLoaded', () => {
           if (igTab) igTab.style.display = 'none';
           const igCheckTab = document.querySelector('button[data-view="view-ig-checker"]');
           if (igCheckTab) igCheckTab.style.display = 'none';
+          const fmTab = document.querySelector('button[data-view="view-follow-maker"]');
+          if (fmTab) fmTab.style.display = 'none';
+          const toolsT = document.getElementById('nav-tools-toggle');
+          const toolsS = document.getElementById('tools-submenu');
+          if (toolsT) toolsT.style.display = 'none';
+          if (toolsS) toolsS.style.display = 'none';
         }
         if (!mods.includes('tg')) {
           const tgToggle = document.getElementById('nav-tg-toggle');
@@ -291,6 +315,14 @@ document.addEventListener('DOMContentLoaded', () => {
       initMetaInsta();
     } catch (e) {
       console.error('[initMetaInsta error]', e);
+    }
+  }
+
+  if (typeof initFollowMaker === 'function') {
+    try {
+      initFollowMaker();
+    } catch (e) {
+      console.error('[initFollowMaker error]', e);
     }
   }
 

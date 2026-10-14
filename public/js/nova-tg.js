@@ -493,7 +493,7 @@
                 '<span class="creator-option-hint">(only provider)</span>' +
               '</label>' +
             '</div>' +
-            '<div class="creator-service-note">mail.td is the only enabled mailbox provider.</div>' +
+            '<div class="creator-service-note">Mail inbox: mail.td (tempmail.fish is chosen in the IG creator panel).</div>' +
           '</div>' +
           '<div class="creator-service">' +
             '<div class="creator-service-title"><i class="fa-solid fa-shield-halved" style="color:var(--accent-purple);"></i> CAPTCHA SOLVER</div>' +
@@ -594,7 +594,8 @@
           var isIgPool = (bot === 'paygo') && !!($('tg-igpool-sw') && $('tg-igpool-sw').checked);
           var effConc = parseInt(($('tg-conc') || {}).value || 1, 10);
           var effTarget = parseInt(($('tg-target') || {}).value || 0, 10);
-          var effAddEmail = (isIgPool || isCookieTask(task) || isNativeTask(task)) ? false : addEmail;
+          // Pool drain (PayGo 2FA) needs the email step: its 📥 Get code is the OTP source.
+          var effAddEmail = (isCookieTask(task) || isNativeTask(task)) ? false : addEmail;
           var captchaEl = document.querySelector('input[name="tg-captcha"]:checked');
           var captchaChoice = captchaEl ? captchaEl.value : 'extension';
           append('> start (' + st.connected + ' connected \u00b7 ' + botName +

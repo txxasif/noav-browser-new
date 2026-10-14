@@ -44,18 +44,223 @@ def _cookies_for_playwright(cookie_str: str, session_only: bool = True) -> list:
     return out
 
 
+def _mail_provider(tokens) -> str:
+    """Which mailbox an account's stored ``mail_tokens`` read from: mailtd | mailcf | yamin | ''."""
+    t = tokens if isinstance(tokens, dict) else {}
+    if t.get("tempmail_token"):
+        return "mailtd"
+    if t.get("mailcf_email"):
+        return "mailcf"
+    if t.get("yamin_email"):
+        return "yamin"
+    if t.get("guerrilla_email"):
+        return "guerrilla"               # Guerrilla Mail API inbox (address survives an expired sid)
+    if t.get("mailfish_email") and t.get("mailfish_api"):
+        return "mailfish_api"            # new accounts: inbox created through the premium API
+    if t.get("mailfish_email") and t.get("mailfish_auth_key"):
+        return "mailfish"                # old accounts: web inbox read with its authKey
+    return ""
+
+
 def _mail_tokens_from_extra(extra) -> dict:
-    """Extract the stored mail.td {tempmail_account_id, tempmail_token}."""
+    """Extract the stored mailbox tokens (mail.td, Cloudflare catch-all or Yamin)."""
     try:
         ex = extra
         if isinstance(ex, str):
             ex = json.loads(ex) if ex.strip() else {}
         toks = (ex or {}).get("mail_tokens") or {}
-        if isinstance(toks, dict) and toks.get("tempmail_token"):
+        if isinstance(toks, dict) and _mail_provider(toks):
             return toks
     except Exception:
         pass
     return {}
+
+
+def _mail_tokens_for_account(acc) -> dict:
+    """Mailbox tokens for a pooled account; older accounts with none saved fall back to their address.
+
+    An address on a Yamin domain or the Cloudflare catch-all domain identifies its mailbox
+    without a stored token. Anything else (e.g. mailfish) has no reader and returns {}.
+    """
+    toks = _mail_tokens_from_extra((acc or {}).get("extra"))
+    if toks:
+        return toks
+    email = str((acc or {}).get("email") or "").strip().lower()
+    if "@" not in email:
+        return {}
+    domain = email.split("@", 1)[1]
+    try:
+        from ai_config import Urls
+    except Exception:
+        return {}
+    if domain in {d.lower() for d in Urls.YAMIN_DOMAINS}:
+        return {"yamin_email": email}
+    if domain == str(Urls.CF_MAIL_DOMAIN).lower():
+        return {"mailcf_email": email}
+    return {}
+
+
+def _msg_id(m: dict) -> str:
+    """Stable id for a message: Yamin/mail.td give one; the Cloudflare Worker keys on timestamp+subject."""
+    return str(m.get("id") or f"{m.get('timestamp') or ''}|{m.get('subject') or ''}")
+
+
+def _mail_messages(tokens, runner=None) -> list:
+    """Normalised message list (id, subject, from, ts, text, code) for the account's mailbox.
+
+    A failing read (HTTP error, bad auth key, bad JSON) is logged via ``runner`` instead of
+    silently looking like an empty inbox.
+    """
+    prov = _mail_provider(tokens)
+    out = []
+    try:
+        if prov == "mailtd":
+            for m in _mailtd_http_list(tokens):
+                out.append({"id": str(m.get("id")), "subject": str(m.get("subject") or ""),
+                            "from": str(m.get("from") or m.get("sender") or ""),
+                            "ts": str(m.get("created_at") or m.get("createdAt") or m.get("id") or ""),
+                            "text": None, "code": None})
+        elif prov == "guerrilla":
+            from core import guerrilla_api
+            out.extend(guerrilla_api.list_messages(tokens["guerrilla_email"], tokens.get("guerrilla_sid", "")))
+        elif prov == "mailfish_api":
+            from core import mailfish_api
+            for m in mailfish_api.list_messages(tokens["mailfish_email"]):
+                out.append(m)
+        elif prov == "mailfish":
+            import json as _json
+            import urllib.parse as _up
+            import urllib.request as _ur
+            q = _up.urlencode({"emailAddress": tokens["mailfish_email"]})
+            req = _ur.Request(f"https://api.tempmail.fish/emails/emails?{q}",
+                              headers={"Authorization": tokens["mailfish_auth_key"], "Accept": "application/json"})
+            with _ur.urlopen(req, timeout=10) as resp:
+                data = _json.loads(resp.read().decode("utf-8", "replace"))
+            if isinstance(data, dict):
+                data = next((data[k] for k in ("emails", "messages", "data", "items", "result")
+                             if isinstance(data.get(k), list)), [])
+            for m in data if isinstance(data, list) else []:
+                if isinstance(m, dict):
+                    # tempmail.fish stores the body as `textBody` (may be HTML) and has no `id`.
+                    text = " ".join(str(m.get(k) or "") for k in ("subject", "textBody", "body", "text", "html", "content"))
+                    out.append({"id": str(m.get("id") or _msg_id(m)), "subject": str(m.get("subject") or ""),
+                                "from": str(m.get("from") or m.get("sender") or ""),
+                                "ts": str(m.get("timestamp") or m.get("createdAt") or m.get("created_at") or m.get("date") or ""),
+                                "text": text, "code": None})
+        elif prov == "mailcf" and tokens.get("mailcf_token"):
+            from core.mail_reader import list_messages
+            for m in list_messages(tokens["mailcf_email"], tokens["mailcf_token"]):
+                out.append({"id": _msg_id(m), "subject": str(m.get("subject") or ""),
+                            "from": str(m.get("from") or ""), "ts": str(m.get("timestamp") or ""),
+                            "text": str(m.get("text") or ""), "code": m.get("code")})
+        elif prov == "mailcf":
+            # Older accounts saved no read token: the Worker's public latest-code endpoint
+            # still serves the newest OTP (15-minute window). The code is its own message.
+            from core.mail_reader import latest_code
+            code = latest_code(tokens["mailcf_email"])
+            if code:
+                out.append({"id": f"latest|{code}", "subject": "", "from": "", "ts": str(time.time()),
+                            "text": "", "code": code, "trusted": True})
+        elif prov == "yamin":
+            import json as _json
+            import urllib.parse as _up
+            import urllib.request as _ur
+            import ai_config  # noqa: F401  (puts engine/ on sys.path)
+            from eng_constants import YAMIN_MAIL_API, YAMIN_AUTH_KEY
+            user, _, domain = str(tokens["yamin_email"]).partition("@")
+            q = f"user={_up.quote(user)}&domain={_up.quote(domain)}"
+            req = _ur.Request(f"{YAMIN_MAIL_API}/?action=getMessages&{q}",
+                              headers={"Authorization": YAMIN_AUTH_KEY, "X-Api-Key": YAMIN_AUTH_KEY})
+            with _ur.urlopen(req, timeout=10) as resp:
+                for m in _json.loads(resp.read().decode("utf-8", "replace")) or []:
+                    if isinstance(m, dict):
+                        out.append({"id": str(m.get("id") or ""), "subject": str(m.get("subject") or ""),
+                                    "from": str(m.get("from") or "").lower(),
+                                    "ts": str(m.get("timestamp") or ""), "text": None, "code": None})
+    except Exception as exc:
+        if runner is not None and getattr(runner, "_mail_read_err", None) != str(exc):
+            try:
+                runner._mail_read_err = str(exc)
+                runner.log(f"[⚠️] {prov or 'mail'} inbox read failed: {exc}")
+            except Exception:
+                pass
+        return []
+    return [m for m in out if m["id"]]
+
+
+def _mail_body(tokens, msg) -> tuple:
+    """(text, code) for one normalised message; text is fetched lazily where the list omits it."""
+    if msg.get("text") is not None:
+        return msg["text"], msg.get("code")
+    if _mail_provider(tokens) == "mailtd":
+        return _mailtd_http_body(tokens, msg["id"]), None
+    if _mail_provider(tokens) == "yamin":
+        try:
+            import json as _json
+            import urllib.parse as _up
+            import urllib.request as _ur
+            import ai_config  # noqa: F401  (puts engine/ on sys.path)
+            from eng_constants import YAMIN_MAIL_API, YAMIN_AUTH_KEY
+            user, _, domain = str(tokens["yamin_email"]).partition("@")
+            url = (f"{YAMIN_MAIL_API}/?action=readMessage&user={_up.quote(user)}"
+                   f"&domain={_up.quote(domain)}&id={_up.quote(msg['id'])}")
+            req = _ur.Request(url, headers={"Authorization": YAMIN_AUTH_KEY, "X-Api-Key": YAMIN_AUTH_KEY})
+            with _ur.urlopen(req, timeout=10) as resp:
+                body = _json.loads(resp.read().decode("utf-8", "replace")) or {}
+            text = " ".join(str(body.get(k) or "") for k in ("subject", "htmlBody", "body", "text"))
+            code = str(body.get("code_extracted") or "").strip() or None
+            return text, code
+        except Exception:
+            return "", None
+    return "", None
+
+
+def _mail_ids(tokens) -> set:
+    """Ids of every message already in the account's mailbox (the snapshot to ignore)."""
+    return {_msg_id(m) for m in _mail_messages(tokens)}
+
+
+def _mail_http_code(runner, tokens, preexisting_ids, keyword, timeout,
+                    subject_hint=None, prefer_len=None, should_stop=None):
+    """Poll whichever mailbox the account was created with for a FRESH matching code.
+
+    Dispatches on the account's stored provider (mail.td, Cloudflare catch-all,
+    Yamin). Only messages whose id is not in ``preexisting_ids`` count, newest first.
+    """
+    if not _mail_provider(tokens):
+        return None
+    end = time.time() + max(5, int(timeout or 60))
+    while time.time() < end:
+        if should_stop is not None and should_stop():
+            return None
+        msgs = [m for m in _mail_messages(tokens, runner) if m["id"] not in preexisting_ids]
+        msgs.sort(key=lambda m: m["ts"], reverse=True)
+        for m in msgs:
+            subject = m["subject"].lower()
+            sender = m["from"].lower()
+            if subject_hint and not m.get("trusted"):
+                hints = [h.strip().lower() for h in str(subject_hint).split("|") if h.strip()]
+                if not (any(h in subject or h in sender for h in hints)
+                        or any(d in sender for d in ("meta", "instagram", "facebook"))):
+                    continue
+            text, direct = _mail_body(tokens, m)
+            code = direct
+            if not code and text:
+                try:
+                    code = runner._pick_code(text, keyword, set(), prefer_len=prefer_len)
+                except Exception:
+                    code = None
+            if code:
+                try:
+                    runner.log(f'[📧] fresh {keyword} code ({_mail_provider(tokens)}): {code} '
+                               f'(subject: {subject[:40]})')
+                except Exception:
+                    pass
+                if isinstance(preexisting_ids, set):
+                    preexisting_ids.add(m["id"])
+                return str(code)
+        time.sleep(0.8)
+    return None
 
 
 def _mailtd_list(runner):
@@ -201,17 +406,18 @@ def _make_pool_fetch_code(runner, preexisting_ids, bot=None):
         # (1) FAST PATH — plain HTTP against the account's stored inbox. The
         #     Accounts-Center challenge mails the account's own address, so this
         #     is both the correct source AND the cheapest read.
-        if _tokens.get("tempmail_token"):
+        # The account's own mailbox, whichever provider it was created with (mail.td, Cloudflare, Yamin).
+        if _mail_provider(_tokens):
             try:
-                c = _mailtd_http_code(runner, _tokens, preexisting_ids, keyword,
-                                      timeout, subject_hint=subject_hint, prefer_len=prefer_len)
+                c = _mail_http_code(runner, _tokens, preexisting_ids, keyword,
+                                    timeout, subject_hint=subject_hint, prefer_len=prefer_len)
                 if c:
                     return c
             except Exception:
                 pass
         else:
             try:
-                runner.log("[📧] No stored mail.td token — HTTP OTP read skipped.")
+                runner.log("[📧] No stored mailbox token — HTTP OTP read skipped.")
             except Exception:
                 pass
         # (2) BOT Get-code (only useful once the bot email is linked).

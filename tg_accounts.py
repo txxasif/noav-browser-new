@@ -22,6 +22,7 @@ Model
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -39,6 +40,55 @@ from ai_config import (  # noqa: E402
     TG_DEFAULT_MODE,
     TG_MAX_ACCOUNTS,
 )
+
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # Windows build
+    _fcntl = None
+    import msvcrt as _msvcrt
+
+
+@contextlib.contextmanager
+def _xlock(timeout=10.0):
+    """Cross-process lock around the pool file's read-modify-write.
+
+    Every engine (Taskly cookie, PayGo, probes) is its own process, so the
+    in-process ``threading.Condition`` cannot stop two of them from reading an
+    account as idle and both leasing it (two clients on one ``.session`` ->
+    "database is locked"). On timeout it proceeds unlocked rather than deadlock.
+    """
+    path = TG_ACCOUNTS_JSON + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fh = open(path, "a+b")
+    got = False
+    end = time.time() + timeout
+    try:
+        while True:
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                else:
+                    fh.seek(0)
+                    _msvcrt.locking(fh.fileno(), _msvcrt.LK_NBLCK, 1)
+                got = True
+                break
+            except OSError:
+                if time.time() >= end:
+                    break
+                time.sleep(0.05)
+        yield
+    finally:
+        if got:
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fh, _fcntl.LOCK_UN)
+                else:
+                    fh.seek(0)
+                    _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        fh.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +348,12 @@ class TGAccountManager:
 
     def _write(self, recs):
         os.makedirs(os.path.dirname(TG_ACCOUNTS_JSON), exist_ok=True)
-        json.dump(recs, open(TG_ACCOUNTS_JSON, "w", encoding="utf-8"), indent=2)
+        # Atomic: a reader in another process must never see a half-written file
+        # (it would keep a stale list and save it back over the other lease).
+        tmp = TG_ACCOUNTS_JSON + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(recs, f, indent=2)
+        os.replace(tmp, TG_ACCOUNTS_JSON)
 
     def save(self):
         self._write(self.accounts)
@@ -417,111 +472,113 @@ class TGAccountManager:
         with self._cv:
             end = None if timeout is None else time.time() + timeout
             while True:
-                self._reload()
-                # FROZEN: a sensitive op (withdraw) owns TG exclusively — refuse
-                # to lease anything until it clears the freeze.
-                if is_frozen():
-                    return None
-                # Pass 1 — reclaim stale/expired ``busy`` leases (dead-worker
-                # safety) and never disturb a LIVE inspection hold.
-                for a in self.accounts:
-                    note = str(a.get("lease_note") or "").lower()
-                    if a.get("status") == "busy":
-                        if "inspect" in note:
-                            # Live inspection windows must never be stolen, but
-                            # a hold whose Chromium is gone is STALE (crashed or
-                            # killed window) → reclaim it. Otherwise the profile
-                            # is wedged forever: acquire() skips it and Reset
-                            # can't free it (this wedged TG #2).
-                            if not _profile_locked(a.get("profile_dir", "")):
-                                a["status"] = "idle"
-                                a["leased_at"] = None
-                                a["lease_note"] = None
-                                self.save()
-                        else:
-                            age = _lease_age(a)
-                            # A PROBE lease is short by construction: the probe
-                            # reads the hourly counter and releases (its own
-                            # finally). But the orchestrator runs it via
-                            # runPythonJson with a 30s cap and a SIGKILL on
-                            # timeout — SIGKILL skips `finally`, so the lease is
-                            # orphaned. Under the normal 20-min LEASE_TTL that
-                            # wedges one TG account for 20 minutes after every
-                            # slow probe, and acquire() silently skips it (this
-                            # is the "not using all TG accounts" symptom). A
-                            # probe never legitimately holds an account longer
-                            # than its own timeout, so reclaim it on a short TTL.
-                            is_probe = "probe" in str(a.get("busy_bot") or "").lower()
-                            ttl = PROBE_LEASE_TTL if is_probe else LEASE_TTL
-                            if is_probe and _owner_gone(a):
-                                # Definitive: the probe process is GONE, so the
-                                # lease can never be released by its owner.
-                                # Reclaim immediately instead of waiting out the
-                                # TTL — this is what left tg_2/tg_3 stuck "BUSY -
-                                # PAYGO_PROBE" with no probe running at all.
-                                a["status"] = "idle"
-                                a["leased_at"] = None
-                                a["lease_note"] = None
-                                a["busy_bot"] = None
-                                a.pop("probe_pid", None)
-                            elif age is not None and age > ttl:
-                                a["status"] = "idle"
-                                a["leased_at"] = None
-                                a["lease_note"] = None
-                                a["busy_bot"] = None
-                                a.pop("probe_pid", None)
-                # Pass 2 — fair-share pick. The old loop returned the FIRST
-                # eligible profile in fixed index order, so tg_1 absorbed the
-                # bulk of every run (lifetime 94 / 52 / 23) while later
-                # profiles starved. Rotate by least-recently-used instead:
-                # every enabled, logged-in profile gets an equal share of
-                # attempts, so lifetime counts converge. ``last_used`` is
-                # stamped on release, so a profile that just finished (or just
-                # failed) moves to the back rather than being hammered again.
-                # ``id`` is only a deterministic tie-break (e.g. a fresh pool
-                # where every last_used is None) — it must NOT be tasks_done,
-                # which re-picks the same account whenever timestamps collide.
-                eligible = []
-                for a in self.accounts:
-                    if ("inspect" in str(a.get("lease_note") or "").lower()
-                            and _profile_locked(a.get("profile_dir", ""))):
-                        continue
-                    # Per-profile enable switch (dashboard): a disabled profile
-                    # is never leased for task completion. Missing = enabled.
-                    if a.get("enabled") is False:
-                        continue
-                    # Optional HARD PIN (manual ops / one-shot tests): restrict the
-                    # lease to a single profile id. None = normal fair-share LRU.
-                    if only_id is not None and str(a.get("id")) != str(only_id):
-                        continue
-                    # FLOOD-LIMITED accounts are not leasable. Telegram returns an
-                    # absolute retry time, so a request inside that window cannot
-                    # succeed — and hammering it risks EXTENDING the penalty.
-                    # Without this check a 3–5h FloodWait (observed 2026-10-01)
-                    # made every slot cycle through all 6 accounts every ~25s
-                    # with zero possible submissions.
-                    _fu = a.get("flood_until")
-                    if _fu:
-                        try:
-                            if float(_fu) > time.time():
-                                continue
-                            a["flood_until"] = None      # expired -> clear
-                        except (TypeError, ValueError):
-                            a["flood_until"] = None
-                    if (a.get("status") in ("idle", "available")
-                            and session_ok(a)):
-                        eligible.append(a)
-                if eligible:
-                    eligible.sort(key=lambda x: (
-                        str(x.get("last_used") or ""),        # LRU first
-                        str(x.get("id") or ""),                # deterministic tie-break
-                    ))
-                    a = eligible[0]
-                    a["status"] = "busy"
-                    a["leased_at"] = time.time()
-                    a["busy_bot"] = (str(bot) if bot else None)
-                    self.save()
-                    return dict(a)
+                with _xlock():
+                    self._reload()
+                    # FROZEN: a sensitive op (withdraw) owns TG exclusively — refuse
+                    # to lease anything until it clears the freeze.
+                    if is_frozen():
+                        return None
+                    # Pass 1 — reclaim stale/expired ``busy`` leases (dead-worker
+                    # safety) and never disturb a LIVE inspection hold.
+                    for a in self.accounts:
+                        note = str(a.get("lease_note") or "").lower()
+                        if a.get("status") == "busy":
+                            if "inspect" in note:
+                                # Live inspection windows must never be stolen, but
+                                # a hold whose Chromium is gone is STALE (crashed or
+                                # killed window) → reclaim it. Otherwise the profile
+                                # is wedged forever: acquire() skips it and Reset
+                                # can't free it (this wedged TG #2).
+                                if not _profile_locked(a.get("profile_dir", "")):
+                                    a["status"] = "idle"
+                                    a["leased_at"] = None
+                                    a["lease_note"] = None
+                                    self.save()
+                            else:
+                                age = _lease_age(a)
+                                # A PROBE lease is short by construction: the probe
+                                # reads the hourly counter and releases (its own
+                                # finally). But the orchestrator runs it via
+                                # runPythonJson with a 30s cap and a SIGKILL on
+                                # timeout — SIGKILL skips `finally`, so the lease is
+                                # orphaned. Under the normal 20-min LEASE_TTL that
+                                # wedges one TG account for 20 minutes after every
+                                # slow probe, and acquire() silently skips it (this
+                                # is the "not using all TG accounts" symptom). A
+                                # probe never legitimately holds an account longer
+                                # than its own timeout, so reclaim it on a short TTL.
+                                is_probe = "probe" in str(a.get("busy_bot") or "").lower()
+                                ttl = PROBE_LEASE_TTL if is_probe else LEASE_TTL
+                                if is_probe and _owner_gone(a):
+                                    # Definitive: the probe process is GONE, so the
+                                    # lease can never be released by its owner.
+                                    # Reclaim immediately instead of waiting out the
+                                    # TTL — this is what left tg_2/tg_3 stuck "BUSY -
+                                    # PAYGO_PROBE" with no probe running at all.
+                                    a["status"] = "idle"
+                                    a["leased_at"] = None
+                                    a["lease_note"] = None
+                                    a["busy_bot"] = None
+                                    a.pop("probe_pid", None)
+                                elif age is not None and age > ttl:
+                                    a["status"] = "idle"
+                                    a["leased_at"] = None
+                                    a["lease_note"] = None
+                                    a["busy_bot"] = None
+                                    a.pop("probe_pid", None)
+                    # Pass 2 — fair-share pick. The old loop returned the FIRST
+                    # eligible profile in fixed index order, so tg_1 absorbed the
+                    # bulk of every run (lifetime 94 / 52 / 23) while later
+                    # profiles starved. Rotate by least-recently-used instead:
+                    # every enabled, logged-in profile gets an equal share of
+                    # attempts, so lifetime counts converge. ``last_used`` is
+                    # stamped on release, so a profile that just finished (or just
+                    # failed) moves to the back rather than being hammered again.
+                    # ``id`` is only a deterministic tie-break (e.g. a fresh pool
+                    # where every last_used is None) — it must NOT be tasks_done,
+                    # which re-picks the same account whenever timestamps collide.
+                    eligible = []
+                    for a in self.accounts:
+                        if ("inspect" in str(a.get("lease_note") or "").lower()
+                                and _profile_locked(a.get("profile_dir", ""))):
+                            continue
+                        # Per-profile enable switch (dashboard): a disabled profile
+                        # is never leased for task completion. Missing = enabled.
+                        if a.get("enabled") is False:
+                            continue
+                        # Optional HARD PIN (manual ops / one-shot tests): restrict the
+                        # lease to a single profile id. None = normal fair-share LRU.
+                        if only_id is not None and str(a.get("id")) != str(only_id):
+                            continue
+                        # FLOOD-LIMITED accounts are not leasable. Telegram returns an
+                        # absolute retry time, so a request inside that window cannot
+                        # succeed — and hammering it risks EXTENDING the penalty.
+                        # Without this check a 3–5h FloodWait (observed 2026-10-01)
+                        # made every slot cycle through all 6 accounts every ~25s
+                        # with zero possible submissions.
+                        _fu = a.get("flood_until")
+                        if _fu:
+                            try:
+                                if float(_fu) > time.time():
+                                    continue
+                                a["flood_until"] = None      # expired -> clear
+                            except (TypeError, ValueError):
+                                a["flood_until"] = None
+                        if (a.get("status") in ("idle", "available")
+                                and session_ok(a)):
+                            eligible.append(a)
+                    if eligible:
+                        eligible.sort(key=lambda x: (
+                            str(x.get("last_used") or ""),        # LRU first
+                            str(x.get("id") or ""),                # deterministic tie-break
+                        ))
+                        a = eligible[0]
+                        a["status"] = "busy"
+                        a["leased_at"] = time.time()
+                        a["busy_bot"] = (str(bot) if bot else None)
+                        a["lease_pid"] = os.getpid()   # who holds it: another worker's reset must not free it
+                        self.save()
+                        return dict(a)
                 if end is not None and time.time() >= end:
                     return None
                 self._cv.wait(2)
@@ -534,25 +591,27 @@ class TGAccountManager:
         Inspection holds are never touched (dashboard owns them).
         """
         with self._cv:
-            self._reload()
-            for a in self.accounts:
-                if a.get("id") == tg_id:
-                    if "inspect" in str(a.get("lease_note") or "").lower():
+            with _xlock():
+                self._reload()
+                for a in self.accounts:
+                    if a.get("id") == tg_id:
+                        if "inspect" in str(a.get("lease_note") or "").lower():
+                            break
+                        if not ok and bot_error:
+                            a["status"] = "error"
+                        else:
+                            a["status"] = "idle"
+                        a["leased_at"] = None
+                        a.pop("busy_bot", None)
+                        a.pop("lease_pid", None)
+                        if ok and count:
+                            a["tasks_done"] = int(a.get("tasks_done", 0)) + 1
+                        if count:
+                            a["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        if account_id:
+                            a["last_account"] = account_id
                         break
-                    if not ok and bot_error:
-                        a["status"] = "error"
-                    else:
-                        a["status"] = "idle"
-                    a["leased_at"] = None
-                    a.pop("busy_bot", None)
-                    if ok and count:
-                        a["tasks_done"] = int(a.get("tasks_done", 0)) + 1
-                    if count:
-                        a["last_used"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    if account_id:
-                        a["last_account"] = account_id
-                    break
-            self.save()
+                self.save()
             self._cv.notify_all()
 
     def leased_ids(self):
@@ -711,7 +770,7 @@ class TGAccountManager:
                 self._cv.notify_all()
             return updated
 
-    def reset_all(self, preserve_notes=("devtools-inspect",)):
+    def reset_all(self, preserve_notes=("devtools-inspect",), skip_live_owners=False):
         """Reset Telegram profiles back to idle — except LIVE inspections.
 
         Engine start/stop used to wipe everything, stealing profiles with an
@@ -720,9 +779,21 @@ class TGAccountManager:
         only while its Chromium is actually alive; stale holds are reclaimed.
         """
         keep = set(preserve_notes or [])
+        me = os.getpid()
         with self._cv:
             self._reload()
             for a in self.accounts:
+                # A worker starting or exiting must only free ITS OWN leases (or ones whose owner is dead).
+                # A worker that was stopped earlier finishes a few minutes later; its reset used to free the
+                # leases of the engine that was started in the meantime, so a live slot's profile was handed
+                # to another slot and that slot's clear_orphan_task cancelled the running bot task.
+                if skip_live_owners and a.get("status") == "busy":
+                    owner = a.get("lease_pid")
+                    try:
+                        if _pid_is_set(owner) and int(owner) != me and _pid_alive(owner):
+                            continue
+                    except Exception:
+                        pass
                 try:
                     notes = str(a.get("lease_note") or "")
                 except Exception:
@@ -736,6 +807,7 @@ class TGAccountManager:
                 a["busy_bot"] = None
                 a["flood_until"] = None
                 a.pop("probe_pid", None)
+                a.pop("lease_pid", None)
                 a["logged_in"] = session_ok(a)
             self.save()
             self._cv.notify_all()

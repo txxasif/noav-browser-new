@@ -112,6 +112,17 @@ def cookie_candidates(primary_bot: str, primary_task: str, pool_mode: bool = Tru
             cands.append((b, table[b]))
     return cands
 
+# Profiles whose last task was submitted in this process, with the time. The orphan check
+# after a lease is only for tasks left by a killed run; after a successful submit it does
+# nothing useful and holds the profile for several seconds.
+_RECENT_SUBMIT: dict = {}
+_RECENT_SUBMIT_SECS = 120
+
+
+def _recently_submitted(tg_id) -> bool:
+    ts = _RECENT_SUBMIT.get(tg_id)
+    return bool(ts) and (time.time() - ts) < _RECENT_SUBMIT_SECS
+
 _profile_pacing_lock = threading.Lock()
 _profile_last_start: dict[str, float] = {}
 
@@ -119,6 +130,9 @@ _profile_last_start: dict[str, float] = {}
 # ACCOUNT as blocked (remove it); a long CONSECUTIVE streak means the IP is
 # flagged, so STOP the drain instead of emptying the whole pool.
 _ig_spam_streak = [0]
+_ig_rl_streak = [0]           # consecutive "Please wait a few minutes" renames (IG rate limit)
+_IG_RL_PAUSE = int(os.environ.get("INSTA_IG_RL_PAUSE", "3") or 3)
+_IG_RL_WAIT_SEC = int(os.environ.get("INSTA_IG_RL_WAIT_SEC", "180") or 180)
 _IG_SPAM_STOP = int(os.environ.get("INSTA_IG_SPAM_STOP", "20") or 20)
 
 # IG "checkpoint_required" on the rename endpoint. A burst of these across many
@@ -256,6 +270,28 @@ def _get_ig_session():
                 except Exception:
                     _IG_SESSION = False
     return _IG_SESSION
+
+
+_health_lock = threading.Lock()
+_health_last = {"t": 0.0, "res": (0, 0)}
+
+
+def _pool_health_purge_cached(store_mod, slot_id, limit=6):
+    """Process-wide TTL wrapper: with 6 slots every cycle re-probed the same accounts (6 GETs x 6 slots,
+    serial, before each lease) - dead time during which the Telegram profile sat idle. One probe per TTL
+    is shared by all slots; a dead account still fails fast at claim time (rename returns the challenge page)."""
+    try:
+        ttl = float(os.environ.get("INSTA_HEALTH_PROBE_TTL_SEC", "90") or 90)
+    except (TypeError, ValueError):
+        ttl = 90.0
+    with _health_lock:
+        now = time.time()
+        if ttl > 0 and now - _health_last["t"] < ttl and _health_last["res"][0] > 0:
+            return _health_last["res"]
+        res = _pool_health_purge(store_mod, slot_id, limit)
+        _health_last["t"] = time.time()
+        _health_last["res"] = res
+        return res
 
 
 def _pool_health_purge(store_mod, slot_id, limit=6):
@@ -730,6 +766,7 @@ def _pool_enable_2fa_and_export_cookie(slot_id, bot, bot_id, pool_acc, login,
                 emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
                             "detail": f"Follow skipped — already followed {already_followed} at creation."})
             else:
+                n_followed = 0
                 try:
                     emit_event({"type": "slot_event", "slot_id": slot_id, "status": "onboarding",
                                 "detail": f"Following suggested accounts on {login} (bot requires {follow_count})…"})
@@ -750,6 +787,9 @@ def _pool_enable_2fa_and_export_cookie(slot_id, bot, bot_id, pool_acc, login,
                     raise
                 except Exception as exc:
                     log(slot_id, f"[⚠️] follow step note (continuing): {exc}")
+            _total = already_followed + n_followed
+            if _total < follow_count:
+                raise RuntimeError(f"follow incomplete ({_total}/{follow_count}) — cookie NOT submitted")
 
         # In-page rename: the bare-API and mobile renames were both refused, so
         # retry the SAME accounts/edit POST from inside this warmed, followed
@@ -877,7 +917,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         # works (IG invalidates it on suspension). If none are alive, skip the cycle
         # entirely so no bot task is spent on a dead pool.
         try:
-            _hl, _hd = _pool_health_purge(
+            _hl, _hd = _pool_health_purge_cached(
                 store, slot_id, int(os.environ.get("INSTA_HEALTH_PROBE_N", "6") or 6))
             if _hd or _hl:
                 log(slot_id, f"[pool] Health probe: {_hl} live / {_hd} suspended (purged).")
@@ -1006,7 +1046,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             # stuck while guards protected the corpses).
             try:
                 _clear = getattr(bot, "clear_orphan_task", None)
-                if callable(_clear):
+                if callable(_clear) and not _recently_submitted(getattr(bot, "tg_id", None)):
                     _clear()
             except Exception:
                 pass
@@ -1137,7 +1177,8 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             log(slot_id, f"[meta-list] ✅ '{login}' ready — {len(pool_acc['cookies'])} char cookie, "
                          f"followed {pool_acc.get('followed', 0)}.")
         for _attempt in range(0 if msess is not None else 10):
-            cand = store.pop_ig_creator_account()
+            # Taskly: accounts that already have the 5 follows go first, the rest only when none are left.
+            cand = store.pop_ig_creator_account(prefer_follow5=(str(bot_id).lower() == "taskly"))
             if not cand or not cand.get("cookies"):
                 break
             cand_id = cand["id"]
@@ -1152,6 +1193,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
             if ok_name:
                 pool_acc = cand
                 _ig_spam_streak[0] = 0
+                _ig_rl_streak[0] = 0
                 _challenge_trips[0] = 0
                 log(slot_id, f"✅ [api] IG username updated successfully to '{login}' in ~0.4s ({name_msg})")
                 clog(f"⚡ [username] Updated Instagram username: '{cand_user}' -> '{login}' (in 0.4s)")
@@ -1171,6 +1213,7 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 if _ok_m:
                     pool_acc = cand
                     _ig_spam_streak[0] = 0
+                    _ig_rl_streak[0] = 0
                     _challenge_trips[0] = 0
                     log(slot_id, f"✅ [mobile] IG username updated to '{login}' ({_mob_msg})")
                     clog(f"⚡ [username] Updated Instagram username: '{cand_user}' -> '{login}' (mobile)")
@@ -1217,6 +1260,15 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                         pass
                 emit_event({"type": "account_deleted", "account_id": cand_id})
                 emit_event({"type": "accounts_updated"})
+                continue
+            elif "wait a few minutes" in name_msg.lower() or "too many requests" in name_msg.lower() or "rate limit" in name_msg.lower():
+                log(slot_id, f"⚠️ [pool] Rename rate limit for {cand_id} ({name_msg[:60]}) — setting it aside (not deleting).")
+                store.mark_ig_creator_challenged(cand_id)
+                _ig_rl_streak[0] += 1
+                if _ig_rl_streak[0] >= _IG_RL_PAUSE:
+                    _ig_rl_streak[0] = 0
+                    raise RuntimeError(
+                        f"IG rename rate-limit on {_IG_RL_PAUSE} accounts in a row — pausing the drain a few minutes [ig_rate_limited]")
                 continue
             else:
                 # FAILED means FAILED: a rejected rename (spam / taken / invalid)
@@ -1278,7 +1330,10 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 _lmsg = str(_de).lower()
                 # Follow issues (rate limits, toasts) are NOT a dead session.
                 # RESTORE the account so it can retry later instead of purging it.
-                if "follow" in _lmsg:
+                # login_required / challenge_required = the session itself is dead: purge now (restoring it only
+                # made the next slot claim it and burn a Taskly task on a corpse).
+                _hard = any(k in _lmsg for k in ("login_required", "challenge_required", "checkpoint_required", "dead session"))
+                if "follow" in _lmsg and "after 0 follow" not in _lmsg and not _hard:
                     log(slot_id, f"⚠️ [pool][api] follow blocked ({_de}) — restoring "
                                  f"account {pool_acc['id']} (NOT purging) and moving on.")
                     try:
@@ -1343,7 +1398,9 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                     _lmsg = str(_de).lower()
                     # Follow issues (rate limits, toasts) are NOT a dead session.
                     # RESTORE so it can retry later, do NOT purge it from the pool.
-                    if "follow" in _lmsg:
+                    # "Failed to Load" with 0 follows = challenged account (it fails the next claim's
+                    # rename with a login/challenge page) -> purge it below instead of restoring.
+                    if "follow" in _lmsg and "after 0 follow" not in _lmsg:
                         log(slot_id, f"⚠️ [pool] follow blocked ({_de}) — restoring "
                                      f"account {pool_acc['id']} (NOT purging) and moving on.")
                         try:
@@ -1414,6 +1471,8 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
         submitted = False
         for _rc in range(3):
             submitted = bot.mark_registered()
+            if submitted:
+                _RECENT_SUBMIT[getattr(bot, "tg_id", None)] = time.time()
             if submitted:
                 break
             log(slot_id, f"register receipt not seen (attempt {_rc+1}/3) — retrying confirm tap…")
@@ -1562,6 +1621,10 @@ def _run_pool_drain_cycle(slot_id=91, is_headless=False, stop_event=None,
                 or "no_pool_accounts" in _dl or "all telegram profiles busy" in _dl
                 or "all cookie bots unavailable" in _dl or "ip-level rate-limit" in _dl):
             _sleep_until(time.time() + 15 + (slot_id % 6), stop_event)
+        elif "ig_rate_limited" in _dl:
+            # IG said "Please wait a few minutes" on several accounts in a row: every extra rename only
+            # extends the block, so every slot backs off for a few minutes.
+            _sleep_until(time.time() + _IG_RL_WAIT_SEC + (slot_id % 6), stop_event)
         return False, detail
     finally:
         if msess is not None:
@@ -1730,7 +1793,7 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
             # (operator 2026-10-07).
             try:
                 _clear = getattr(bot, "clear_orphan_task", None)
-                if callable(_clear):
+                if callable(_clear) and not _recently_submitted(getattr(bot, "tg_id", None)):
                     _clear()
             except Exception:
                 pass
@@ -1938,9 +2001,13 @@ def run_cookie_cycle_once(slot_id=91, worker_factory=None, is_headless=False,
                 raise RuntimeError(f"{bot_id} rejected the cookie: {reply[:200]}")
             require_window("register confirm")
             submitted = bot.mark_registered()
+            if submitted:
+                _RECENT_SUBMIT[getattr(bot, "tg_id", None)] = time.time()
             if not submitted:
                 log(slot_id, "register receipt not seen — one more tap…")
                 submitted = bot.mark_registered()
+            if submitted:
+                _RECENT_SUBMIT[getattr(bot, "tg_id", None)] = time.time()
             if not submitted:
                 raise RuntimeError(f"{bot_id} registration not confirmed — not recording Submitted")
             runner.tg_submitted = submitted

@@ -59,6 +59,7 @@ from pool_common import (  # noqa: E402
     _mail_tokens_from_extra,
     _mailtd_list,
     _mailtd_http_list,
+    _mail_ids,
     _mailtd_http_body,
     _mailtd_http_code,
     _make_pool_fetch_code,
@@ -127,7 +128,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
         store.recover_stale_submitting()
     except Exception:
         pass
-    avail = store.count_ig_creator_accounts()
+    avail = store.count_ig_creator_accounts(need_mail=True)
     if avail <= 0:
         log(slot_id, "[pool] No available IG Creator accounts in pool to drain.")
         emit_event({"type": "slot_event", "slot_id": slot_id, "status": "error",
@@ -261,7 +262,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             for _scan in range(10):
                 if _stopped():
                     raise RuntimeError("stopped")
-                cand = store.pop_ig_creator_account()
+                cand = store.pop_ig_creator_account(need_mail=True)
                 if not cand or not cand.get("cookies"):
                     break
                 cand_id = cand["id"]
@@ -368,8 +369,9 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             if mail_tokens:
                 try:
                     # HTTP snapshot of existing messages (fast ~0.3s, no extra browser tab)
-                    msgs = _mailtd_http_list(mail_tokens)
-                    preexisting_mail_ids = {str(m.get("id")) for m in msgs if m.get("id")}
+                    # Provider-generic (mail.td, tempmail.fish API/web): a mail.td-only read returned [] for the
+                    # others, so their OLD mails counted as fresh and a stale code could be submitted.
+                    preexisting_mail_ids = _mail_ids(mail_tokens)
                     log(slot_id, f"[📧] Inbox snapshotted via HTTP — {len(preexisting_mail_ids)} "
                                  f"existing message(s) ignored; waiting for a fresh code.")
                 except Exception as exc:
@@ -496,7 +498,7 @@ def run_pool_2fa_cycle_once(slot_id=93, worker_factory=None, is_headless=False,
             #     2FA key since Get code was consumed in step 2.
             if mail_tokens:
                 try:
-                    preexisting_mail_ids.update(str(m.get("id")) for m in _mailtd_http_list(mail_tokens))
+                    preexisting_mail_ids.update(_mail_ids(mail_tokens))
                 except Exception:
                     pass
             runner.fetch_code = _make_pool_fetch_code(runner, preexisting_mail_ids, bot=bot)

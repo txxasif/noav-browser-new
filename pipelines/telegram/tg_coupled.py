@@ -328,17 +328,25 @@ def run_tg_coupled_cycle(
             except Exception as exc:
                 log(f"[⚠️] cancel_task: {exc}")
             time.sleep(1.0)
+            # Every "return None" below logs its reason, so a silent replacement failure
+            # shows up as a specific cause in the run log.
             try:
                 if not bot.choose_task(target_task):
+                    log(f"[⚠️] replacement: bot did not accept task '{target_task}' (choose_task returned False).")
                     return None
                 fresh = bot.start_task()
             except Exception as exc:
                 log(f"[⚠️] replacement task failed: {exc}")
                 return None
-            if not (fresh and fresh.get("login") and fresh.get("password")):
+            if not fresh:
+                log("[⚠️] replacement: bot returned no task after start (start_task returned nothing).")
+                return None
+            if not (fresh.get("login") and fresh.get("password")):
+                log(f"[⚠️] replacement: task has no login/password (keys: {sorted(fresh.keys())}).")
                 return None
             fresh["login"] = _clean_username(fresh["login"])
             if not _is_valid_ig_username(fresh["login"]):
+                log(f"[⚠️] replacement: login '{fresh['login']}' is not a valid Instagram username.")
                 return None
             # Update credentials for subsequent flow (ignoring first_name, keeping existing profile name)
             runner.tg_creds = fresh

@@ -50,6 +50,7 @@ if not (os.path.isdir(ENGINE_DIR) and (
 sys.path.insert(0, ENGINE_DIR)
 
 import run  # noqa: E402  (Anti-detect + offline captcha engine)
+from eng_constants import CF_MAIL_ADMIN_TOKEN, CF_MAIL_DOMAIN, CF_MAIL_WORKER  # noqa: E402
 # Keep current working directory anchored to AI_DIR (run.py sets chdir to its own dir)
 os.chdir(AI_DIR)
 
@@ -78,11 +79,19 @@ class Urls:
     META_SIGNUP = run._META_AUTH_URL                      # https://auth.meta.com/
     META_POST_CHECKPOINT = run._META_POST_URL
 
-    # --- Temp-mail provider (mail.td only) ---
+    # --- Temp-mail providers ---
     MAILTD = "https://mail.td/"
-    MAIL_PROVIDERS = ("mailtd",)
-    # Keep a single explicit choice for callers that still import this symbol.
-    MAIL_PROVIDER_DEFAULT = "mailtd"
+    TEMPMAILFISH = "https://tempmail.fish/"
+    MAIL_PROVIDERS = ("mailtd", "mailfish", "yamin", "mailcf", "guerrilla")
+    # Switched OFF: new accounts never use these (they are kept in the code, just not chosen).
+    # Remove a name from this tuple to turn that provider back on. Reading saved accounts still works.
+    DISABLED_MAIL_PROVIDERS = ("yamin", "mailcf", "guerrilla")
+    MAIL_PROVIDER_DEFAULT = "mailfish"
+    CF_MAIL_DOMAIN = CF_MAIL_DOMAIN
+    CF_MAIL_WORKER = CF_MAIL_WORKER
+    CF_MAIL_ADMIN_TOKEN = CF_MAIL_ADMIN_TOKEN
+    YAMIN_MAIL_API = "https://email.yamin.bd"
+    YAMIN_DOMAINS = ("epicz.xyz",)
     CAPTCHA_MODES = ("extension", "audio")  # chosen first, the other on fallback
 
 

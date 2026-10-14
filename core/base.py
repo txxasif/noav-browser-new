@@ -50,8 +50,21 @@ class MetaBaseMixin:
         self.captcha_mode = (captcha_mode or "extension").lower()
         if self.captcha_mode not in Urls.CAPTCHA_MODES:
             self.captcha_mode = "extension"
-        # mail.td is the only supported mailbox provider.
-        self.mail_provider = "mailtd"
+        # Mailbox provider: yamin, mailtd, mailfish or mailcf
+        norm_mail = str(mail_provider or Urls.MAIL_PROVIDER_DEFAULT).lower()
+        if norm_mail in ("yamin", "yaminbd", "email_yamin", "epicz", "liseller"):
+            self.mail_provider = "yamin"
+        elif norm_mail in ("mailcf", "cloudflare", "cf"):
+            self.mail_provider = "mailcf"
+        elif norm_mail in ("mailfish", "tempmail_fish", "fish"):
+            self.mail_provider = "mailfish"
+        # elif norm_mail in ("guerrilla", "guerrillamail", "gm"):
+        #     self.mail_provider = "guerrilla"
+        else:
+            self.mail_provider = "mailtd"
+        # The provider chosen in the dashboard: every account starts here; a failed inbox falls back to the
+        # next provider for THAT account only (core/mailbox.py open_mail).
+        self._mail_primary = self.mail_provider
         self.insta_secret = None          # 2FA base32 secret (space-stripped)
         self.device_model = None          # pinned phone model (Nova parity; set from record before resume)
         self.device_ua = None             # pinned full UA string
@@ -91,7 +104,10 @@ class MetaBaseMixin:
             self.log('[🧩] Captcha solver: Visual AI (JA YOLOv5 ONNX)')
         super()._launch()
         self.selfie_path = get_random_selfie()
-        if os.path.exists(self.selfie_path):
+        # Only the Meta creation leg uploads a selfie. Pool drains (existing IG accounts)
+        # never reach that checkpoint, so don't log an assignment they will never use.
+        if os.path.exists(self.selfie_path) and not str(getattr(self, "current_mode", "")).startswith(
+                ("pool", "paygo_pool", "fastpay_pool")):
             self.log(f'[🖼️] Verification selfie assigned: {os.path.basename(self.selfie_path)}')
 
     # ------------------------------------------------------------------ #

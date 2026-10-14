@@ -446,18 +446,22 @@ class LifecycleMixin:
         # Persist mail.td tokens so LATER phases (warm submitter contexts with
         # no mailbox tab) can re-open the SAME inbox instead of failing the
         # email OTP fetch. Survives store via the `extra` JSON column.
+        # The session is cached while the tab was open (core/mailbox.py), so it survives a tab closed earlier.
         mail_tokens: dict = {}
         try:
-            mail_page = getattr(self, "mail", None)
-            if mail_page is not None and not mail_page.is_closed():
-                mail_tokens = mail_page.evaluate("""() => {
-                    return {
-                        tempmail_token: localStorage.getItem("tempmail_token") || "",
-                        tempmail_account_id: localStorage.getItem("tempmail_account_id") || "",
-                    };
-                }""") or {}
+            mail_tokens = dict(self._snapshot_mail_session() or {})
         except Exception:
             mail_tokens = {}
+
+        if getattr(self, "mail_provider", "") == "mailcf" and getattr(self, "mail_token", ""):
+            mail_tokens = {"mailcf_token": self.mail_token, "mailcf_email": getattr(self, "email", "") or ""}
+        if getattr(self, "mail_provider", "") == "yamin" and getattr(self, "email", ""):
+            mail_tokens = {"yamin_email": self.email,
+                           "yamin_user": getattr(self, "yamin_user", "") or "",
+                           "yamin_domain": getattr(self, "yamin_domain", "") or ""}
+        # tempmail.fish keeps its own storage, so its address-level identity is saved here.
+        if getattr(self, "mail_provider", "") == "mailfish" and getattr(self, "email", ""):
+            mail_tokens = dict(mail_tokens or {}, mailfish_email=self.email)
 
         # Extract cookies before saving (only for Instagram accounts; Meta Creator does not store cookies)
         cookies_list = []

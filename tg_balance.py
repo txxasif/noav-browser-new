@@ -71,9 +71,9 @@ from tg_tasks import normalize as _norm_btn  # noqa: E402
 # Report all enabled bots (Taskly + PayGo + FastPay). Stable ordering.
 try:
     from tg.registry import enabled_bots
-    BOT_ORDER = tuple(b for b in ("taskly", "paygo", "fastpay") if b in enabled_bots()) or ("taskly", "paygo", "fastpay")
+    BOT_ORDER = tuple(b for b in ("taskly", "paygo") if b in enabled_bots()) or ("taskly", "paygo")
 except Exception:
-    BOT_ORDER = ("taskly", "paygo", "fastpay")
+    BOT_ORDER = ("taskly", "paygo")
 
 
 def _parse_balance_info(text: str) -> dict:
@@ -435,7 +435,6 @@ def check_all(timeout=20.0, workers=DEFAULT_WORKERS, cache_ttl=DEFAULT_CACHE_TTL
     totals = {b: round(tot[b], 4) for b in BOT_ORDER}
     totals["grand"] = round(grand, 4)
     totals["pending"] = {b: round(tot_pending[b], 4) for b in BOT_ORDER}
-    totals["fastpay_pending"] = round(tot_pending.get("fastpay", 0.0), 4)
     out = {"ok": True, "count": len(accounts), "accounts": accounts,
            "totals": totals,
            "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -446,12 +445,38 @@ def check_all(timeout=20.0, workers=DEFAULT_WORKERS, cache_ttl=DEFAULT_CACHE_TTL
     return out
 
 
+def _stream(args):
+    """Read the chosen accounts in parallel and print each result the moment it is ready."""
+    import sys as _sys
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    wanted = {x.strip() for x in (args.ids or "").split(",") if x.strip()}
+    recs = [a for a in _pool_records() if str(a.get("mode") or "").lower() == "mtproto"
+            and (not wanted or str(a.get("id")) in wanted)]
+    cache = {} if args.cache > 0 else None
+    print(json.dumps({"type": "total", "count": len(recs)}), flush=True)
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, min(int(args.workers or 1), len(recs) or 1))) as ex:
+        futs = [ex.submit(_one_account, a, args.timeout, cache, args.cache) for a in recs]
+        for f in as_completed(futs):
+            try:
+                rec = f.result()
+            except Exception as exc:          # never let one account end the stream
+                rec = {"id": "?", "ok": False, "error": str(exc), "bots": [], "total": 0.0}
+            done += 1
+            print(json.dumps({"type": "account", "done": done, "account": rec}), flush=True)
+    print(json.dumps({"type": "done"}), flush=True)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Read Taskly/PayGo/FastPay balances for MTProto account(s)")
     ap.add_argument("--id", help="pool id (e.g. tg_4)")
     ap.add_argument("--all", action="store_true",
                     help="check every MTProto account in the pool")
+    ap.add_argument("--stream", action="store_true",
+                    help="print one JSON line per account as soon as it is read, then a done line")
+    ap.add_argument("--ids", default="", help="comma-separated pool ids (with --stream)")
     ap.add_argument("--json", action="store_true",
                     help="print one JSON line (dashboard)")
     ap.add_argument("--timeout", type=float, default=20.0,
@@ -463,6 +488,8 @@ def main():
                     help="serve a just-fetched balance for N seconds "
                          "(default %.0fs, 0 = always fetch)" % DEFAULT_CACHE_TTL)
     args = ap.parse_args()
+    if args.stream:
+        return _stream(args)
     if not args.id and not args.all:
         ap.error("pass --id <pool id> or --all")
 

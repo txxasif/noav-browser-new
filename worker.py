@@ -359,6 +359,7 @@ class AISlotWorker:
 def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider: str = "mailtd", captcha_mode: str = "extension", mode: str = "meta", new_password: str = "", new_username: str = "", twofa: bool = False) -> tuple[bool, str]:
     """Execute one Meta Account Creation cycle."""
     from runner import MetaInstaRunner
+    from core import vpn_rotate
 
     cycle_started = time.monotonic()
     worker = AISlotWorker(slot_id=slot_id, is_headless=is_headless, password=new_password or None)
@@ -382,6 +383,9 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
         "detail": "Launching anti-detect browser context...",
     })
 
+    # Wait here while a NordVPN swap is queued (no-op unless NORD_ROTATE=1). Must sit
+    # right before the try: finish_cycle() below is what releases this slot.
+    vpn_rotate.enter_cycle(log=print)
     try:
         # Full Meta -> Instagram creation flow (always proceed to Instagram join unless explicitly meta-only)
         meta_only = (mode == "meta-only")
@@ -403,10 +407,12 @@ def run_single_meta_cycle(slot_id: int, is_headless: bool = False, mail_provider
             "name": runner.name,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
+        vpn_rotate.finish_cycle(True)
         return True, rec_id
     except Exception as exc:
         duration_ms = int((time.monotonic() - cycle_started) * 1000)
         worker.emit(f"❌ Cycle failed after {duration_ms / 1000:.1f}s: {exc}")
+        vpn_rotate.finish_cycle(False, f"{type(exc).__name__} {exc}", log=worker.emit)
         if "Connection closed while reading from the driver" in str(exc):
             worker.emit("💡 Browser/driver connection lost — usually RAM pressure or a crashed Chromium. "
                         "The requested Parallel value is preserved; retry or use Headless for lower resource use.")
@@ -875,7 +881,7 @@ def main():
     parser.add_argument("--target", type=int, default=0, help="Target total accounts to create (0 = unlimited)")
     parser.add_argument("--delay", type=int, default=4, help="Delay in seconds between cycles")
     parser.add_argument("--headless", action="store_true", help="Run in headless browser mode")
-    parser.add_argument("--mail", type=str, default="mailtd", choices=("mailtd",), help="Mailbox provider (mail.td only)")
+    parser.add_argument("--mail", type=str, default="mailfish", choices=("mailtd", "mailfish", "mailcf", "yamin"), help="Mailbox provider tried first (mailfish, mailtd, mailcf or yamin; the others are fallbacks; default mailfish)")
     parser.add_argument("--captcha", type=str, default="extension", choices=Urls.CAPTCHA_MODES, help="Captcha solving mode")
     parser.add_argument("--mode", type=str, default="meta", choices=["meta", "meta-ig", "meta-only"], help="Creation mode: Meta account only, or Meta + Instagram join")
     parser.add_argument("--coupled", action="store_true",
@@ -916,6 +922,8 @@ def main():
                              "{bot, task, pool} tried in order across runners.")
     parser.add_argument("--start-stagger-ms", type=int, default=None,
                         help="Stagger initial slot launches in milliseconds (does not reduce Parallel)")
+    parser.add_argument("--nord-rotate", action="store_true",
+                        help="Rotate the NordVPN server on IP blocks (needs Parallel=1)")
 
     args = parser.parse_args()
     # Read by run_cookie_cycle._run_pool_drain_cycle (no signature plumbing).
@@ -928,6 +936,8 @@ def main():
         os.environ["IG_API_MOCK"] = "1"
 
     concurrency = _safe_concurrency(args.concurrency)
+    if args.nord_rotate:
+        os.environ["NORD_ROTATE"] = "1"
     target = max(0, args.target)
     delay = max(1, args.delay)
     headless = args.headless
@@ -988,7 +998,7 @@ def main():
         # TG Classic parity (auto_ai worker._sig_handler): drop warm bot owners
         # and free any lease so a restart is not blocked. Best-effort — a
         # Windows TerminateProcess never reaches this, which is why the coupled
-        # startup below also self-heals with tg_manager.reset_all().
+        # startup below also self-heals with tg_manager.reset_all(skip_live_owners=True).
         try:
             from tg_bot import PooledTelegramBot
             from mtproto_bot import MtprotoPooledBot
@@ -998,7 +1008,7 @@ def main():
             pass
         try:
             from tg_accounts import tg_manager
-            tg_manager.reset_all()
+            tg_manager.reset_all(skip_live_owners=True)
         except Exception:
             pass
 
@@ -1048,7 +1058,7 @@ def main():
     if _loop is coupled_loop:
         try:
             from tg_accounts import tg_manager
-            tg_manager.reset_all()
+            tg_manager.reset_all(skip_live_owners=True)
         except Exception:
             pass
         with _active_slots_lock:
@@ -1100,7 +1110,7 @@ def main():
         if _loop is coupled_loop:
             try:
                 from tg_accounts import tg_manager
-                tg_manager.reset_all()
+                tg_manager.reset_all(skip_live_owners=True)
             except Exception:
                 pass
         # Sweep stale profile dirs on the way out. Pruning otherwise only runs

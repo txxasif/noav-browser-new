@@ -207,10 +207,10 @@ try {
         }
     }
     $config = Get-Content -LiteralPath (Join-Path $root 'ai_config.py') -Raw -Encoding UTF8
-    if ($config -notmatch 'MAIL_PROVIDERS\s*=\s*\("mailtd",\)') {
-        throw 'mail.td-only configuration marker was not found.'
+    if ($config -notmatch 'MAIL_PROVIDERS\s*=\s*\([^)]*"mailtd"') {
+        throw 'mail provider configuration marker was not found.'
     }
-    Write-Step '[OK] Code update applied; mail.td-only runtime verified.'
+    Write-Step '[OK] Code update applied; mail provider configuration verified.'
     Start-Creator
     exit 0
 } catch {

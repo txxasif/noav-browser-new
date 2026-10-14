@@ -47,7 +47,21 @@ class EngineSignupMixin:
                 return False
             return "edit your meta ai details" in t or "name (optional)" in t
 
+        def _raise_if_denied() -> None:
+            # Meta's "Access Denied - not allowed to access this page at this time"
+            # hides the Confirm button; retrying only burns ~40s per slot. IP block.
+            try:
+                t = (p.inner_text("body") or "").lower()
+            except Exception:
+                return
+            if "not allowed to access this page" in t:
+                from core.captcha import MetaCheckpointBlocked
+                raise MetaCheckpointBlocked(
+                    'Meta "Access Denied — not allowed to access this page at this time" '
+                    "(IP blocked).")
+
         for attempt in range(max(1, int(tries or 1))):
+            _raise_if_denied()
             clicked = False
             for sel in ('button:text-is("Confirm")',
                         'div[role="button"]:text-is("Confirm")',
@@ -68,6 +82,7 @@ class EngineSignupMixin:
                          f'(attempt {attempt + 1}/{tries}).')
             end = _t.time() + max(5, int(timeout or 20))
             while _t.time() < end:
+                _raise_if_denied()
                 if not _on_details():
                     self.log('[✅] Meta AI details: Confirm accepted — advanced.')
                     return True
@@ -105,6 +120,60 @@ class EngineSignupMixin:
         if cleaned.islower():
             cleaned = cleaned.title()
         return cleaned
+
+    def _learned_meta_details(self, p) -> bool:
+        """Drive the learned post-email screens by their exact controls.
+
+        'Get started on Meta AI': birthday comboboxes (Month/Day/Year, default is
+        today so the year must be changed) + Password textbox + Next.
+        'Edit your Meta AI details': username is prefilled, Name is optional, Confirm.
+        Returns True when at least one learned screen was handled.
+        """
+        import calendar as _cal
+        from engine import page_state as _ps
+        handled = False
+        for _ in range(8):
+            st = _ps.classify(p)
+            if st == "get_started":
+                self.log('[🎂] Learned screen: "Get started on Meta AI" (birthday + password).')
+                try:
+                    month = self.dob_month
+                    if str(month).isdigit():
+                        month = _cal.month_name[int(month)]
+                    day = str(int(self.dob_day))
+                    year = str(self.dob_year)
+                    for label, value in (("Select Month", month), ("Select Day", day), ("Select Year", year)):
+                        cb = p.get_by_role("combobox", name=label, exact=True).first
+                        if cb.count() and value not in (cb.get_attribute("value") or ""):
+                            cb.click(timeout=4000)
+                            p.get_by_role("option", name=value, exact=True).first.click(timeout=4000)
+                            p.wait_for_timeout(300)
+                    self.log(f'[🎂] DOB set: {month} {day} {year}')
+                    pw = p.get_by_role("textbox", name="Password", exact=True).first
+                    pw.fill(self.password, timeout=4000)
+                    p.wait_for_timeout(300)
+                    nxt = p.get_by_role("button", name="Next", exact=True).first
+                    nxt.click(timeout=6000)
+                    handled = True
+                    p.wait_for_timeout(2000)
+                except Exception as e:
+                    self.log(f'[⚠️] Learned birthday/password screen failed: {e}')
+                    break
+            elif st == "details":
+                break
+            elif st == "edit_details" or (
+                    p.get_by_role("heading", name="Edit your Meta AI details").count() > 0):
+                self.log('[✔] Learned screen: "Edit your Meta AI details" — confirming.')
+                try:
+                    p.get_by_role("button", name="Confirm", exact=True).first.click(timeout=6000)
+                    handled = True
+                    p.wait_for_timeout(2500)
+                except Exception as e:
+                    self.log(f'[⚠️] Confirm failed: {e}')
+                    break
+            else:
+                break
+        return handled
 
     def meta_signup(self):
         p = self.page
@@ -234,6 +303,7 @@ class EngineSignupMixin:
             self.log('[🌐] Selecting "Use mobile number or email"…')
             clicked_email_btn = False
         for _attempt in range(6):
+            self._dismiss_blocking_dialogs(p)
             for sel in [
                 'div[role="button"]:has-text("Use mobile number or email")',
                 'button:has-text("Use mobile number or email")',
@@ -262,6 +332,7 @@ class EngineSignupMixin:
         p.wait_for_timeout(2500)
 
         # Fill email
+        self._dismiss_blocking_dialogs(p)
         filled_email = False
         for field_name in ["Mobile number or email", "Mobile number or email address", "Email", "mobile number"]:
             if self._try_fill(p, field_name, self.email, timeout=6000):
@@ -275,6 +346,12 @@ class EngineSignupMixin:
                     filled_email = True
             except Exception:
                 pass
+        if not filled_email and self._dismiss_blocking_dialogs(p):
+            # a consent modal was covering the field: retry once now that it is gone
+            for field_name in ["Mobile number or email", "Mobile number or email address", "Email", "mobile number"]:
+                if self._try_fill(p, field_name, self.email, timeout=6000):
+                    filled_email = True
+                    break
         if filled_email:
             self.log(f'[📧] Filled Meta email: {self.email}')
         else:
@@ -308,6 +385,7 @@ class EngineSignupMixin:
                 raise RuntimeError(
                     "Meta signup bounced to Instagram (IP throttled / Meta gating) — "
                     "cooldown 5-10 min, lower creators to 1-2, retry")
+            self._dismiss_blocking_dialogs(p)
             try:
                 tail = (p.inner_text("body") or "").lower()
             except Exception:
@@ -332,291 +410,317 @@ class EngineSignupMixin:
                 f"Meta signup stalled after email (page: '{tail}' / {p.url}) — "
                 "likely throttled: cooldown, lower concurrency, retry")
 
-        # Mobile: "What's your name?"
-        if self._try_fill(p, "First name", self.first, timeout=20000):
-            self.log(f'[⌨️] Name: {self.name}')
-            filled_last = False
-            for ln_field in ("Last name", "Surname", "last_name", "lastName"):
-                if self._try_fill(p, ln_field, self.last, timeout=4000):
-                    filled_last = True
-                    break
-            if not filled_last:
-                try:
-                    inputs = p.locator('input[type="text"]').all()
-                    if len(inputs) >= 2:
-                        self._clean_fill(p, inputs[1], self.last)
-                except Exception:
-                    pass
-            self._advance(p, ["Next"], "textbox", "First name")
-            p.wait_for_timeout(2000)
+        # Learned flow (auth.meta.com): 'Get started on Meta AI' = birthday + password
+        # on one screen, then 'Edit your Meta AI details' = Confirm. Driven by the exact
+        # labels seen on the live page; the older per-field path is the fallback.
+        learned = self._learned_meta_details(p)
+        if not learned:
+            # Mobile: "What's your name?"
+            if self._try_fill(p, "First name", self.first, timeout=20000):
+                self.log(f'[⌨️] Name: {self.name}')
+                filled_last = False
+                for ln_field in ("Last name", "Surname", "last_name", "lastName"):
+                    if self._try_fill(p, ln_field, self.last, timeout=4000):
+                        filled_last = True
+                        break
+                if not filled_last:
+                    try:
+                        inputs = p.locator('input[type="text"]').all()
+                        if len(inputs) >= 2:
+                            self._clean_fill(p, inputs[1], self.last)
+                    except Exception:
+                        pass
+                self._advance(p, ["Next"], "textbox", "First name")
+                p.wait_for_timeout(2000)
 
-        # Date of birth
-        if self._try_wait_combo(p, "Select day", timeout=15000):
-            self.log(f'[🎂] DOB: {self.dob_year}-{self.dob_month}-{self.dob_day}')
-            for _attempt in range(3):
-                try:
-                    self._combo(p, "Select day", self.dob_day)
-                    self._combo(p, "Select month", self.dob_month)
-                    self._combo(p, "Select year", self.dob_year)
-                except Exception as exc:
-                    self.log(f'[⚠️] DOB: {exc}')
-                y_text = p.evaluate("""() => {
-                    const el = document.querySelector('div[role="combobox"][aria-label*="year" i]');
-                    return el ? (el.innerText || '') : '';
-                }""")
-                if self.dob_year in y_text or ("2026" not in y_text and len(y_text) > 0):
-                    self.log(f'[🎂] DOB confirmed: {y_text.replace(chr(10), " ")}')
-                    break
-                p.wait_for_timeout(1000)
-            # New "Get started" funnel: password lives on the SAME screen and
-            # Next goes nowhere until it is filled — pre-fill before advancing.
-            self._prefill_getstarted_password(p)
-            self._advance(p, ["Next"], "combobox", "Select day")
-            p.wait_for_timeout(2000)
-
-        # Password (mobile "New password"; desktop "Password";
-        # "Get started" funnel: unlabeled input filled directly)
-        self.log('[🔑] Setting password…')
-        if not self._try_fill(p, "New password", self.password, timeout=20000):
-            if not self._try_fill(p, "Password", self.password, timeout=15000):
+            # Date of birth
+            if self._try_wait_combo(p, "Select day", timeout=15000):
+                self.log(f'[🎂] DOB: {self.dob_year}-{self.dob_month}-{self.dob_day}')
+                for _attempt in range(3):
+                    try:
+                        self._combo(p, "Select day", self.dob_day)
+                        self._combo(p, "Select month", self.dob_month)
+                        self._combo(p, "Select year", self.dob_year)
+                    except Exception as exc:
+                        self.log(f'[⚠️] DOB: {exc}')
+                    y_text = p.evaluate("""() => {
+                        const el = document.querySelector('div[role="combobox"][aria-label*="year" i]');
+                        return el ? (el.innerText || '') : '';
+                    }""")
+                    if self.dob_year in y_text or ("2026" not in y_text and len(y_text) > 0):
+                        self.log(f'[🎂] DOB confirmed: {y_text.replace(chr(10), " ")}')
+                        break
+                    p.wait_for_timeout(1000)
+                # New "Get started" funnel: password lives on the SAME screen and
+                # Next goes nowhere until it is filled — pre-fill before advancing.
                 self._prefill_getstarted_password(p)
-        if not self._advance(p, ["Next", "Continue"], "textbox", "New password"):
-            self._advance(p, ["Next", "Continue"], "textbox", "Password")
-        self.log('[➡️] Password submitted.')
+                self._advance(p, ["Next"], "combobox", "Select day")
+                p.wait_for_timeout(2000)
 
-        # Desktop goes straight from password to "Edit your Meta AI details":
-        # there is no "Save your login info?" and no "Create account" — those
-        # belong to the MOBILE funnel. The old blind 3000 + 3000 + 5000 ms sleeps
-        # meant Confirm sat visible for ~11s before we even looked for it. Poll
-        # for whichever screen actually rendered and return the instant it does.
-        def _next_screen():
-            try:
-                t = (p.inner_text("body") or "").lower()
-            except Exception:
+            # Password (mobile "New password"; desktop "Password";
+            # "Get started" funnel: unlabeled input filled directly)
+            self.log('[🔑] Setting password…')
+            if not self._try_fill(p, "New password", self.password, timeout=20000):
+                if not self._try_fill(p, "Password", self.password, timeout=15000):
+                    self._prefill_getstarted_password(p)
+            if not self._advance(p, ["Next", "Continue"], "textbox", "New password"):
+                self._advance(p, ["Next", "Continue"], "textbox", "Password")
+            self.log('[➡️] Password submitted.')
+
+            # Desktop goes straight from password to "Edit your Meta AI details":
+            # there is no "Save your login info?" and no "Create account" — those
+            # belong to the MOBILE funnel. The old blind 3000 + 3000 + 5000 ms sleeps
+            # meant Confirm sat visible for ~11s before we even looked for it. Poll
+            # for whichever screen actually rendered and return the instant it does.
+            def _next_screen():
+                try:
+                    t = (p.inner_text("body") or "").lower()
+                except Exception:
+                    return None
+                if "edit your meta ai details" in t or "name (optional)" in t:
+                    return "details"
+                if ("save your login info" in t or "save login info" in t
+                        or "finish creating your meta account" in t):
+                    return "mobile"
                 return None
-            if "edit your meta ai details" in t or "name (optional)" in t:
-                return "details"
-            if ("save your login info" in t or "save login info" in t
-                    or "finish creating your meta account" in t):
-                return "mobile"
-            return None
 
-        def _on_details() -> bool:
-            return _next_screen() == "details"
+            def _on_details() -> bool:
+                return _next_screen() == "details"
 
-        screen = None
-        for _ in range(40):  # up to ~10s, but returns the moment a screen shows
-            screen = _next_screen()
-            if screen:
-                break
-            p.wait_for_timeout(250)
-
-        if screen != "details":
-            # Mobile: "Save your login info?"
-            if not self._try_click(p, "Not now", timeout=6000):
-                self._try_click(p, "Save", timeout=4000)
-            p.wait_for_timeout(1000)
-
-            # Mobile: "Finish creating your Meta account"
-            self._try_click(p, "Create account", timeout=8000)
-            # Poll for the details screen rather than a blind 5s sleep (mobile
-            # also passes through it on some variants).
-            for _ in range(40):
-                if _on_details():
+            screen = None
+            for _ in range(40):  # up to ~10s, but returns the moment a screen shows
+                screen = _next_screen()
+                if screen:
                     break
                 p.wait_for_timeout(250)
 
-        # Desktop-only: Meta AI username/name screen ("Edit your Meta AI details")
-        has_details = False
-        name_input = None
-        for sel in (
-            'input[aria-label*="Name (optional)" i]',
-            'input[placeholder*="Name (optional)" i]',
-            'input[name*="name" i]',
-        ):
-            try:
-                inp = p.locator(sel).first
-                if inp.count() > 0 and inp.is_visible():
-                    name_input = inp
+            if screen != "details":
+                # Mobile: "Save your login info?"
+                if not self._try_click(p, "Not now", timeout=6000):
+                    self._try_click(p, "Save", timeout=4000)
+                p.wait_for_timeout(1000)
+
+                # Mobile: "Finish creating your Meta account"
+                self._try_click(p, "Create account", timeout=8000)
+                # Poll for the details screen rather than a blind 5s sleep (mobile
+                # also passes through it on some variants).
+                for _ in range(40):
+                    if _on_details():
+                        break
+                    p.wait_for_timeout(250)
+
+            # Desktop-only: Meta AI username/name screen ("Edit your Meta AI details")
+            has_details = False
+            name_input = None
+            for sel in (
+                'input[aria-label*="Name (optional)" i]',
+                'input[placeholder*="Name (optional)" i]',
+                'input[name*="name" i]',
+            ):
+                try:
+                    inp = p.locator(sel).first
+                    if inp.count() > 0 and inp.is_visible():
+                        name_input = inp
+                        has_details = True
+                        break
+                except Exception:
+                    pass
+            if not has_details:
+                name_input = self._visible(p, "textbox", "Name (optional)") or self._visible(p, "textbox", "Name")
+                if name_input is not None:
                     has_details = True
-                    break
-            except Exception:
-                pass
-        if not has_details:
-            name_input = self._visible(p, "textbox", "Name (optional)") or self._visible(p, "textbox", "Name")
-            if name_input is not None:
-                has_details = True
 
-        if has_details:
-            # Name is optional: ALWAYS leave it blank and just Confirm. Filling
-            # it buys nothing (IG takes the bot's name later) and triggers
-            # "Display Name Has Invalid Characters" rejections + slow retries.
-            self.log('[⌨️] Meta AI details: leaving optional Name blank, continuing…')
-            try:
-                cur = name_input.input_value()
-            except Exception:
-                cur = ""
-            if cur:
+            if has_details:
+                # Name is optional: ALWAYS leave it blank and just Confirm. Filling
+                # it buys nothing (IG takes the bot's name later) and triggers
+                # "Display Name Has Invalid Characters" rejections + slow retries.
+                self.log('[⌨️] Meta AI details: leaving optional Name blank, continuing…')
                 try:
-                    # fill("") clears the field natively — no Control+A.
-                    name_input.fill("")
+                    cur = name_input.input_value()
                 except Exception:
-                    pass
-
-            # Avatar upload. Probe first: some details variants carry no
-            # photo picker, and expect_file_chooser would burn 10s waiting.
-            # Timeouts kept SHORT: the avatar is optional but Confirm is the step
-            # that creates the account, so the picker must never stall it.
-            try:
-                _probe = p.locator('input[type="file"], button[aria-label*="photo" i], button[aria-label*="avatar" i], button[aria-label*="camera" i], button[aria-label*="profile picture" i]').first
-                _has_picker = _probe.count() > 0 and _probe.is_visible()
-            except Exception:
-                _has_picker = False
-            if _has_picker:
-                try:
-                    _sp = getattr(self, "selfie_path", None)
-                    if _sp and os.path.exists(_sp):
-                        with p.expect_file_chooser(timeout=3000) as _fc:
-                            if not (
-                                self._try_click(p, "Add profile photo", timeout=1500)
-                                or self._try_click(p, "Add a profile photo", timeout=1000)
-                                or self._try_click(p, "Edit", timeout=1000)
-                            ):
-                                try:
-                                    if _probe.count() > 0 and _probe.is_visible():
-                                        _probe.click(force=True, timeout=1500)
-                                except Exception:
-                                    pass
-                        _fc.value.set_files(_sp)
-                        p.wait_for_timeout(1200)
-                        self.log('[🖼️] Details avatar uploaded.')
-                except Exception as _exc:  # noqa: BLE001
-                    self.log(f'[⚠️] Details avatar skipped: {_exc}')
-
-            # This Confirm is the step that actually CREATES the account
-            # ("By tapping Confirm, you'll create a Meta account"). The old
-            # single _try_click + blind 2500ms left desktop slots parked on
-            # this screen. Click the exact label, then POLL until the screen
-            # advances, retrying.
-            self._confirm_meta_details(p)
-
-            # Detect and dynamically resolve errors on Meta AI details screen ("Display Name Has Invalid Characters" / Username)
-            for check_attempt in range(4):
-                body_tail = ""
-                try:
-                    body_tail = (p.inner_text("body") or "").lower()
-                except Exception:
-                    pass
-
-                has_name_err = (
-                    "display name has invalid characters" in body_tail
-                    or "invalid characters" in body_tail
-                )
-                has_uname_err = (
-                    "username" in body_tail
-                    and ("not available" in body_tail or "invalid" in body_tail or "already taken" in body_tail)
-                )
-
-                if has_name_err:
-                    self.log(f'[⚠️] Meta AI details: "Display Name Has Invalid Characters" detected (attempt {check_attempt + 1}/4) — clearing optional name field…')
+                    cur = ""
+                if cur:
                     try:
-                        p.evaluate("""() => {
-                            const err = Array.from(document.querySelectorAll('*')).find(el => 
-                                (el.innerText || '').toLowerCase().includes('display name has invalid characters')
-                            );
-                            if (err) {
-                                const parent = err.closest('div, form, label') || err.parentElement;
-                                const inps = parent ? Array.from(parent.querySelectorAll('input')) : [];
-                                for (const inp of inps) {
-                                    inp.value = '';
-                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('blur', { bubbles: true }));
-                                }
-                            }
-                            for (const inp of document.querySelectorAll('input')) {
-                                const l = (inp.getAttribute('aria-label') || inp.placeholder || inp.name || '').toLowerCase();
-                                if (l.includes('name') && !l.includes('user')) {
-                                    inp.value = '';
-                                    inp.dispatchEvent(new Event('input', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('change', { bubbles: true }));
-                                    inp.dispatchEvent(new Event('blur', { bubbles: true }));
-                                }
-                            }
-                        }""")
+                        # fill("") clears the field natively — no Control+A.
+                        name_input.fill("")
                     except Exception:
                         pass
 
+                # Avatar upload. Probe first: some details variants carry no
+                # photo picker, and expect_file_chooser would burn 10s waiting.
+                # Timeouts kept SHORT: the avatar is optional but Confirm is the step
+                # that creates the account, so the picker must never stall it.
+                try:
+                    _probe = p.locator('input[type="file"], button[aria-label*="photo" i], button[aria-label*="avatar" i], button[aria-label*="camera" i], button[aria-label*="profile picture" i]').first
+                    _has_picker = _probe.count() > 0 and _probe.is_visible()
+                except Exception:
+                    _has_picker = False
+                if _has_picker:
                     try:
-                        curr_name_inp = (
-                            p.locator('input[aria-label*="Name" i], input[placeholder*="Name" i], input[name*="name" i]').first
-                            if p.locator('input[aria-label*="Name" i], input[placeholder*="Name" i], input[name*="name" i]').count() > 0
-                            else name_input
-                        )
-                        if curr_name_inp:
-                            # fill("") clears natively — no Control+A.
-                            curr_name_inp.fill("")
-                            self.name = ""
+                        _sp = getattr(self, "selfie_path", None)
+                        if _sp and os.path.exists(_sp):
+                            with p.expect_file_chooser(timeout=3000) as _fc:
+                                if not (
+                                    self._try_click(p, "Add profile photo", timeout=1500)
+                                    or self._try_click(p, "Add a profile photo", timeout=1000)
+                                    or self._try_click(p, "Edit", timeout=1000)
+                                ):
+                                    try:
+                                        if _probe.count() > 0 and _probe.is_visible():
+                                            _probe.click(force=True, timeout=1500)
+                                    except Exception:
+                                        pass
+                            _fc.value.set_files(_sp)
+                            p.wait_for_timeout(1200)
+                            self.log('[🖼️] Details avatar uploaded.')
+                    except Exception as _exc:  # noqa: BLE001
+                        self.log(f'[⚠️] Details avatar skipped: {_exc}')
+
+                # This Confirm is the step that actually CREATES the account
+                # ("By tapping Confirm, you'll create a Meta account"). The old
+                # single _try_click + blind 2500ms left desktop slots parked on
+                # this screen. Click the exact label, then POLL until the screen
+                # advances, retrying.
+                self._confirm_meta_details(p)
+
+                # Detect and dynamically resolve errors on Meta AI details screen ("Display Name Has Invalid Characters" / Username)
+                for check_attempt in range(4):
+                    body_tail = ""
+                    try:
+                        body_tail = (p.inner_text("body") or "").lower()
                     except Exception:
                         pass
 
-                    p.wait_for_timeout(1000)
-                    self._try_click(p, "Confirm", timeout=6000)
-                    p.wait_for_timeout(2500)
+                    has_name_err = (
+                        "display name has invalid characters" in body_tail
+                        or "invalid characters" in body_tail
+                    )
+                    has_uname_err = (
+                        "username" in body_tail
+                        and ("not available" in body_tail or "invalid" in body_tail or "already taken" in body_tail)
+                    )
 
-                    # If clearing name still doesn't resolve after 2 attempts, cancel task and swap
-                    if check_attempt >= 2:
+                    if has_name_err:
+                        self.log(f'[⚠️] Meta AI details: "Display Name Has Invalid Characters" detected (attempt {check_attempt + 1}/4) — clearing optional name field…')
+                        try:
+                            p.evaluate("""() => {
+                                const err = Array.from(document.querySelectorAll('*')).find(el => 
+                                    (el.innerText || '').toLowerCase().includes('display name has invalid characters')
+                                );
+                                if (err) {
+                                    const parent = err.closest('div, form, label') || err.parentElement;
+                                    const inps = parent ? Array.from(parent.querySelectorAll('input')) : [];
+                                    for (const inp of inps) {
+                                        inp.value = '';
+                                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                                    }
+                                }
+                                for (const inp of document.querySelectorAll('input')) {
+                                    const l = (inp.getAttribute('aria-label') || inp.placeholder || inp.name || '').toLowerCase();
+                                    if (l.includes('name') && !l.includes('user')) {
+                                        inp.value = '';
+                                        inp.dispatchEvent(new Event('input', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('change', { bubbles: true }));
+                                        inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                                    }
+                                }
+                            }""")
+                        except Exception:
+                            pass
+
+                        try:
+                            curr_name_inp = (
+                                p.locator('input[aria-label*="Name" i], input[placeholder*="Name" i], input[name*="name" i]').first
+                                if p.locator('input[aria-label*="Name" i], input[placeholder*="Name" i], input[name*="name" i]').count() > 0
+                                else name_input
+                            )
+                            if curr_name_inp:
+                                # fill("") clears natively — no Control+A.
+                                curr_name_inp.fill("")
+                                self.name = ""
+                        except Exception:
+                            pass
+
+                        p.wait_for_timeout(1000)
+                        self._try_click(p, "Confirm", timeout=6000)
+                        p.wait_for_timeout(2500)
+
+                        # If clearing name still doesn't resolve after 2 attempts, cancel task and swap
+                        if check_attempt >= 2:
+                            swap_hook = getattr(self, "_on_credentials_rejected", None) or getattr(self, "_on_username_taken", None)
+                            if callable(swap_hook):
+                                cur_uname = getattr(self, "username", "") or getattr(self, "new_username", "")
+                                self.log('[⚠️] Meta AI details name error persistent — canceling task and getting fresh credentials…')
+                                replacement = swap_hook("meta_display_name_rejected", cur_uname)
+                                if replacement:
+                                    self.name = getattr(self, "name", "")
+                                    p.wait_for_timeout(1000)
+                                    self._try_click(p, "Confirm", timeout=6000)
+                                    p.wait_for_timeout(2500)
+                        continue
+
+                    if has_uname_err:
+                        self.log('[⚠️] Meta AI details: Username rejected on screen — requesting swap…')
                         swap_hook = getattr(self, "_on_credentials_rejected", None) or getattr(self, "_on_username_taken", None)
                         if callable(swap_hook):
                             cur_uname = getattr(self, "username", "") or getattr(self, "new_username", "")
-                            self.log('[⚠️] Meta AI details name error persistent — canceling task and getting fresh credentials…')
-                            replacement = swap_hook("meta_display_name_rejected", cur_uname)
+                            replacement = swap_hook("meta_username_rejected", cur_uname)
                             if replacement:
-                                self.name = getattr(self, "name", "")
-                                p.wait_for_timeout(1000)
-                                self._try_click(p, "Confirm", timeout=6000)
-                                p.wait_for_timeout(2500)
-                    continue
-
-                if has_uname_err:
-                    self.log('[⚠️] Meta AI details: Username rejected on screen — requesting swap…')
-                    swap_hook = getattr(self, "_on_credentials_rejected", None) or getattr(self, "_on_username_taken", None)
-                    if callable(swap_hook):
-                        cur_uname = getattr(self, "username", "") or getattr(self, "new_username", "")
-                        replacement = swap_hook("meta_username_rejected", cur_uname)
-                        if replacement:
-                            try:
-                                uname_inp = p.locator('input[aria-label*="Username" i], input[placeholder*="Username" i]').first
-                                if uname_inp.is_visible():
-                                    self._clean_fill(p, uname_inp, replacement)
-                                    self._try_click(p, "Confirm", timeout=6000)
-                                    p.wait_for_timeout(2500)
-                                    continue
-                            except Exception:
-                                pass
-                    break
-
-                # If Confirm or details title is still visible, retry click
-                try:
-                    conf_btn = p.locator('button:has-text("Confirm"), div[role="button"]:has-text("Confirm")').first
-                    if conf_btn.count() > 0 and conf_btn.is_visible():
-                        self._tap_or_click(p, conf_btn, timeout=2000)
-                        p.wait_for_timeout(2000)
-                    else:
+                                try:
+                                    uname_inp = p.locator('input[aria-label*="Username" i], input[placeholder*="Username" i]').first
+                                    if uname_inp.is_visible():
+                                        self._clean_fill(p, uname_inp, replacement)
+                                        self._try_click(p, "Confirm", timeout=6000)
+                                        p.wait_for_timeout(2500)
+                                        continue
+                                except Exception:
+                                    pass
                         break
-                except Exception:
-                    break
+
+                    # If Confirm or details title is still visible, retry click
+                    try:
+                        conf_btn = p.locator('button:has-text("Confirm"), div[role="button"]:has-text("Confirm")').first
+                        if conf_btn.count() > 0 and conf_btn.is_visible():
+                            self._tap_or_click(p, conf_btn, timeout=2000)
+                            p.wait_for_timeout(2000)
+                        else:
+                            break
+                    except Exception:
+                        break
 
         # Confirmation code
         self.log('[📨] Waiting for the email code screen…')
         cb = None
-        deadline = time.time() + 60
+        # A healthy run shows the code box within seconds of Confirm; 30s is ample.
+        deadline = time.time() + int(os.environ.get("META_CODE_SCREEN_WAIT_S", "30") or 30)
         _last_beat = 0.0
         while time.time() < deadline and self.w.is_running:
             cb = (self._visible(p, "textbox", "Confirmation code")
                   or self._visible(p, "textbox", "Code"))
             if cb is not None:
                 break
+            # Meta's "Access Denied - you are not allowed to access this page at this
+            # time" is an IP block: waiting 60s+ never clears it. Fail now so the
+            # VPN swap is requested immediately instead of ~250s later.
+            try:
+                _tail = (self._page_tail(p, 300) or "").lower()
+            except Exception:
+                _tail = ""
+            try:
+                from core import vpn_rotate as _vr
+                if _vr.swap_pending():
+                    raise RuntimeError("Meta confirmation code screen not found (VPN swap queued)")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+            if "not allowed to access this page" in _tail:
+                from core.captcha import MetaCheckpointBlocked
+                raise MetaCheckpointBlocked(
+                    'Meta "Access Denied — not allowed to access this page at this time" '
+                    "(IP blocked).")
             # Heartbeat: log the live screen every ~10s so a slow/odd Meta
             # screen is VISIBLE in the log (and the run is not mistaken for a
             # hang). This is where signup stalled with no output before.
@@ -629,7 +733,7 @@ class EngineSignupMixin:
             p.wait_for_timeout(2000)
         if cb is None:
             raise RuntimeError("Meta confirmation code screen not found")
-        code = self.fetch_code("meta", timeout=240)
+        code = self.fetch_code("meta", timeout=int(os.environ.get("META_OTP_WAIT_S", "90") or 90))
         if not code:
             raise RuntimeError("Meta confirmation code not received")
         try:

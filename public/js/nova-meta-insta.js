@@ -42,8 +42,44 @@ const MI_WORKSPACE_DEFS = {
   },
 };
 
+// tempmail.fish inbox type (API = Premium developer API, Web = free browser inbox) and the API alias
+// style (random characters or a name-like address). Both are saved on the server.
+(function miMailModeSwitch() {
+  var state = { mode: 'api', alias: 'random' };
+  function paint() {
+    document.querySelectorAll('[data-role="mail-mode"]').forEach(function (s) { if (s.value !== state.mode) s.value = state.mode; });
+    document.querySelectorAll('[data-role="mail-alias"]').forEach(function (s) {
+      if (s.value !== state.alias) s.value = state.alias;
+      s.disabled = state.mode === 'web';      // the alias style only applies to API inboxes
+    });
+  }
+  function load(j) {
+    state.mode = j.mode === 'web' ? 'web' : 'api';
+    state.alias = j.alias === 'name' ? 'name' : 'random';
+    paint();
+  }
+  fetch('/api/meta-insta/mail-mode').then(function (r) { return r.json(); }).then(load).catch(function () {});
+  document.addEventListener('change', function (ev) {
+    var t = ev.target;
+    var role = t && t.getAttribute && t.getAttribute('data-role');
+    if (role !== 'mail-mode' && role !== 'mail-alias') return;
+    var body = {};
+    if (role === 'mail-mode') { state.mode = t.value === 'web' ? 'web' : 'api'; body.mode = state.mode; }
+    else { state.alias = t.value === 'name' ? 'name' : 'random'; body.alias = state.alias; }
+    paint();
+    fetch('/api/meta-insta/mail-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body) }).catch(function () {});
+  });
+  // Panels are rendered later: keep the new selects on the saved value.
+  new MutationObserver(paint).observe(document.body, { childList: true, subtree: true });
+})();
+
 const MI_MAIL_PROVIDERS = [
-  { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td', hint: '(only provider)' },
+  { value: 'yamin', icon: 'fa-solid fa-bolt', color: '#f59e0b', label: 'Yamin.bd (@epicz.xyz — APK)', hint: 'Fastest / Direct API', disabled: true },
+  { value: 'mailcf', icon: 'fa-solid fa-envelope', color: 'var(--accent-green)', label: 'Cloudflare Catch-All (@lumencreative.site)', hint: 'Catch-All', disabled: true },
+  { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td' },
+  { value: 'mailfish', icon: 'fa-solid fa-fish', color: '#38bdf8', label: 'tempmail.fish', hint: '(Clean domains)' },
+  // DISABLED (no longer offered): { value: 'guerrilla', icon: 'fa-solid fa-mask', color: '#a78bfa', label: 'Guerrilla Mail', hint: 'API, no browser tab' },
 ];
 
 const MI_ALL_COLS = ['id', 'uname', 'name', 'email', 'password', 'cookies', 'health', 'created', 'actions'];
@@ -73,7 +109,11 @@ function miHealthBadge(a) {
   if (status === 'MetaCreated') {
     return '<span class="badge-pill bg-muted" title="Meta-only (no Instagram joined)">Meta</span>';
   }
-  return '<span class="badge-pill bg-emerald" title="Healthy">OK</span>';
+  const f = parseInt((a && a.followed) || 0, 10) || 0;
+  const five = f >= 5
+    ? ' <span class="badge-pill" style="background: rgba(244,114,182,.15); color: #f472b6;" title="Already followed 5 profiles — the Taskly cookie task takes these first">5 follows</span>'
+    : '';
+  return '<span class="badge-pill bg-emerald" title="Healthy">OK</span>' + five;
 }
 
 // Minimal CSV parser (quoted commas + escaped quotes) for the import preview.
@@ -127,9 +167,9 @@ function miRowIsDamaged(header, row) {
 // =============================================================================
 
 function miMailOptionsHtml(kind) {
-  return MI_MAIL_PROVIDERS.map((m, i) => `
+  return MI_MAIL_PROVIDERS.filter((m) => !m.disabled).map((m, i) => `
     <label class="creator-option">
-      <input type="radio" name="mi-mail-${kind}" value="${m.value}" ${i === 0 ? 'checked' : ''}>
+      <input type="radio" name="mi-mail-${kind}" value="${m.value}" ${m.value === 'mailfish' ? 'checked' : ''}>
       <i class="${m.icon}" style="color: ${m.color};"></i> ${m.label}${m.hint ? ` <span class="creator-option-hint">${m.hint}</span>` : ''}
     </label>`).join('');
 }
@@ -179,6 +219,11 @@ function miCreatorPanelHtml(def) {
       <span class="insta-stat-value" style="color: var(--accent-cyan);" data-role="stat-created">0</span>
       <span class="insta-stat-sub">${def.savedSub}</span>
     </div>
+    ${k === 'ig' ? `<div class="insta-stat-card" title="Healthy accounts that already followed 5 profiles — the Taskly cookie task takes these first">
+      <span class="insta-stat-label" style="color: #f472b6;">With 5 follows</span>
+      <span class="insta-stat-value" style="color: #f472b6;" data-role="stat-follow5">0</span>
+      <span class="insta-stat-sub" data-role="stat-follow5-sub">ready for the cookie task</span>
+    </div>` : ''}
   </div>
 
   <div class="card-panel creator-panel">
@@ -198,11 +243,18 @@ function miCreatorPanelHtml(def) {
           <span class="slider"></span>
         </label>
       </div>
+      <div class="creator-field creator-field--switch" data-role="nord-rotate-field">
+        <label>NordVPN rotate</label>
+        <label class="switch" title="Switch to another NordVPN server (Canada / USA / Singapore) when Meta blocks the IP or the same failure repeats. Needs Parallel = 1; the VPN is system-wide so it cannot rotate per slot.">
+          <input type="checkbox" data-role="nord-rotate">
+          <span class="slider"></span>
+        </label>
+      </div>
       ${k === 'ig' ? `
       <div class="creator-field creator-field--switch">
         <label>Follow (5)</label>
         <label class="switch" title="Follow 5 suggested profiles after creating the account (required by the PayGo cookie task). The count is saved on the account, so the PayGo cookie pool drain skips its own follow step for accounts that already followed 5. Off = the follow step is skipped entirely. On: an account that follows fewer than 5 is NOT added to the IG list (the slot logs “Follow incomplete”).">
-          <input type="checkbox" data-role="follow" checked>
+          <input type="checkbox" data-role="follow">
           <span class="slider"></span>
         </label>
       </div>
@@ -212,6 +264,13 @@ function miCreatorPanelHtml(def) {
           <option value="ui" selected>Web (Browser UI)</option>
           <option value="api">Private API</option>
           <option value="multi">Multi-Insta Engine</option>
+        </select>
+      </div>
+      <div class="creator-field">
+        <label>Meta Method</label>
+        <select class="form-control" data-role="meta-flow" title="Old way = the tested Meta creation flow (default). New way (experimental) = 1:1 PC tool post-OTP state machine (auth.meta.com, account chooser, avatar upload, interactive checks); if not conclusive normal checks still run.">
+          <option value="old" selected>Old way (tested)</option>
+          <option value="new">New way (experimental)</option>
         </select>
       </div>
       <div class="creator-field creator-field--switch">
@@ -245,7 +304,18 @@ function miCreatorPanelHtml(def) {
       <div class="creator-service">
         <div class="creator-service-title"><i class="fa-solid fa-envelope" style="color: var(--accent-cyan);"></i> Mail Inbox</div>
         <div class="creator-options">${miMailOptionsHtml(k)}</div>
-        <div class="creator-service-note">mail.td is the only enabled mailbox provider.</div>
+        <div class="creator-service-note">tempmail.fish inbox type:
+          <select class="form-control" data-role="mail-mode" style="display:inline-block;width:auto;margin-left:6px;">
+            <option value="api">API (Premium, new inboxes on premium domains)</option>
+            <option value="web">Web (free browser inbox)</option>
+          </select>
+        </div>
+        <div class="creator-service-note">Address style (API inboxes):
+          <select class="form-control" data-role="mail-alias" style="display:inline-block;width:auto;margin-left:6px;">
+            <option value="random">Random (e.g. 5uln0arvbkq@…)</option>
+            <option value="name">Name-like (e.g. emmasmith482@…)</option>
+          </select>
+        </div>
       </div>
 
       <div class="creator-service">
@@ -626,12 +696,23 @@ function createLogStream(logEl, autoScrollEl) {
 
 function createCreatorWorkspace(root, def, state, shared) {
   const q = (role) => root.querySelector(`[data-role="${role}"]`);
+  // Windows build ships build_mode.json with nord_rotate:false -> hide the switch.
+  fetch('/api/build-mode').then(r => r.json()).then(m => {
+    if (m && m.nord_rotate === false) {
+      const f = q('nord-rotate-field');
+      if (f) f.style.display = 'none';
+      if (els.nordRotate) els.nordRotate.checked = false;
+    }
+  }).catch(() => {});
+
   const els = {
     conc: q('concurrency'),
     target: q('target'),
     headless: q('headless'),
+    nordRotate: q('nord-rotate'),
     follow: q('follow'),
     followMode: q('follow-mode'),
+    metaFlow: q('meta-flow'),
     followApi: q('follow-api'),
     apiBio: q('api-bio'),
     apiAvatar: q('api-avatar'),
@@ -648,6 +729,8 @@ function createCreatorWorkspace(root, def, state, shared) {
     statTotal: q('stat-total'),
     statRunning: q('stat-running'),
     statCreated: q('stat-created'),
+    statFollow5: q('stat-follow5'),
+    statFollow5Sub: q('stat-follow5-sub'),
     state: q('state'),
     progressBox: q('progress-box'),
     progressBar: q('progress-bar'),
@@ -713,6 +796,13 @@ function createCreatorWorkspace(root, def, state, shared) {
     const mine = myAccounts();
     if (els.statTotal) els.statTotal.textContent = String(mine.length);
     if (els.statCreated) els.statCreated.textContent = String(mine.length);
+    if (els.statFollow5) {
+      const healthy = mine.filter((a) => !miIsDamaged(a));
+      const f5 = healthy.filter((a) => (parseInt(a.followed, 10) || 0) >= 5).length;
+      const need = healthy.filter((a) => (parseInt(a.followed, 10) || 0) < 5 && String(a.status || '').indexOf('Submitting') !== 0).length;
+      els.statFollow5.textContent = String(f5);
+      if (els.statFollow5Sub) els.statFollow5Sub.textContent = `${need} still need follows · ${mine.length - healthy.length} damaged`;
+    }
     if (els.badgeAll) els.badgeAll.textContent = String(mine.length);
 
     // Sidebar badges
@@ -1003,6 +1093,7 @@ function createCreatorWorkspace(root, def, state, shared) {
         target: parseInt(els.target.value, 10) || 0,
         delay: 4,
         headless: Boolean(els.headless && els.headless.checked),
+        nord_rotate: Boolean(els.nordRotate && els.nordRotate.checked),
         twofa: false,
         // Follow step toggle (IG workspace only). Absent element -> keep the
         // default (enabled) so Meta-only workspaces are unaffected.
@@ -1010,6 +1101,7 @@ function createCreatorWorkspace(root, def, state, shared) {
         api_bio: Boolean(els.apiBio && els.apiBio.checked),
         api_avatar: Boolean(els.apiAvatar && els.apiAvatar.checked),
         api_post: Boolean(els.apiPost && els.apiPost.checked),
+        meta_flow: (els.metaFlow && els.metaFlow.value) || 'old',
         follow_mode: (els.followMode && els.followMode.value) || ((els.followApi && els.followApi.checked) ? 'api' : 'ui'),
         new_username: (els.username.value || '').trim() || undefined,
         mail_provider: (mailRadio && mailRadio.value) || 'mailtd',
@@ -1367,33 +1459,74 @@ function createCreatorWorkspace(root, def, state, shared) {
       if (!go) return;
       checking = true;
       els.btnCheckHealth.disabled = true;
+      // Progress shown right under the toolbar (the log alone was easy to miss).
+      let prog = document.getElementById('mi-health-progress');
+      if (!prog) {
+        prog = document.createElement('div');
+        prog.id = 'mi-health-progress';
+        prog.style.cssText = 'margin:.75rem 0;padding:.75rem 1rem;border:1px solid var(--border-color);border-radius:10px;background:var(--bg-card);';
+        const grid = els.btnCheckHealth.closest('.page-title-box');
+        (grid && grid.parentNode ? grid.parentNode : document.body).insertBefore(prog, grid ? grid.nextSibling : null);
+      }
+      const paint = (n, total, deadN, note) => {
+        const pct = total ? Math.round((n / total) * 100) : 0;
+        prog.style.display = 'block';
+        prog.innerHTML = `<div style="display:flex;justify-content:space-between;font-size:.82rem;margin-bottom:.4rem;">
+          <span><i class="fa-solid fa-heart-pulse" style="color:#f472b6;"></i> ${note || 'Checking accounts…'}</span>
+          <span style="font-family:var(--font-mono);">${n}/${total} · ${deadN} dead · ${pct}%</span></div>
+          <div style="height:6px;border-radius:99px;background:rgba(148,163,184,.18);overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:linear-gradient(90deg,#f472b6,#a78bfa);transition:width .3s;"></div></div>`;
+      };
+      paint(0, names.length, 0, 'Starting the check…');
+      showToast(`Checking ${names.length} account(s)…`, 'info');
       const dead = [];
       let blocked = 0, errors = 0, done = 0;
       try {
-        for (let i = 0; i < names.length; i += 50) {
-          const batch = names.slice(i, i + 50);
-          let r = null;
+        // Live per-account stream (same feed the IG Checker page uses): the bar moves with every account
+        // instead of waiting for a whole batch of 50 to come back.
+        for (let i = 0; i < names.length; i += 100) {
+          const batch = names.slice(i, i + 100);
+          let got = 0;
           try {
-            r = await (await fetch('/api/ig-check', {
+            const resp = await fetch('/api/ig-check-stream', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ usernames: batch, delay_ms: 600 }),
-            })).json();
-          } catch (e) { errors += batch.length; continue; }
-          if (!r || r.status !== 'SUCCESS' || !Array.isArray(r.results)) { errors += batch.length; continue; }
-          for (const res of r.results) {
-            if (res.status === 'not_found') dead.push(res.username);
-            else if (res.status === 'blocked') blocked++;
-            else if (res.status !== 'active') errors++;
-          }
-          done += batch.length;
-          logger.append(`[health] Checked ${done}/${names.length}… ${dead.length} dead so far.`);
+              body: JSON.stringify({ usernames: batch, delay_ms: 600, workers: 6 }),
+            });
+            if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buf = '';
+            for (;;) {
+              const { done: end, value } = await reader.read();
+              if (end) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split('\n');
+              buf = lines.pop();
+              for (const line of lines) {
+                if (!line.trim()) continue;
+                let msg = null;
+                try { msg = JSON.parse(line); } catch (e) { continue; }
+                if (msg.type !== 'result' || !msg.result) continue;
+                got++;
+                done++;
+                const res = msg.result;
+                if (res.status === 'not_found') dead.push(res.username);
+                else if (res.status === 'blocked') blocked++;
+                else if (res.status !== 'active') errors++;
+                paint(done, names.length, dead.length, `Checking @${res.username}`);
+              }
+            }
+          } catch (e) { /* the rest of this chunk counts as errors below */ }
+          if (got < batch.length) { errors += batch.length - got; done += batch.length - got; }
+          paint(done, names.length, dead.length);
         }
       } finally {
         checking = false;
         els.btnCheckHealth.disabled = false;
       }
       logger.append(`[health] Done: ${done} checked, ${dead.length} dead, ${blocked} rate-limited, ${errors} errors.`);
+      paint(done, names.length, dead.length, `Done — ${blocked} rate-limited, ${errors} errors`);
       if (blocked && !dead.length && !errors) {
         showToast('Instagram rate-limited the check — wait a few minutes and retry.', 'error');
         return;
@@ -1585,14 +1718,15 @@ function createCreatorWorkspace(root, def, state, shared) {
 
   shared.subscribe(schedulePaint);
 
+  // On activation: paint what we have, then fetch fresh data and paint again when it lands.
+  // (Painting only before the fetch left the list showing the old snapshot until a reload.)
   function handleActivation() {
-    if (isVisible()) {
-      updateStats();
-      renderResults();
-      shared.refreshShared();
-    } else {
-      dirty = true;
-    }
+    if (!isVisible()) { dirty = true; return; }
+    updateStats();
+    renderResults();
+    shared.refreshShared().then(() => {
+      if (isVisible()) { updateStats(); renderResults(); dirty = false; }
+    });
   }
 
   window.addEventListener('nova:view-changed', handleActivation);

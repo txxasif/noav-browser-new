@@ -147,6 +147,14 @@ function buildXlsx(rows, zlibMod) {
 /** Nova Browser Meta APIs (/api/meta-insta/*) + TG Classic start runs here. */
 module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
   const { fs, path, zlib, spawn, execSync, ROOT_DIR, ACCOUNTS_JSON, ACCOUNTS_CSV, ACCOUNTS_TXT, PYTHON_BIN, licenseMgr, slot, reapDeadEngine, broadcastEvent, consumeWorkerLine, sendJson, loadAccounts, getAccounts, storeDbExists, runPython, runPythonJson, syncFilesFromStore, cookieFileFor, readSettings, writeSettings, storedGlobalPassword, killProcessGroup, sseClients, recentLogs, resetWorkerBuffer, feedWorkerStdout, flushWorkerBuffer, backupUserData } = ctx;
+  // NordVPN rotation is a dev-tree feature: the Windows build writes nord_rotate:false to build_mode.json.
+  function nordRotateAllowed() {
+    try {
+      const f = path.join(ROOT_DIR, 'build_mode.json');
+      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8')).nord_rotate !== false;
+    } catch (e) {}
+    return true;
+  }
 
   // =========================================================================
   // Nova Browser Meta APIs (/api/meta-insta/*)
@@ -338,6 +346,44 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
     }
   }
 
+  function mailModeJson(s) {
+    const k = String(s.tempmailfish_api_key || '');
+    return JSON.stringify({ status: 'SUCCESS', mode: s.mailfish_mode === 'web' ? 'web' : 'api',
+      alias: s.mailfish_alias_style === 'name' ? 'name' : 'random',
+      has_key: !!k, key_hint: k ? '\u2022\u2022\u2022\u2022' + k.slice(-4) : '' });
+  }
+  // tempmail.fish inbox mode for new accounts and for the 2FA drain: 'api' or 'web'.
+  if (pathname === '/api/meta-insta/mail-mode') {
+    if (req.method === 'GET') {
+      const s = readSettings();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(mailModeJson(s));
+      return true;
+    }
+    if (req.method === 'POST') {
+      let b = '';
+      req.on('data', c => { b += c; });
+      req.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(b || '{}') || {}; } catch (e) {}
+        const patch = {};
+        if (body.mode !== undefined) patch.mailfish_mode = String(body.mode).toLowerCase() === 'web' ? 'web' : 'api';
+        if (body.alias !== undefined) patch.mailfish_alias_style = String(body.alias).toLowerCase() === 'name' ? 'name' : 'random';
+        if (body.api_key !== undefined) patch.tempmailfish_api_key = String(body.api_key).trim().slice(0, 200);
+        try {
+          if (Object.keys(patch).length) writeSettings(patch);
+          const s = readSettings();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(mailModeJson(s));
+        } catch (e) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ERROR', error: e.message }));
+        }
+      });
+      return true;
+    }
+  }
+
   // 3. GET /api/meta-insta/events (also /api/events) - SSE stream
   if ((pathname === '/api/meta-insta/events' || pathname === '/api/events') && req.method === 'GET') {
     res.writeHead(200, {
@@ -372,7 +418,7 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', async () => {
-      let opts = { concurrency: 1, target: 0, delay: 4, headless: true, mail: 'mailtd', captcha: 'extension', start_stagger_ms: null };
+      let opts = { concurrency: 1, target: 0, delay: 4, headless: true, mail: 'mailfish', captcha: 'extension', start_stagger_ms: null };
       try {
         if (body) opts = Object.assign(opts, JSON.parse(body));
       } catch (e) {}
@@ -445,7 +491,12 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
           return;
         }
       }
-      const mail = 'mailtd';
+      const rawMail = String(opts.mail_provider || opts.mail || 'mailfish').toLowerCase();
+      // Guerrilla Mail is disabled (not offered any more); a stale value falls back to tempmail.fish.
+      const mail = (rawMail === 'yamin' || rawMail === 'yaminbd' || rawMail === 'epicz' || rawMail === 'liseller') ? 'yamin'
+        : (rawMail === 'mailcf' || rawMail === 'cloudflare' || rawMail === 'cf') ? 'mailcf'
+        : (rawMail === 'mailtd' || rawMail === 'mail.td' || rawMail === 'td') ? 'mailtd'
+        : 'mailfish';
       const captcha = opts.captcha_mode || opts.captcha || 'extension';
       // Worker expects 'meta-only' for Meta-only, 'meta-ig' for Meta -> IG
       const workerMode = (mode === 'meta-ig') ? 'meta-ig' : 'meta-only';
@@ -459,12 +510,14 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       const sw = (v) => (v === true ? '1' : '0');
       const rawMode = String(opts.follow_mode || '').toLowerCase();
       const followMode = (rawMode === 'api' || rawMode === 'multi' || rawMode === 'multi_insta') ? rawMode : 'ui';
+      // Meta method: 'old' (default, the tested flow) or 'new' (experimental PC-style shortcut).
+      const metaFlow = String(opts.meta_flow || '').toLowerCase() === 'new' ? 'new' : 'old';
       // Global password: request override, else the saved dashboard setting.
       const newPassword = String(opts.new_password || storedGlobalPassword() || '').trim().slice(0, 128);
       // Optional fixed username (workspace field). Also env-only.
       const newUsername = String(opts.new_username || '').trim().slice(0, 64);
 
-      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa, follow, follow_mode: followMode };
+      currentSlot.config = { concurrency, headless, target, delay, mail, captcha, mode, start_stagger_ms: startStaggerMs, twofa, follow, follow_mode: followMode, meta_flow: metaFlow };
 
       const args = [
         path.join(ROOT_DIR, 'worker.py'),
@@ -478,6 +531,7 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       if (headless) args.push('--headless');
       if (twofa) args.push('--twofa');
       if (startStaggerMs !== null) args.push('--start-stagger-ms', String(startStaggerMs));
+      if (opts.nord_rotate === true && nordRotateAllowed()) args.push('--nord-rotate');
 
       console.log(`[MetaCreator] Starting ${targetSlot} worker loop: ${PYTHON_BIN} ${args.join(' ')}`);
 
@@ -503,6 +557,7 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
             INSTA_FOLLOW_AFTER_LOGIN: follow ? '1' : '0',
             INSTA_FOLLOW_COUNT: follow ? '5' : '0',
             INSTA_FOLLOW_MODE: followMode,
+            INSTA_META_FLOW: metaFlow,
             INSTA_API_BIO: sw(opts.api_bio),
             INSTA_API_AVATAR: sw(opts.api_avatar),
             INSTA_API_POST: sw(opts.api_post),

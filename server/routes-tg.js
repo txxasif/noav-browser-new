@@ -59,7 +59,6 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       const parts = [];
       if (t.taskly != null) parts.push('Taskly $' + Number(t.taskly || 0).toFixed(2));
       if (t.paygo != null) parts.push('PayGo $' + Number(t.paygo || 0).toFixed(2));
-      if (t.fastpay != null) parts.push('FastPay $' + Number(t.fastpay || 0).toFixed(2));
       const secs = (r && r.elapsed_s != null) ? (' in ' + r.elapsed_s + 's') : '';
       broadcastEvent({ type: 'log', pipeline: 'telegram',
         message: '[tg] Balances (' + ((r && r.count) || 0) + ' accounts): '
@@ -92,6 +91,32 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       if (logged) logBalances(data);
       sendJson(req, res, data, data && data.ok ? 200 : 500);
     })();
+    return true;
+  }
+  // Live balance stream for the Manager page. Body: {ids?: [...]} (omit = every MTProto account).
+  // One NDJSON line per account as soon as it is read, then {"type":"done"}.
+  if (pathname === '/api/tg/manager/balance_stream' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const ids = Array.isArray(b.ids) ? b.ids.map(String).filter(Boolean) : [];
+      const args = ['--stream', '--workers', '6'];
+      if (ids.length) args.push('--ids', ids.join(','));
+      else args.push('--all');
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache' });
+      const child = spawn(PYTHON_BIN, [resolveScript(path.join(ROOT_DIR, 'tg_balance.py')), ...args, '--json'],
+        { cwd: ROOT_DIR, windowsHide: true, env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONUTF8: '1' }) });
+      let buf = '';
+      child.stdout.on('data', d => {
+        buf += d.toString('utf-8');
+        const lines = buf.split('\n'); buf = lines.pop();
+        for (const l of lines) if (l.trim()) { try { res.write(l + '\n'); } catch (e) {} }
+      });
+      child.stderr.on('data', () => {});
+      child.on('close', () => { if (buf.trim()) { try { res.write(buf + '\n'); } catch (e) {} } try { res.end(); } catch (e) {} });
+      res.on('close', () => { if (!res.writableEnded) { try { child.kill('SIGTERM'); } catch (e) {} } });
+    });
     return true;
   }
   // =============== end TG balance ===============
@@ -296,7 +321,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         sendJson(req, res, { ok: false, error: 'A FastPay run is already in progress.' }, 400);
         return;
       }
-      if (slot().proc) {
+      if (slot('tg').proc) {
         sendJson(req, res, { ok: false,
           error: 'TG Classic engine is running — stop it first (the sessions are leased).' }, 400);
         return;
@@ -424,6 +449,23 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
     })();
     return true;
   }
+  // Send "/start" over MTProto to one bot (or all enabled bots) on every idle
+  // account. Shares withBalLock so it never races a balance reader on a session.
+  if (pathname === '/api/tg/manager/send_start' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', async () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const bot = String(b.bot || 'all');
+      if (!['all', 'taskly', 'paygo'].includes(bot)) {
+        sendJson(req, res, { ok: false, error: 'unknown bot: ' + bot }, 400); return;
+      }
+      const r = await withBalLock(() => runPythonJson(PYTHON_BIN, ROOT_DIR,
+        'tg_send_start.py', ['--bot', bot, '--json'], 600000));
+      sendJson(req, res, r || { ok: false, error: 'no result' }, r && r.ok ? 200 : 500);
+    });
+    return true;
+  }
 
   function readTgStats() {
     try {
@@ -468,21 +510,21 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
       const on = b.frozen === true || b.frozen === 'true';
       // Freezing must ALSO stop the engine so any in-flight lease releases.
-      if (on && slot().proc) {
+      if (on && slot('tg').proc) {
         try {
           fs.mkdirSync(path.join(ROOT_DIR, 'data'), { recursive: true });
           fs.writeFileSync(path.join(ROOT_DIR, 'data', 'stop_tg.flag'), '1', 'utf8');
         } catch (e) {}
-        const proc = slot().proc;
+        const proc = slot('tg').proc;
         const isWinStop = process.platform === 'win32';
         if (!isWinStop) { try { process.kill(-proc.pid, 'SIGTERM'); } catch (e) { try { proc.kill('SIGTERM'); } catch (e2) {} } }
         setTimeout(() => {
-          if (slot().proc === proc) {
+          if (slot('tg').proc === proc) {
             try { if (!isWinStop) { try { process.kill(-proc.pid, 'SIGKILL'); } catch (e) {} } else { try { proc.kill(); } catch (e) {} } } catch (e) {}
-            slot().proc = null;
+            slot('tg').proc = null;
           }
         }, 5000);
-        slot().config = null;
+        slot('tg').config = null;
         try { paygoOrchestrator.notifyUserStopped(); } catch (e) {}
         try { cookieOrchestrator.notifyUserStopped(); } catch (e) {}
         broadcastEvent({ type: 'log', pipeline: 'telegram',
@@ -569,7 +611,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         sendJson(req, res, { status: 'ERROR', error: 'A withdrawal is already in progress — wait for it to finish.' });
         return;
       }
-      if (slot().proc) {
+      if (slot('tg').proc) {
         sendJson(req, res, { status: 'ERROR',
           error: 'Stop the TG engine first (or press Freeze TG) before withdrawing.' });
         return;
@@ -711,8 +753,8 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         tool: 'tg-classic',
         running: reapDeadEngine(),
         pipeline: 'telegram',
-        ig_mode: slot().proc ? 'classic' : null,
-        engine: slot().config || null,
+        ig_mode: slot('tg').proc ? 'classic' : null,
+        engine: slot('tg').config || null,
         // KPIs the TG panel renders (same shape as meta_auto_ai's tg tab)
         total_accounts: total,
         tg_total: total,
@@ -741,7 +783,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         paygo_wait_seconds: autoStatus ? autoStatus.wait_seconds : 0,
         // Bots this build ships — the panel defaults its bot/task to these.
         enabled_bots: readEnabledBots(),
-        concurrency: (slot().config || {}).concurrency || 0,
+        concurrency: (slot('tg').config || {}).concurrency || 0,
         pool: { accounts: readTgPool() },
       });
     })();
@@ -749,13 +791,13 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
   }
 
   if (pathname === '/api/tg/start' && req.method === 'POST') {
-    if (reapDeadEngine() || slot().inFlight) {
+    if (reapDeadEngine() || slot('tg').inFlight) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ERROR', error: 'An engine is already running.' }));
       return true;
     }
-    slot().inFlight = true;
-    const releaseStartTg = () => { slot().inFlight = false; };
+    slot('tg').inFlight = true;
+    const releaseStartTg = () => { slot('tg').inFlight = false; };
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('aborted', releaseStartTg);
@@ -856,7 +898,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         if (!fleet.length) fleet = null;
       }
 
-      slot().config = { concurrency, headless, target, delay, captcha,
+      slot('tg').config = { concurrency, headless, target, delay, captcha,
                         coupled: true, tg_task: tgTask, tg_bot: tgBot,
                         twofa: opts.twofa !== false, use_ig_pool: useIgPool,
                         cookie_2fa: cookie2fa, fallback: fallback, fleet: fleet,
@@ -864,11 +906,29 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
                         ig_api: (opts.ig_api === true || opts.ig_api === 'true'),
                         ig_api_mock: (opts.ig_api_mock === true || opts.ig_api_mock === 'true') };
 
+      // No engine is registered at this point (guard above), so any TG worker of ours that is still
+      // alive is a leftover from a previous Stop (it finishes in-flight tasks for minutes). Two TG workers
+      // on the same Telegram sessions fight over them (wrong session ID, "auth check failed") and the
+      // leftover's exit used to free the new engine's leases, cancelling live tasks. End it first.
+      try {
+        if (process.platform !== 'win32') {
+          const psOut = require('child_process').execSync('ps -eo pid=,ppid=,args=', { encoding: 'utf8' });
+          for (const line of psOut.split('\n')) {
+            const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+            if (!m) continue;
+            const pid = Number(m[1]), ppid = Number(m[2]), a = m[3];
+            if (ppid !== process.pid || !/python/i.test(a) || !/worker\.py/.test(a) || !/--coupled/.test(a)) continue;
+            try { process.kill(-pid, 'SIGKILL'); } catch (e) { try { process.kill(pid, 'SIGKILL'); } catch (e2) {} }
+            console.log(`[MetaCreator] Ended leftover TG worker pid=${pid} before starting a new engine.`);
+          }
+        }
+      } catch (e) {}
+
       // Shared builder (server/tg-start.js). `add_email` is passed alongside —
       // it is not part of the stored/published slot config, so the slot object
       // and the /api/tg/start payload stay byte-identical.
       const args = buildTgWorkerArgs(
-        Object.assign({}, slot().config, { add_email: opts.add_email }),
+        Object.assign({}, slot('tg').config, { add_email: opts.add_email }),
         resolveScript('worker.py'));
 
       console.log(`[MetaCreator] Starting TG Classic: ${PYTHON_BIN} ${args.join(' ')}`);
@@ -878,7 +938,7 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         : path.join(ROOT_DIR, 'engine', 'ms-playwright');
       try {
         resetWorkerBuffer();
-        slot().proc = spawn(PYTHON_BIN, args, {
+        slot('tg').proc = spawn(PYTHON_BIN, args, {
           cwd: ROOT_DIR,
           detached: !isWinTg,
           windowsHide: true,
@@ -900,16 +960,16 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
 
       const runRoute = tgRouteOf(tgBot, tgTask, useIgPool);
       const rlHandle = ctx.runlog ? ctx.runlog.start('telegram', { argv: args, route: runRoute }) : null;
-      slot().runlog = rlHandle;
+      slot('tg').runlog = rlHandle;
 
       // Stream the worker's output. WITHOUT this the child's stdout/stderr is
       // discarded and the TG console stays empty even when the worker dies
       // instantly (e.g. a bad kwarg) — you see "started" and no browser tab.
-      slot().proc.stdout.on('data', data => {
+      slot('tg').proc.stdout.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
         for (const line of feedWorkerStdout(data, 'tg')) consumeWorkerLine(line, 'tg');
       });
-      slot().proc.stderr.on('data', data => {
+      slot('tg').proc.stderr.on('data', data => {
         if (rlHandle && ctx.runlog) ctx.runlog.line(rlHandle, data);
         const text = data.toString('utf-8').trim();
         if (!text) return;
@@ -917,27 +977,27 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         console.error(`[TG Worker STDERR] ${text}`);
         broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg', message: `[STDERR] ${text}` });
       });
-      slot().proc.on('error', err => {
+      slot('tg').proc.on('error', err => {
         broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg', message: `[Worker] ${err.message}` });
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
-        if (slot().proc) slot().proc = null;
+        if (slot('tg').proc) slot('tg').proc = null;
       });
-      const procRef = slot().proc;
-      slot().proc.on('close', code => {
+      const procRef = slot('tg').proc;
+      slot('tg').proc.on('close', code => {
         flushWorkerBuffer('tg');
         if (rlHandle && ctx.runlog) ctx.runlog.end(rlHandle);
         console.log(`[TG] loop process exited with code ${code}`);
         broadcastEvent({ type: 'log', pipeline: 'telegram', engine: 'tg',
           message: `[engine] TG worker exited (code ${code})` });
         broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', exit_code: code });
-        if (slot().proc === procRef) slot().proc = null;
+        if (slot('tg').proc === procRef) slot('tg').proc = null;
         if (!procRef || !procRef.__preemptKilled) {
           paygoOrchestrator.notifyLoopStopped(procRef);
           cookieOrchestrator.notifyLoopStopped(procRef);
         }
       });
       releaseStartTg();
-      sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine started.', config: slot().config });
+      sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine started.', config: slot('tg').config });
     });
     return true;
   }
@@ -950,12 +1010,12 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         fs.writeFileSync(stopFlag, '1', 'utf8');
       } catch (e) {}
 
-      if (slot().proc) {
-        const proc = slot().proc;
+      if (slot('tg').proc) {
+        const proc = slot('tg').proc;
         // Stamp the stop so the status-path reaper can finish an orphan that
         // outlives this handler (observed: a pool worker survived SIGTERM 12s+
         // and kept submitting after Stop).
-        try { slot().stoppedAt = Date.now(); } catch (e) {}
+        try { slot('tg').stoppedAt = Date.now(); } catch (e) {}
         const kpg = ctx.killProcessGroup || (function (p, s) {
           try {
             if (process.platform !== 'win32') { try { process.kill(-p.pid, s); return; } catch (e) {} }
@@ -969,21 +1029,21 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
         // the panel reports IDLE and allow a double-run).
         const t0 = Date.now();
         const check = function () {
-          if (slot().proc !== proc) return; // replaced/reaped elsewhere
+          if (slot('tg').proc !== proc) return; // replaced/reaped elsewhere
           let dead = false;
           try { dead = proc.exitCode !== null; } catch (e) { dead = true; }
-          if (dead) { slot().proc = null; return; }
+          if (dead) { slot('tg').proc = null; return; }
           if (Date.now() - t0 > 8000) {
             console.log('[MetaCreator] TG engine ignored SIGTERM after 8s — escalating to SIGKILL (pid=' + proc.pid + ').');
             kpg(proc, 'SIGKILL');
-            setTimeout(function () { if (slot().proc === proc) slot().proc = null; }, 3000);
+            setTimeout(function () { if (slot('tg').proc === proc) slot('tg').proc = null; }, 3000);
             return;
           }
           setTimeout(check, 500);
         };
         setTimeout(check, 1000);
       }
-      slot().config = null;
+      slot('tg').config = null;
       broadcastEvent({ type: 'loop_stopped', pipeline: 'telegram', engine: 'tg', message: 'TG Classic engine stopping gracefully...' });
       sendJson(req, res, { status: 'SUCCESS', message: 'TG Classic engine stopping gracefully...' });
       paygoOrchestrator.notifyUserStopped();
@@ -1027,6 +1087,18 @@ module.exports = function handleTg(req, res, urlObj, pathname, ctx) {
       if (!cookieOrchestrator.enabled) cookieOrchestrator.toggle(true, b.concurrency);
       const st = cookieOrchestrator.forceTick();
       sendJson(req, res, { ok: true, status: st });
+    });
+    return true;
+  }
+  // API-mode switch (Taskly Cookie page): saved so the :00 auto-start follows through the API too.
+  if (pathname === '/api/tg/cookie-auto/ig-api' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => { body += c; });
+    req.on('end', () => {
+      let b = {}; try { b = JSON.parse(body || '{}'); } catch (e) {}
+      const on = b.ig_api === true || b.ig_api === 'true';
+      writeSettings({ cookie_ig_api: on, cookie_ig_api_mock: on && (b.ig_api_mock === true || b.ig_api_mock === 'true') });
+      sendJson(req, res, { ok: true, ig_api: on });
     });
     return true;
   }

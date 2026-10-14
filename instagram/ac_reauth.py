@@ -64,6 +64,22 @@ class IgAcReauthMixin:
                     for m in msgs)
         except Exception:
             return True
+        # (1b) tempmail.fish stored-session HTTP read (pool drains have no tab).
+        try:
+            toks = getattr(self, "mail_tokens", None) or {}
+            if not toks and getattr(self, "mail_provider", "") == "guerrilla" and getattr(self, "email", ""):
+                toks = {"guerrilla_email": self.email, "guerrilla_sid": getattr(self, "_guerrilla_sid", "")}
+            if ((toks.get("mailfish_email") and toks.get("mailfish_auth_key")) or toks.get("guerrilla_email")
+                    or toks.get("yamin_email")):
+                from pool_common import _mail_messages
+                msgs = _mail_messages(toks, self)
+                if not msgs:
+                    return True  # empty/unreadable list = unknown, never resend blindly
+                return any(
+                    "authenticate" in (m.get("subject", "") + " " + m.get("from", "")).lower()
+                    for m in msgs)
+        except Exception:
+            return True
         # (2) Legacy browser-tab read.
         try:
             mail = getattr(self, "mail", None)
@@ -146,7 +162,9 @@ class IgAcReauthMixin:
                 # First attempt shorter so a LOST email reaches the resend
                 # ("Get a new code") sooner. `_ac_inbox_has_auth_mail` gates the
                 # resend, so a merely-slow email is still picked up next attempt.
-                wait_sec = 25 if attempt == 0 else 60
+                # tempmail.fish delivery of Meta's OTP has been observed from
+                # instant to several minutes, so give each attempt real time.
+                wait_sec = 45 if attempt == 0 else 90
                 try:
                     # Guide Scenario 2: the AC challenge is ALWAYS subject
                     # "Authenticate your profile" (noreply@account.meta.com),
@@ -577,6 +595,10 @@ class IgAcReauthMixin:
                 if pwd_input:
                     break
 
+            # An EMAIL code screen can also say "let us know it's you". With no password box it
+            # must not fall back to typing the password into the Code box.
+            if not pwd_input and any(k in body_low for k in ("check your email", "enter the code we sent")):
+                has_pwd_prompt = False
             if not has_pwd_prompt and not pwd_input:
                 break
             # The Change-password form is the TARGET, not a challenge. Filling

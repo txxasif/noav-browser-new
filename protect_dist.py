@@ -91,7 +91,6 @@ UI_JS = [
     "public/js/nova-fastpay.js",
     "public/js/nova-manager.js",
     "public/js/nova-pool-panel.js",
-    "public/js/nova-failover.js",
 ]
 
 # Entry scripts spawned by server.js by filename (rewritten to .pyc).

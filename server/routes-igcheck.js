@@ -114,12 +114,14 @@ module.exports = function handleIgCheck(req, res, urlObj, pathname, ctx) {
         return;
       }
       const delayMs = Math.min(5000, Math.max(300, Number(body.delay_ms) || 800));
+      const workers = Math.min(8, Math.max(1, Math.floor(Number(body.workers) || 1)));
       let child;
       try {
         child = spawn(PYTHON_BIN, [
           resolveScript(path.join(ROOT_DIR, 'ig_check.py')),
           '--usernames-json', JSON.stringify(usernames),
           '--delay-ms', String(delayMs),
+          '--workers', String(workers),
           '--ndjson',
         ], { cwd: ROOT_DIR, windowsHide: true, env: Object.assign({}, process.env, { PYTHONUNBUFFERED: '1', PYTHONUTF8: '1' }) });
       } catch (e) {

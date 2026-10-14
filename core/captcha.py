@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
+import random
 import re
 import sys
 import time
 
-from ai_config import run  # noqa: E402
+from ai_config import AI_DIR, run  # noqa: E402
 
 
 class MetaCheckpointBlocked(RuntimeError):
@@ -71,11 +73,216 @@ def _meta_ip_blocked(page_or_body, url: str = "") -> bool:
             or "try again later" in b)
 
 
+_COOKIE_CHOICE_BUTTONS = ("Decline optional cookies", "Only allow essential cookies",
+                          "Allow essential and optional cookies", "Allow all cookies")
+
+
 class CaptchaMixin:
+    def _dismiss_cookie_choice(self, page) -> bool:
+        """EU only: Meta's logged-in cookie page ("Allow the use of cookies from Meta?",
+        auth.meta.com/privacy/consent/?flow=user_cookie_choice_v2) comes right after the signup code
+        and BEFORE the human check. Everywhere else the URL test below is a plain string compare, so
+        the non-EU flow pays nothing. Returns True when a choice was made."""
+        try:
+            parsed = urlparse(page.url or "")
+        except Exception:
+            return False
+        if "/privacy/consent" not in (parsed.path or "").lower():
+            return False
+        for nm in _COOKIE_CHOICE_BUTTONS:
+            try:
+                btn = page.get_by_role("button", name=nm, exact=True).first
+                if btn.count() and btn.is_visible():
+                    btn.click(timeout=4000)
+                    break
+            except Exception:
+                continue
+        else:
+            return False
+        self.log('[🍪] Meta cookie-choice page (EU) — declined optional cookies.')
+        for _ in range(12):                         # leave the consent page, ~6s max
+            page.wait_for_timeout(500)
+            try:
+                if "/privacy/consent" not in (urlparse(page.url or "").path or "").lower():
+                    break
+            except Exception:
+                break
+        return True
+
+    def _dismiss_save_login_info(self, page) -> bool:
+        """Dismiss the 'Save your login info?' modal on auth.meta.com.
+
+        This modal appears after Meta signup or login (seen on auth.meta.com/?rcs=...):
+        'Save your login info? We'll save the login info for <username> so that you won't need to enter it next time.'
+        Offers 'Save' (blue primary button), 'Not now' (secondary button), and an 'X' close button.
+        Dismissing it allows the flow to cleanly proceed to /language or meta.ai.
+        """
+        try:
+            has_prompt = False
+            if hasattr(page, "evaluate"):
+                has_prompt = bool(page.evaluate("""() => {
+                    const t = (document.body ? document.body.innerText : '').toLowerCase();
+                    if (t.includes('save your login info') || t.includes('save login info')) return true;
+                    for (const d of document.querySelectorAll('[role="dialog"], [aria-modal="true"]')) {
+                        const dt = (d.innerText || '').toLowerCase();
+                        if (dt.includes('save your login info') || dt.includes('save login info') || dt.includes('save your login')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }"""))
+            elif hasattr(page, "inner_text"):
+                body_t = (page.inner_text("body") or "").lower()
+                has_prompt = "save your login info" in body_t or "save login info" in body_t
+        except Exception:
+            has_prompt = False
+
+        if not has_prompt:
+            return False
+
+        self.log('[💾] "Save your login info?" dialog detected — dismissing…')
+
+        # 1. Try Playwright locators for Save or Not now
+        for btn_text in ("Save", "Not now"):
+            for sel in (
+                f'button:has-text("{btn_text}")',
+                f'div[role="button"]:has-text("{btn_text}")',
+                f'span:has-text("{btn_text}")',
+            ):
+                try:
+                    loc = page.locator(sel)
+                    for i in range(loc.count()):
+                        btn = loc.nth(i)
+                        if btn.is_visible():
+                            btn.click(timeout=3000, delay=50)
+                            self.log(f'[💾] Clicked "{btn_text}" on save login prompt.')
+                            time.sleep(1.0)
+                            return True
+                except Exception:
+                    pass
+
+        # 2. Try JS evaluate click (including dispatching mouse/pointer events)
+        try:
+            if hasattr(page, "evaluate"):
+                res = page.evaluate("""() => {
+                    const isTarget = (t) => {
+                        const s = (t || '').trim().toLowerCase();
+                        return s === 'save' || s === 'not now';
+                    };
+                    const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"], div');
+                    for (const d of dialogs) {
+                        const dt = (d.innerText || '').toLowerCase();
+                        if (dt.includes('save your login info') || dt.includes('save login info')) {
+                            for (const b of d.querySelectorAll('button, div[role="button"], span')) {
+                                if (isTarget(b.innerText)) {
+                                    b.scrollIntoView({block: 'center'});
+                                    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evt => {
+                                        try { b.dispatchEvent(new MouseEvent(evt, {bubbles: true, cancelable: true, view: window})); } catch(e) {}
+                                    });
+                                    try { b.click(); } catch(e) {}
+                                    return (b.innerText || '').trim();
+                                }
+                            }
+                            const x = d.querySelector('[aria-label="Close"], [aria-label="close"]');
+                            if (x) {
+                                try { x.click(); return 'Close'; } catch(e) {}
+                            }
+                        }
+                    }
+                    for (const b of document.querySelectorAll('button, div[role="button"]')) {
+                        if (isTarget(b.innerText)) {
+                            b.click();
+                            return (b.innerText || '').trim();
+                        }
+                    }
+                    return null;
+                }""")
+                if res:
+                    self.log(f'[💾] Clicked "{res}" via JS on save login prompt.')
+                    time.sleep(1.0)
+                    return True
+        except Exception:
+            pass
+
+        return False
+
+    @staticmethod
+    def _needs_meta_relogin(p) -> bool:
+        """True while Meta shows the account chooser or the "Check your email" login screen. Those are
+        not a verified account: the next attempt must log in again before moving on to Instagram."""
+        try:
+            if "auth.meta.com" not in (p.url or "").lower():
+                return False
+            body = (p.inner_text("body") or "").lower()
+        except Exception:
+            return False
+        return ("log in with your meta account" in body or "use another account" in body
+                or ("check your email" in body and "enter the code we sent" in body))
+
+    def _meta_login_challenge(self, p) -> bool:
+        """Meta sometimes asks the account to log in again right after signup / the human check:
+        the chooser ("Continue as <name>") is followed by "Check your email - enter the code we
+        sent to ..." with a Code box, "Log in" and "Enter password instead". Prefer the password
+        (known, instant) over waiting for another email; fall back to the inbox code.
+        Returns True when that screen was seen and handled."""
+        try:
+            if "auth.meta.com" not in (p.url or "").lower():
+                return False
+            body = (p.inner_text("body") or "").lower()
+        except Exception:
+            return False
+        if "check your email" not in body or not (
+                "enter the code we sent" in body or "enter password instead" in body):
+            return False
+        self.log('[🔐] Meta asks to log in again (email code screen).')
+        pw = getattr(self, "password", None)
+        if pw and self._try_click(p, "Enter password instead", timeout=4000):
+            for _ in range(10):                       # wait (<=3s) for the password box
+                try:
+                    if p.locator('input[type="password"]').first.is_visible():
+                        break
+                except Exception:
+                    pass
+                p.wait_for_timeout(300)
+            filled = False
+            try:
+                box = p.locator('input[type="password"]').first
+                if box.is_visible():
+                    box.fill(pw, timeout=4000)
+                    filled = True
+            except Exception:
+                pass
+            if filled or self._try_fill(p, "Password", pw, timeout=4000):
+                self.log('[🔐] Logging in again with the password…')
+                self._try_click(p, "Log in", timeout=5000)
+                self._poll_checkpoint_settled(p, timeout=10)
+                self._dismiss_save_login_info(p)
+                return True
+        # fallback: read the new code from the inbox
+        try:
+            code = self.fetch_code("meta", timeout=90)
+        except Exception:
+            code = None
+        if code:
+            self.log('[🔐] Logging in again with the emailed code…')
+            if not self._try_fill(p, "Code", str(code), timeout=5000):
+                try:
+                    p.locator('input').first.fill(str(code), timeout=4000)
+                except Exception:
+                    pass
+            self._try_click(p, "Log in", timeout=5000)
+            self._poll_checkpoint_settled(p, timeout=10)
+            self._dismiss_save_login_info(p)
+        else:
+            self.log('[⚠️] Meta login code not received and no password option — leaving it to the next attempt.')
+        return True
+
     def _has_human_check(self, page) -> bool:
         """True if the page is on an Instagram/Meta human checkpoint or challenge screen."""
         try:
-            u = (page.url or "").lower()
+            # PATH only: the EU cookie-choice page (/privacy/consent/?...referrer=...checkpoints...)
+            # carries "checkpoints" in its QUERY and is not a human check.
+            u = (urlparse(page.url or "").path or "").lower()
             if "accounts/suspended" in u or "checkpoint" in u or "challenge" in u:
                 return True
         except Exception:
@@ -96,6 +303,910 @@ class CaptchaMixin:
             pass
         return False
 
+    # -------------------------------------------------------------------------
+    # NEW WAY: 100% exact parity with PC tool (PC_USER_WORK_FREE.exe SingleProfileWorker)
+    # -------------------------------------------------------------------------
+
+    def _pc_navigate_with_retry(self, page, url: str, timeout: int = 60000, retries: int = 3) -> bool:
+        for attempt in range(retries):
+            if hasattr(self, "_is_running") and not self._is_running:
+                return False
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                return True
+            except Exception as e:
+                self.log(f"⚠ Nav attempt {attempt + 1}/{retries} failed: {str(e)[:60]}")
+                time.sleep(1.5)
+                try:
+                    page.goto(url, wait_until="commit", timeout=timeout)
+                    return True
+                except Exception:
+                    pass
+        return False
+
+    def _pc_wait_for_dom_ready(self, page, timeout: int = 25000) -> bool:
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=timeout)
+        except Exception:
+            pass
+        try:
+            page.wait_for_load_state("networkidle", timeout=min(timeout, 8000))
+        except Exception:
+            pass
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if hasattr(self, "_is_running") and not self._is_running:
+                break
+            try:
+                ok = page.evaluate("""() => {
+                    if (!document.body) return false;
+                    return (document.body.innerText || '').length > 10;
+                }""")
+                if ok:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return False
+
+    def _pc_wait_for_text_visible(self, page, text: str, timeout: int = 20000, poll: float = 0.5, exact: bool = False) -> bool:
+        deadline = time.time() + (timeout / 1000.0)
+        while time.time() < deadline:
+            if hasattr(self, "_is_running") and not self._is_running:
+                return False
+            try:
+                found = page.evaluate("""(args) => {
+                    const [text, exact] = args;
+                    const all = document.querySelectorAll('span, button, div[role="button"], a, div[role="menuitem"], div[role="option"], li');
+                    for (const el of all) {
+                        const t = (el.innerText || '').trim();
+                        const match = exact ? (t === text) : (t === text || t.startsWith(text));
+                        if (match) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0 && r.width < 600 && r.height < 200) {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }""", [text, exact])
+                if found:
+                    return True
+            except Exception:
+                pass
+            time.sleep(poll)
+        return False
+
+    def _pc_check_captcha_present(self, page) -> dict:
+        try:
+            info = page.evaluate("""() => {
+                const info = {present: false, type: 'none'};
+                const html = (document.documentElement.innerHTML || '').toLowerCase();
+                if (html.includes('hcaptcha.com/1/api.js') ||
+                    html.includes('new hcaptcha') ||
+                    document.querySelector('iframe[src*="hcaptcha.com"]') ||
+                    document.querySelector('div.h-captcha') ||
+                    document.querySelector('[class*="hcaptcha"][class*="widget"]')) {
+                    info.present = true;
+                    info.type = 'hcaptcha';
+                    return info;
+                }
+                if (document.querySelector('iframe[src*="google.com/recaptcha"]') ||
+                    document.querySelector('iframe[src*="recaptcha/api2"]') ||
+                    document.querySelector('div.g-recaptcha') ||
+                    html.includes('recaptcha/api.js')) {
+                    info.present = true;
+                    info.type = 'recaptcha';
+                    return info;
+                }
+                if (document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
+                    document.querySelector('div.cf-turnstile')) {
+                    info.present = true;
+                    info.type = 'cloudflare';
+                    return info;
+                }
+                const puzzleImgs = document.querySelectorAll('img[src*="captcha"], img[alt*="captcha" i]');
+                for (const img of puzzleImgs) {
+                    const r = img.getBoundingClientRect();
+                    if (r.width > 80 && r.height > 40) {
+                        info.present = true;
+                        info.type = 'puzzle_captcha';
+                        return info;
+                    }
+                }
+                const iframes = document.querySelectorAll('iframe');
+                for (const ifr of iframes) {
+                    const src = (ifr.src || '').toLowerCase();
+                    if (src.includes('captcha') || src.includes('turnstile') ||
+                        src.includes('challenge-platform')) {
+                        const r = ifr.getBoundingClientRect();
+                        if (r.width > 100 && r.height > 50) {
+                            info.present = true;
+                            info.type = 'iframe_captcha';
+                            return info;
+                        }
+                    }
+                }
+                return info;
+            }""")
+            if isinstance(info, dict):
+                return info
+        except Exception:
+            pass
+        return {"present": False, "type": "none"}
+
+    def _pc_wait_for_captcha_solve(self, page, timeout: int = 300) -> bool:
+        self.log(f"🧩 CAPTCHA — waiting up to {timeout}s")
+        start = time.time()
+        poll = 0
+        initial_url = getattr(page, "url", "") or ""
+        last_log = 0
+        while (time.time() - start) < timeout:
+            if hasattr(self, "_is_running") and not self._is_running:
+                return False
+            poll += 1
+            elapsed = int(time.time() - start)
+            try:
+                status = self._pc_check_captcha_present(page)
+                if not status.get("present"):
+                    self.log(f"✓ Captcha SOLVED in {elapsed}s!")
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                pass
+            try:
+                if (getattr(page, "url", "") or "") != initial_url:
+                    self.log(f"✓ URL changed at {elapsed}s")
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                pass
+            if (elapsed - last_log) >= 30:
+                remaining = timeout - elapsed
+                self.log(f"⏳ Captcha wait... {elapsed}s / {remaining}s left")
+                last_log = elapsed
+            time.sleep(0.8)
+        self.log(f"✗ Captcha NOT solved in {timeout}s")
+        return False
+
+    def _pc_detect_auth_page(self, page) -> dict:
+        try:
+            info = page.evaluate("""() => {
+                const result = {type: 'unknown', hints: []};
+                const url = (window.location.href || '').toLowerCase();
+                const allText = (document.body.innerText || '').toLowerCase();
+                if (url.includes('meta.ai/?') || url.includes('meta.ai/home') ||
+                    url.includes('meta.ai/chat') || url.includes('meta.ai/prompt')) {
+                    result.type = 'success';
+                    return result;
+                }
+                const fileInputs = document.querySelectorAll('input[type="file"]');
+                let hasFileInput = fileInputs.length > 0;
+                const uploadTexts = ['upload', 'add photo', 'add picture', 'change photo',
+                                     'choose file', 'select photo', 'profile picture',
+                                     'add a photo', 'add an image', 'add profile photo'];
+                for (const el of document.querySelectorAll('span, button, div, label, p, h1, h2')) {
+                    const t = (el.innerText || '').trim().toLowerCase();
+                    for (const ut of uploadTexts) {
+                        if (t === ut || t.includes(ut)) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0 && t.length < 60) {
+                                result.type = 'image_upload';
+                                return result;
+                            }
+                        }
+                    }
+                }
+                if (hasFileInput) {
+                    const previewImgs = document.querySelectorAll('img[src^="blob:"], img[src^="data:image"]');
+                    for (const pi of previewImgs) {
+                        const r = pi.getBoundingClientRect();
+                        if (r.width > 40 && r.height > 40) {
+                            result.type = 'image_upload';
+                            return result;
+                        }
+                    }
+                }
+                if (allText.includes("confirm that you're human") ||
+                    allText.includes("confirm that you are human") ||
+                    allText.includes("verify you're human") ||
+                    allText.includes("verify you are human") ||
+                    allText.includes("let us know you're not a robot") ||
+                    allText.includes("we need to confirm you're human") ||
+                    allText.includes("help us confirm") ||
+                    allText.includes('security check')) {
+                    result.type = 'human_check';
+                    return result;
+                }
+                const loginSpans = Array.from(document.querySelectorAll('span, button, div[role="button"]'))
+                    .filter(el => (el.innerText || '').trim() === 'Log in');
+                for (const sp of loginSpans) {
+                    const r = sp.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        result.type = 'login_page';
+                        return result;
+                    }
+                }
+                if (allText.includes('choose an account') ||
+                    allText.includes('select an account') ||
+                    allText.includes('pick an account') ||
+                    allText.includes('continue as') ||
+                    allText.includes('your accounts')) {
+                    result.type = 'account_select';
+                    return result;
+                }
+                const accountCandidates = [];
+                const selectors = [
+                    '[role="button"][tabindex="0"]',
+                    '[data-testid*="account"]',
+                    'a[href*="account"]',
+                    'div[role="link"]'
+                ];
+                for (const sel of selectors) {
+                    for (const item of document.querySelectorAll(sel)) {
+                        const text = (item.innerText || '').trim();
+                        const rect = item.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0 &&
+                            text.length > 3 && text.length < 200) {
+                            if (text.includes('@') || /^[A-Z][a-z]/.test(text) ||
+                                text.includes('Facebook') || text.includes('Instagram')) {
+                                accountCandidates.push(item);
+                            }
+                        }
+                    }
+                }
+                if (accountCandidates.length >= 2) {
+                    result.type = 'account_select';
+                    return result;
+                }
+                if (allText.includes('save your login info') || allText.includes('save login info')) {
+                    result.type = 'save_login_info';
+                    return result;
+                }
+                const continueBtns = Array.from(document.querySelectorAll('span, button, div[role="button"]'))
+                    .filter(el => {
+                        const t = (el.innerText || '').trim();
+                        return t === 'Continue' || t === 'Next' || t === 'Confirm';
+                    });
+                for (const cb of continueBtns) {
+                    const r = cb.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0 && r.width < 500) {
+                        result.type = 'profile_continue';
+                        return result;
+                    }
+                }
+                if (allText.includes('log out') || allText.includes('logout')) {
+                    result.type = 'success';
+                    return result;
+                }
+                return result;
+            }""")
+            if isinstance(info, dict):
+                return info
+        except Exception:
+            pass
+        return {"type": "unknown", "hints": []}
+
+    def _pc_click_first_account(self, page) -> bool:
+        try:
+            result = page.evaluate("""() => {
+                const candidates = [];
+                const selectors = [
+                    '[role="button"][tabindex="0"]',
+                    '[data-testid*="account"]',
+                    'a[href*="account"]',
+                    'div[role="link"]'
+                ];
+                for (const sel of selectors) {
+                    for (const item of document.querySelectorAll(sel)) {
+                        const text = (item.innerText || '').trim();
+                        const rect = item.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0 &&
+                            text.length > 3 && text.length < 300) {
+                            if (text.includes('@') || /^[A-Z][a-z]/.test(text) ||
+                                text.includes('Facebook') || text.includes('Instagram')) {
+                                candidates.push({
+                                    el: item, text: text.slice(0, 50),
+                                    top: rect.top, left: rect.left
+                                });
+                            }
+                        }
+                    }
+                }
+                if (candidates.length === 0) return {ok: false};
+                candidates.sort((a, b) => {
+                    if (Math.abs(a.top - b.top) < 20) return a.left - b.left;
+                    return a.top - b.top;
+                });
+                const first = candidates[0];
+                first.el.scrollIntoView({block: 'center'});
+                let clickTarget = first.el;
+                let cur = first.el;
+                for (let i = 0; i < 5 && cur; i++) {
+                    const role = cur.getAttribute && cur.getAttribute('role');
+                    if (role === 'button' || role === 'link' ||
+                        cur.tagName === 'BUTTON' || cur.tagName === 'A') {
+                        clickTarget = cur;
+                    }
+                    cur = cur.parentElement;
+                }
+                const r = clickTarget.getBoundingClientRect();
+                const cx = r.x + r.width / 2;
+                const cy = r.y + r.height / 2;
+                ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t => {
+                    try {
+                        const ev = t.startsWith('pointer')
+                            ? new PointerEvent(t, {bubbles: true, cancelable: true, view: window,
+                                clientX: cx, clientY: cy, pointerId: 1, pointerType: 'mouse', isPrimary: true})
+                            : new MouseEvent(t, {bubbles: true, cancelable: true, view: window,
+                                clientX: cx, clientY: cy});
+                        clickTarget.dispatchEvent(ev);
+                    } catch(e) {}
+                });
+                try { clickTarget.click(); } catch(e) {}
+                return {ok: true, text: first.text, total: candidates.length};
+            }""")
+            if result and result.get("ok"):
+                self.log(f"✓ Account clicked: '{result.get('text', '')[:50]}'")
+                return True
+        except Exception:
+            pass
+
+        try:
+            for sel in ('[role="button"][tabindex="0"]', '[data-testid*="account"]', 'div[role="link"]', 'a[href*="account"]'):
+                try:
+                    loc = page.locator(sel)
+                    if loc.count() > 0:
+                        first = loc.first
+                        try:
+                            first.scroll_into_view_if_needed(timeout=2000)
+                        except Exception:
+                            pass
+                        time.sleep(0.4)
+                        first.click(timeout=3000, force=True)
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
+    def _pc_click_continue_button(self, page) -> bool:
+        all_texts = ['Continue', 'Next', 'Confirm', 'Submit', 'OK', 'Got it', 'Allow', 'Accept', 'I agree', 'Save', 'Not now']
+        for txt in all_texts:
+            try:
+                loc = page.locator(f'span:has-text("{txt}")').last
+                if loc.count() > 0 and loc.is_visible(timeout=600):
+                    loc.click(timeout=3000, delay=50)
+                    return True
+            except Exception:
+                pass
+            try:
+                loc = page.locator(f'button:has-text("{txt}")').first
+                if loc.count() > 0 and loc.is_visible(timeout=500):
+                    loc.click(timeout=3000, delay=50)
+                    return True
+            except Exception:
+                pass
+            try:
+                loc = page.locator(f'div[role="button"]:has-text("{txt}")').first
+                if loc.count() > 0 and loc.is_visible(timeout=500):
+                    loc.click(timeout=3000, delay=50)
+                    return True
+            except Exception:
+                pass
+
+        for txt in ('Continue', 'Next', 'Confirm', 'Submit', 'Save', 'Not now'):
+            try:
+                clicked = page.evaluate("""(text) => {
+                    const all = document.querySelectorAll('span, button, div[role="button"], a');
+                    for (const el of all) {
+                        const t = (el.innerText || '').trim();
+                        if (t === text) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0 && r.width < 500) {
+                                el.scrollIntoView({block: 'center'});
+                                el.click();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }""", txt)
+                if clicked:
+                    return True
+            except Exception:
+                pass
+
+        try:
+            clicked = page.evaluate("""() => {
+                const btns = document.querySelectorAll('button, div[role="button"]');
+                for (const btn of btns) {
+                    const r = btn.getBoundingClientRect();
+                    if (r.width < 60 || r.height < 25) continue;
+                    if (r.width > 500 || r.height > 150) continue;
+                    const style = window.getComputedStyle(btn);
+                    const bg = style.backgroundColor;
+                    const isBlue = bg.includes('rgb(0,') || bg.includes('rgb(24,') || 
+                                   bg.includes('rgb(59,') || bg.includes('rgb(70,');
+                    if (isBlue) {
+                        const text = (btn.innerText || '').trim();
+                        if (text.length > 0 && text.length < 40) {
+                            btn.scrollIntoView({block: 'center'});
+                            btn.click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""")
+            if clicked:
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _pc_click_text_button(self, page, text: str) -> bool:
+        try:
+            loc = page.locator(f'span:has-text("{text}")').last
+            if loc.count() > 0 and loc.is_visible(timeout=1200):
+                loc.click(timeout=3000, delay=50)
+                return True
+        except Exception:
+            pass
+        try:
+            clicked = page.evaluate("""(text) => {
+                const all = document.querySelectorAll('span, button, div[role="button"]');
+                for (const el of all) {
+                    const t = (el.innerText || '').trim();
+                    if (t === text) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""", text)
+            return bool(clicked)
+        except Exception:
+            return False
+
+    def _pc_handle_human_check(self, page, max_attempts: int = 8) -> bool:
+        self.log("🧑 Human check page — starting handler")
+        for attempt in range(max_attempts):
+            if hasattr(self, "_is_running") and not self._is_running:
+                return False
+            page_info = self._pc_detect_auth_page(page)
+            current_type = page_info.get("type", "unknown")
+            if current_type != "human_check":
+                self.log(f"   ✓ Page changed to '{current_type}' — done")
+                return True
+            self.log(f"   [Attempt {attempt + 1}/{max_attempts}] Still on human check")
+            cap = self._pc_check_captcha_present(page)
+            if cap.get("present"):
+                self.log(f"   🧩 Captcha widget detected: {cap.get('type')}")
+                solved = self._pc_wait_for_captcha_solve(page, timeout=300)
+                if not solved:
+                    return False
+                time.sleep(1.2)
+                continue
+
+            btn_texts = [
+                'Continue', 'Next', 'Confirm', 'Yes, continue', 'Submit', 'OK',
+                'Got it', 'Verify', "I'm not a robot", 'I am human',
+                'I am not a robot', 'Start verification'
+            ]
+            for btn_text in btn_texts:
+                if hasattr(self, "_is_running") and not self._is_running:
+                    break
+                try:
+                    loc = page.locator(f'span:has-text("{btn_text}")').last
+                    if loc.count() > 0 and loc.is_visible(timeout=500):
+                        try:
+                            loc.scroll_into_view_if_needed(timeout=1200)
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+                        loc.click(timeout=3000, delay=50)
+                        self.log(f"   ✓ Clicked '{btn_text}' (span)")
+                        break
+                except Exception:
+                    pass
+                try:
+                    loc = page.locator(f'button:has-text("{btn_text}")').first
+                    if loc.count() > 0 and loc.is_visible(timeout=500):
+                        try:
+                            loc.scroll_into_view_if_needed(timeout=1200)
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+                        loc.click(timeout=3000, delay=50)
+                        self.log(f"   ✓ Clicked '{btn_text}' (button)")
+                        break
+                except Exception:
+                    pass
+                try:
+                    loc = page.locator(f'div[role="button"]:has-text("{btn_text}")').first
+                    if loc.count() > 0 and loc.is_visible(timeout=500):
+                        try:
+                            loc.scroll_into_view_if_needed(timeout=1200)
+                        except Exception:
+                            pass
+                        time.sleep(0.15)
+                        loc.click(timeout=3000, delay=50)
+                        self.log(f"   ✓ Clicked '{btn_text}' (div[role=button])")
+                        break
+                except Exception:
+                    pass
+            time.sleep(1.5)
+        return False
+
+    def _pc_upload_random_image(self, page) -> bool:
+        self.log("→ [Upload] Starting...")
+        img_dirs = [
+            os.path.join(AI_DIR, "img"),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "img"),
+            os.path.join(AI_DIR, "selfies"),
+        ]
+        img_dir = None
+        for d in img_dirs:
+            if os.path.isdir(d):
+                img_dir = d
+                break
+        if not img_dir:
+            self.log("⚠ No images directory found")
+            return False
+
+        valid_exts = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
+        images = []
+        try:
+            for f in os.listdir(img_dir):
+                if f.lower().endswith(valid_exts):
+                    full = os.path.join(img_dir, f)
+                    if os.path.isfile(full):
+                        images.append(full)
+        except Exception:
+            return False
+
+        if not images:
+            self.log("⚠ No images in img/ folder")
+            return False
+
+        chosen_image = random.choice(images)
+        chosen_name = os.path.basename(chosen_image)
+        self.log(f"→ Random image: {chosen_name}")
+
+        file_input = None
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            if hasattr(self, "_is_running") and not self._is_running:
+                break
+            try:
+                loc = page.locator('input[type="file"]')
+                if loc.count() > 0:
+                    file_input = loc.first
+                    break
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+        if not file_input:
+            return False
+
+        try:
+            file_input.set_input_files(chosen_image, timeout=20000)
+            self.log("✓ File set")
+            time.sleep(1.5)
+
+            has_preview = False
+            try:
+                has_preview = page.evaluate("""() => {
+                    const imgs = document.querySelectorAll('img');
+                    for (const img of imgs) {
+                        const src = img.src || '';
+                        if (src.startsWith('blob:') || src.startsWith('data:image')) {
+                            const r = img.getBoundingClientRect();
+                            if (r.width > 30 && r.height > 30) return true;
+                        }
+                    }
+                    return false;
+                }""")
+            except Exception:
+                pass
+
+            if has_preview:
+                self.log("✓ Preview detected")
+            else:
+                time.sleep(1.0)
+
+            try:
+                self._pc_wait_for_text_visible(page, "Continue", timeout=20000)
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+            url_before = ""
+            try:
+                url_before = page.url or ""
+            except Exception:
+                pass
+
+            if not self._pc_click_continue_button(page):
+                return False
+
+            self.log("✓ Continue clicked")
+            self._image_uploaded_and_continued = True
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=25000)
+            except Exception:
+                pass
+
+            deadline = time.time() + 25
+            while time.time() < deadline:
+                if hasattr(self, "_is_running") and not self._is_running:
+                    break
+                try:
+                    if (page.url or "") != url_before:
+                        break
+                except Exception:
+                    pass
+                time.sleep(0.4)
+
+            time.sleep(2.0)
+            return True
+        except Exception as e:
+            self.log(f"✗ Upload err: {str(e)[:80]}")
+            return False
+
+    def _pc_try_image_upload_if_present(self, page) -> None:
+        try:
+            has_input = page.evaluate("""() => {
+                const inputs = document.querySelectorAll('input[type="file"]');
+                return inputs.length > 0;
+            }""")
+            if has_input:
+                self._pc_upload_random_image(page)
+        except Exception:
+            pass
+
+    def _pc_check_success(self, page):
+        try:
+            return page.evaluate("""() => {
+                const url = window.location.href.toLowerCase();
+                if (url.includes('meta.ai/?') || 
+                    url.includes('meta.ai/home') ||
+                    url.includes('meta.ai/chat') ||
+                    url.includes('/success') ||
+                    url.includes('/welcome') ||
+                    url.includes('/done')) {
+                    return 'url';
+                }
+                const all = document.querySelectorAll('span, div, h1, h2, p');
+                for (const el of all) {
+                    const t = (el.innerText || '').trim();
+                    if (t.length > 0 && t.length < 100) {
+                        const lower = t.toLowerCase();
+                        if (lower === 'welcome' || 
+                            lower.includes("you're all set") ||
+                            lower.includes('account created')) {
+                            const r = el.getBoundingClientRect();
+                            if (r.width > 0 && r.height > 0) return 'text';
+                        }
+                    }
+                }
+                const hasSignup = document.querySelector(
+                    'input[inputmode="email"], input[type="password"], input[inputmode="numeric"]'
+                );
+                const hasMainUI = document.querySelector(
+                    'textarea, [contenteditable="true"], [role="textbox"], nav, header'
+                );
+                if (hasMainUI && !hasSignup) return 'ui';
+                return null;
+            }""")
+        except Exception:
+            return None
+
+    def _pc_check_final_url_for_save(self, page) -> bool:
+        try:
+            current_url = (getattr(page, "url", "") or "").lower()
+            self.log(f"🔍 Checking final URL: {current_url[:100]}")
+            if "auth.meta.com/language" in current_url:
+                return True
+            return False
+        except Exception as e:
+            self.log(f"⚠ URL check err: {str(e)[:60]}")
+            return False
+
+    def _pc_post_otp_flow(self, page) -> Any:
+        self.log("→ Post-OTP: auth.meta.com...")
+        self._pc_navigate_with_retry(page, "https://auth.meta.com", timeout=60000, retries=3)
+        self.log("✓ auth.meta.com loaded")
+        self._pc_wait_for_dom_ready(page, timeout=25000)
+        last_url = ""
+        last_dom_sig = ""
+        same_count = 0
+        reload_count = 0
+        for step_iter in range(15):
+            if hasattr(self, "_is_running") and not self._is_running:
+                return None
+            try:
+                current_url = getattr(page, "url", "") or ""
+            except Exception:
+                current_url = ""
+
+            cap = self._pc_check_captcha_present(page)
+            if cap.get("present"):
+                self.log(f"🧩 Captcha widget: {cap.get('type')}")
+                solved = self._pc_wait_for_captcha_solve(page, timeout=300)
+                if not solved:
+                    return "CAPTCHA_FAILED"
+                time.sleep(1.0)
+
+            if self._dismiss_save_login_info(page):
+                time.sleep(1.0)
+                continue
+
+            if self._pc_check_success(page):
+                self.log("✅ Success")
+                return True
+
+            try:
+                dom_sig = page.evaluate("""() => {
+                    const inputs = document.querySelectorAll('input').length;
+                    const buttons = document.querySelectorAll('button, div[role="button"]').length;
+                    return `${inputs}_${buttons}_${document.title}`;
+                }""")
+            except Exception:
+                dom_sig = "unknown"
+
+            if current_url == last_url and dom_sig == last_dom_sig:
+                same_count += 1
+            else:
+                same_count = 0
+                last_url = current_url
+                last_dom_sig = dom_sig
+
+            if same_count >= 15 and reload_count < 3:
+                self.log(f"🔄 Stuck {same_count} cycles — reloading...")
+                try:
+                    page.reload(timeout=40000, wait_until="domcontentloaded")
+                    self._pc_wait_for_dom_ready(page, timeout=20000)
+                except Exception:
+                    pass
+                same_count = 0
+                reload_count += 1
+                time.sleep(1.0)
+                continue
+
+            self.log(f"→ [Step {step_iter + 1}] URL: {current_url[:60]}")
+            page_info = self._pc_detect_auth_page(page)
+            page_type = page_info.get("type", "unknown")
+
+            if page_type == "success":
+                return True
+            if page_type == "save_login_info":
+                if self._dismiss_save_login_info(page):
+                    time.sleep(1.5)
+                    continue
+            if page_type == "human_check":
+                if self._pc_handle_human_check(page, max_attempts=8):
+                    continue
+                time.sleep(2.0)
+                continue
+            if page_type == "account_select":
+                if self._pc_click_first_account(page):
+                    time.sleep(1.5)
+                    continue
+                if self._pc_click_continue_button(page):
+                    time.sleep(1.5)
+                    continue
+            elif page_type == "login_page":
+                if self._pc_click_text_button(page, "Log in"):
+                    time.sleep(1.5)
+                    continue
+                if self._pc_click_text_button(page, "Continue"):
+                    time.sleep(1.5)
+                    continue
+            elif page_type == "image_upload":
+                return "IMAGE_UPLOAD"
+            elif page_type == "profile_continue":
+                if self._pc_click_continue_button(page):
+                    time.sleep(1.5)
+                    continue
+
+            # Fallbacks exactly as in PC tool:
+            if self._pc_click_continue_button(page):
+                time.sleep(1.2)
+                continue
+            if self._pc_wait_for_text_visible(page, "Log in", timeout=1200, exact=True):
+                self._pc_click_text_button(page, "Log in")
+                time.sleep(1.2)
+                continue
+            if self._pc_click_first_account(page):
+                time.sleep(1.5)
+                continue
+            time.sleep(0.9)
+
+        if self._pc_check_success(page):
+            return True
+        return None
+
+    def _meta_new_way_shortcut(self, p) -> bool:
+        """New way (1:1 parity with PC tool PC_USER_WORK_FREE.exe):
+        Runs the full post-OTP state machine on auth.meta.com:
+        - navigates to https://auth.meta.com
+        - solves captchas & human verification
+        - resolves account chooser ('Continue as...', 'Choose an account')
+        - handles profile continuations ('Continue', 'Next', 'Confirm')
+        - handles image upload prompts using img/ folder
+        - recovers from stuck cycles via reload
+        - verifies final success when settled on auth.meta.com/language or meta.ai
+        """
+        self.log('[🆕] New way (PC tool flow): starting post-OTP flow on auth.meta.com…')
+        try:
+            # If the page object is a mock or lacks evaluate (e.g., unit test), support basic fallback
+            if not hasattr(p, "evaluate"):
+                try:
+                    p.goto("https://auth.meta.com", wait_until="domcontentloaded", timeout=45000)
+                except Exception as exc:
+                    self.log(f'[🆕] Navigation failed ({str(exc)[:60]}) — using normal checks.')
+                    return False
+                u = (getattr(p, "url", "") or "").lower()
+                if "checkpoint" in u or self._has_human_check(p):
+                    return False
+                return bool("language" in u and self._wait_meta_provisioned(p, timeout=20))
+
+            res = self._pc_post_otp_flow(p)
+            if res == "CAPTCHA_FAILED":
+                self.log('[🆕] New way: Captcha solve failed in post-OTP flow — using normal checks.')
+                return False
+            if res == "IMAGE_UPLOAD":
+                upload_ok = self._pc_upload_random_image(p)
+                if upload_ok:
+                    res2 = self._pc_post_otp_flow(p)
+                    if res2 == "CAPTCHA_FAILED":
+                        return False
+            time.sleep(0.8)
+            self._pc_try_image_upload_if_present(p)
+            try:
+                p.wait_for_load_state("networkidle", timeout=25000)
+            except Exception:
+                pass
+            time.sleep(2.0)
+            self._dismiss_save_login_info(p)
+
+            # Terminal IP/network check
+            if _meta_ip_blocked(p):
+                raise MetaCheckpointBlocked(
+                    'Meta human-verification checkpoint refused the request '
+                    '("Try again later" / "sending automated queries").'
+                )
+
+            # Check final URL, settled status, or direct success
+            cur_url = (getattr(p, "url", "") or "").lower()
+            is_success = (
+                self._pc_check_final_url_for_save(p)
+                or bool(self._pc_check_success(p))
+                or (res is True)
+                or ("auth.meta.com" in cur_url and "checkpoint" not in cur_url and self._wait_meta_provisioned(p, timeout=15))
+            )
+
+            if is_success and not self._has_human_check(p):
+                self.log('<font color="#00FF00"><b>[🆕] New way: Meta account settled & verified via PC tool flow.</b></font>')
+                return True
+
+            self.log('[🆕] New way: post-OTP did not settle — using the normal checks.')
+            return False
+        except MetaCheckpointBlocked:
+            raise
+        except Exception as exc:
+            self.log(f'[🆕] New-way error ({str(exc)[:80]}) — using the normal checks.')
+            return False
+
     def ensure_meta_verified(self, timeout: int = 600) -> bool:
         """Human verification, done intentionally like before.
 
@@ -105,8 +1216,18 @@ class CaptchaMixin:
         """
         p = self.page
         per = max(120, timeout // 4)
+        # EXPERIMENTAL "new way" (dashboard: Meta method = New way): try the PC tool's shortcut first. When it is
+        # not conclusive the unchanged checks below run, exactly as in the old way.
+        if str(os.environ.get("INSTA_META_FLOW", "old")).strip().lower() == "new":
+            try:
+                if self._meta_new_way_shortcut(p):
+                    return True
+            except Exception as exc:
+                self.log(f'[🆕] New-way shortcut error ({str(exc)[:80]}) — using the normal checks.')
         for attempt in range(1, 5):
             self.log(f'[🛡️] Meta human verification — attempt {attempt}')
+            self._dismiss_cookie_choice(p)
+            self._dismiss_save_login_info(p)
             cur_url = (p.url or "").lower()
             cur_body = ""
             try:
@@ -180,6 +1301,14 @@ class CaptchaMixin:
                     pass
                 cur_url = (p.url or "").lower()
 
+            # "Check your email" re-login (shown after the chooser, or on its own).
+            if self._meta_login_challenge(p):
+                try:
+                    cur_body = (p.inner_text("body") or "").lower()
+                except Exception:
+                    pass
+                cur_url = (p.url or "").lower()
+
             # Stuck-checkpoint guard: auth.meta.com/checkpoint… that only ever
             # renders grey placeholder bars (skeleton) — no reCAPTCHA, no
             # Continue. Nothing to solve and nothing to click, so the 4 retries
@@ -227,12 +1356,13 @@ class CaptchaMixin:
                 # The old code also required "checkpoints" to leave the URL, so
                 # it ran attempts 2-4 (each re-entering the selfie checkpoint)
                 # for ~23s AFTER the selfie had already been accepted.
-                if not self._has_human_check(p):
+                if not self._has_human_check(p) and not self._needs_meta_relogin(p):
                     self.log('<font color="#00FF00"><b>[✔] Meta human verification cleared.</b></font>')
                     self._maybe_accept_meta_terms(p)
                     self._wait_meta_provisioned(p, timeout=45)
                     return True
-            if not self._has_human_check(p) and "checkpoints" not in (p.url or ""):
+            if (not self._has_human_check(p) and "checkpoints" not in (p.url or "")
+                    and not self._needs_meta_relogin(p)):
                 self.log('<font color="#00FF00"><b>[✔] Meta human verification cleared.</b></font>')
                 self._maybe_accept_meta_terms(p)
                 self._wait_meta_provisioned(p, timeout=45)
@@ -329,9 +1459,9 @@ class CaptchaMixin:
                     if not self._extension_available():
                         continue
                     try:
-                        _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "60") or 60)
+                        _vt = float(os.environ.get("INSTA_VISUAL_CAPTCHA_TIMEOUT", "25") or 25)
                     except Exception:
-                        _vt = 60.0
+                        _vt = 25.0
                     if self._wait_for_extension_solve(page, timeout=_vt):
                         return True
                     if "audio" in self._captcha_order():
@@ -587,6 +1717,140 @@ class CaptchaMixin:
 
         return False
 
+    # -- selfie upload -----------------------------------------------------
+    # Core owns the selfie path (CaptchaMixin wins over the engine mixin). The
+    # engine copy gated success on a preview / enabled Continue, which Meta
+    # renders asynchronously, so good uploads were reported as failed.
+
+    def _selfie_path(self):
+        """Selfie image: ``self.selfie_path``, else a pick from selfies/ or img/."""
+        path = getattr(self, "selfie_path", None)
+        if not path or not os.path.exists(path):
+            try:
+                from ai_config import get_random_selfie
+                path = get_random_selfie()
+                self.selfie_path = path
+            except Exception:
+                path = None
+        return path if path and os.path.exists(path) else None
+
+    def _selfie_file_inputs(self, page, per_frame=4):
+        """Every ``input[type=file]`` in every frame, hidden ones included.
+
+        Keeps up to ``per_frame`` inputs per frame: a decoy input ahead of the
+        real dropzone used to hide the real one.
+        """
+        try:
+            frames = list(page.frames)
+        except Exception:
+            frames = [page]
+        out = []
+        for fr in frames:
+            try:
+                loc = fr.locator('input[type="file"]')
+                out.extend(loc.nth(i) for i in range(min(loc.count(), per_frame)))
+            except Exception:
+                continue
+        return out
+
+    def _upload_selfie(self, page):
+        """Send the selfie to the checkpoint. True once the browser has attached
+        the file to a real file input, the page's file chooser, or CDP.
+
+        True means only "sent". The caller decides whether Meta accepted it:
+        it waits for Continue (_wait_selfie_continue) and checks the prompt
+        cleared. Returning False here is reserved for "no path accepted the file".
+        """
+        path = self._selfie_path()
+        if not path:
+            self.log('[⚠️] No selfie image found — put "selfie.png" next to run.py '
+                     'or images in selfies/.')
+            return False
+        name = os.path.basename(path)
+
+        # The React dropzone mounts a beat after the heading: wait up to ~4s.
+        for _ in range(8):
+            if self._selfie_file_inputs(page, per_frame=1):
+                break
+            page.wait_for_timeout(500)
+
+        # 1) Set the file directly on each input, in every frame.
+        for inp in self._selfie_file_inputs(page):
+            try:
+                try:
+                    inp.set_input_files(path, timeout=20000)
+                except Exception:
+                    # Some builds only accept the file once the input is shown.
+                    inp.evaluate("el => { el.style.display='block'; el.style.visibility='visible'; el.style.opacity=1; }")
+                    inp.set_input_files(path, timeout=20000)
+                self.log(f'<font color="#00FF00"><b>[🖼️] Selfie sent: {name}</b></font>')
+                return True
+            except Exception as exc:
+                self.log(f'[i] file input rejected the selfie ({exc}); trying next path…')
+
+        # 2) Click the page's upload control and answer the file chooser it opens.
+        for sel in (
+            'button:has-text("Upload Image")',
+            '[role="button"]:has-text("Upload Image")',
+            'label:has-text("Upload Image")',
+            'div:has-text("Upload Image")',
+            'span:has-text("Upload Image")',
+            'text=Upload Image',
+            'button:has-text("Upload")',
+        ):
+            try:
+                loc = page.locator(sel).last
+                if loc.count() == 0 or not loc.is_visible():
+                    continue
+                try:
+                    with page.expect_file_chooser(timeout=8000) as fc:
+                        try:
+                            loc.click(timeout=6000)
+                        except Exception:
+                            loc.evaluate("el => el.click()")
+                    fc.value.set_files(path)
+                except Exception:
+                    box = loc.bounding_box()
+                    if not box:
+                        continue
+                    with page.expect_file_chooser(timeout=8000) as fc:
+                        page.mouse.click(box["x"] + box["width"] / 2,
+                                         box["y"] + box["height"] / 2)
+                    fc.value.set_files(path)
+                self.log(f'<font color="#00FF00"><b>[🖼️] Selfie sent via chooser: {name}</b></font>')
+                return True
+            except Exception:
+                continue
+
+        # 3) CDP last resort: sets the file on inputs the locator API cannot reach
+        # (shadow DOM).
+        try:
+            if self._cdp_set_file_input(page, path):
+                self.log(f'<font color="#00FF00"><b>[🖼️] Selfie sent (CDP): {name}</b></font>')
+                return True
+        except Exception:
+            pass
+
+        self.log('[⚠️] Selfie upload failed — no file input accepted the image. '
+                 'Meta may have changed the checkpoint UI; upload manually in the window.')
+        return False
+
+    def _wait_selfie_continue(self, page, timeout=30) -> bool:
+        """Wait until Meta enables Continue after processing the selfie, then click it.
+
+        Meta enables Continue only once the image is processed, several seconds
+        after the file is attached. A click on the disabled button did nothing, the
+        prompt never cleared, and the caller re-uploaded every 5s. True if clicked.
+        """
+        end = time.time() + timeout
+        while time.time() < end and self.w.is_running:
+            if self._checkpoint_action(page, names=("Continue",), require_enabled=True) is not None:
+                if self._click_checkpoint_action(page, "Continue", timeout=3000):
+                    return True
+                return self._try_click(page, "Continue", timeout=4000)
+            page.wait_for_timeout(500)
+        return False
+
     def _meta_selfie_checkpoint(self, page, timeout=900):
         """Checkpoint flow with dashboard-ordered solvers (ordered).
 
@@ -635,7 +1899,7 @@ class CaptchaMixin:
                         uploaded = bool(self._upload_selfie(page))
                         uploaded_ever = uploaded_ever or uploaded
                     if uploaded:
-                        self._try_click(page, "Continue", timeout=8000)
+                        self._wait_selfie_continue(page, timeout=30)
                         self._poll_checkpoint_settled(page, timeout=8)
                         # 'uploaded' only means a file was SENT. Confirm the
                         # checkpoint actually advanced before believing it —
@@ -668,7 +1932,7 @@ class CaptchaMixin:
                     saw_selfie = True
                     uploaded = True
                     uploaded_ever = True
-                    self._try_click(page, "Continue", timeout=8000)
+                    self._wait_selfie_continue(page, timeout=30)
                     self._poll_checkpoint_settled(page, timeout=8)
                     continue
             except Exception:
@@ -792,6 +2056,8 @@ class CaptchaMixin:
 
     def _maybe_accept_meta_terms(self, page) -> bool:
         """Handle Meta's mid-flow dialogs ('Create account', 'Not now', 'I agree')."""
+        if self._dismiss_cookie_choice(page):
+            return True
         try:
             # 1. "Finish creating your Meta account" -> "Create account" button
             btn = page.get_by_role("button", name="Create account").first

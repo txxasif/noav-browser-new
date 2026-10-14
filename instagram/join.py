@@ -15,6 +15,9 @@ except ImportError:  # pragma: no cover - top-level import path
 
 from ai_config import Urls  # noqa: E402
 
+# Fallback usernames this process has already tried (see the TG-replacement fallback).
+_USED_USERNAMES: set[str] = set()
+
 
 # Valid fallback display names — IG rejects names > 29 UTF-16 units
 # ("Enter a name under 30 characters") and the Taskly first_name can be
@@ -439,7 +442,9 @@ class IgJoinMixin:
                 break
             p.wait_for_timeout(1000)
 
+        user_input_seen = False
         if user_input or p.get_by_role("textbox", name="Username").count() > 0:
+            user_input_seen = True
             target_user_inp = user_input or p.get_by_role("textbox", name="Username").first
 
             def _check_username_rejected() -> tuple[bool, str]:
@@ -466,6 +471,8 @@ class IgJoinMixin:
                 return False, ""
 
             # Attempt setting username (up to 8 attempts via fresh TG tasks, keeping Meta session intact)
+            username_accepted = False
+            username_reason = ""
             for uname_attempt in range(8):
                 cand_user = (self.tg_creds.get("login") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_username", None) or self.username or "user"
                 self.log(f'[📝] Setting Username during onboarding (attempt {uname_attempt + 1}/8): "{cand_user}"')
@@ -518,10 +525,19 @@ class IgJoinMixin:
                 _cur_t = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
                 if "create a username" not in _cur_t and "add a username" not in _cur_t:
                     self.log(f'[✔] Username "{self.ig_username}" accepted by Instagram.')
+                    username_accepted = True
                     break
 
                 # Username rejected / could not advance: cancel TG task and get fresh one (ignoring first name)
-                reason = reason or "taken"
+                # "unknown" = the page did not advance and no rejection text matched. Do not
+                # call that "taken": keep the same name, log the page, and retry.
+                reason = reason or "unknown"
+                username_reason = reason
+                page_hint = " ".join(_cur_t[:240].split())
+                if reason == "unknown":
+                    self.log(f'[⚠️] Username "{self.ig_username}" did not advance (no rejection text found). Page: "{page_hint}"')
+                    p.wait_for_timeout(2000)
+                    continue
                 self.log(f'[⚠️] Username "{self.ig_username}" rejected by Instagram ({reason}) — canceling TG task to get replacement username (first name ignored)…')
                 hook = getattr(self, "_on_username_taken", None)
                 new_login = None
@@ -538,12 +554,29 @@ class IgJoinMixin:
                 else:
                     self.log('[⚠️] TG bot replacement task not returned — mutating username with fresh suffix…')
                     base = re.sub(r'[\d_]+$', '', self.ig_username or "user") or "user"
-                    fresh_uname = f"{base}_{random.randint(100, 99999)}"
+                    # 8 random hex chars instead of 5 digits, and never a name this process
+                    # already tried: a short numeric suffix on a reused base collides easily.
+                    fresh_uname = None
+                    for _ in range(5):
+                        cand = f"{base[:18]}_{random.getrandbits(32):08x}"
+                        if cand not in _USED_USERNAMES:
+                            fresh_uname = cand
+                            break
+                    if fresh_uname is None:
+                        fresh_uname = f"{base[:18]}_{random.getrandbits(40):010x}"
+                    _USED_USERNAMES.add(fresh_uname)
                     if hasattr(self, "tg_creds") and isinstance(self.tg_creds, dict) and "login" in self.tg_creds:
                         self.tg_creds["login"] = fresh_uname
                     self.new_username = fresh_uname
                     self.username = fresh_uname
                     p.wait_for_timeout(1500)
+
+        # Stop here if Instagram never accepted a username. Continuing would log in with a
+        # name that was never created, which only ends as "Can't find account" later.
+        if user_input_seen and not username_accepted:
+            raise RuntimeError(
+                f'Username not accepted by Instagram after 8 attempts (last name '
+                f'"{self.ig_username}", last rejection: {username_reason or "unknown"})')
 
         # 2b. "Create a password" if prompted during onboarding
         desired_pw = (self.tg_creds.get("password") if hasattr(self, "tg_creds") and self.tg_creds else None) or getattr(self, "new_password", None) or getattr(self, "password", None)

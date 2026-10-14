@@ -120,6 +120,29 @@ _META_POST_URL = (
     "&rcs=ATpGj6uc0wSwRKfKt4r0d13LoBJ__NFx0MbR2e7oKl5u52MwdsjJeOFLijjoT0Hh8DlghJfF307PuNf18j1CDUrVYCEIDQvOsklJMII4tsp1pY43PmF1N-z46zsRuIpr0tMMa_o0aQQG3hyCTtbuaLYy28X17J711RLGmDzzA42tmomLjynfBfrkv0k"
 )
 _MAILTD_URL = "https://mail.td/"
+
+# Cloudflare catch-all mail (mailcf): Email Routing domain + OTP Worker.
+def _load_cf_mail_env() -> None:
+    """Pick up CF_MAIL_* lines from the project .env when the shell did not export them."""
+    path = os.path.join(os.path.dirname(HERE), ".env")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                key, sep, value = line.strip().partition("=")
+                if sep and key.startswith("CF_MAIL_") and key not in os.environ:
+                    os.environ[key] = value.strip().strip('"').strip("'")
+    except OSError:
+        pass
+
+
+_load_cf_mail_env()
+CF_MAIL_DOMAIN = os.environ.get("CF_MAIL_DOMAIN", "lumencreative.site")
+CF_MAIL_WORKER = os.environ.get("CF_MAIL_WORKER", "https://meta-otp-receiver.ahasiffff.workers.dev")
+# Admin secret for POST /register (must match the Worker ADMIN_TOKEN secret). Keep in .env, never commit.
+CF_MAIL_ADMIN_TOKEN = os.environ.get("CF_MAIL_ADMIN_TOKEN", "")
+YAMIN_MAIL_API = os.environ.get("YAMIN_MAIL_API", "https://email.yamin.bd")
+YAMIN_AUTH_KEY = os.environ.get("YAMIN_AUTH_KEY", "yamin12134@!")
+YAMIN_DOMAINS = tuple(x.strip() for x in os.environ.get("YAMIN_DOMAINS", "epicz.xyz").split(",") if x.strip())
 _IG_LOGIN_URL = "https://www.instagram.com/accounts/login/"
 _IG_SIGNUP_URL = "https://www.instagram.com/accounts/emailsignup/"
 
@@ -160,11 +183,43 @@ _ANTIDETECT_TEMPLATE = r"""
   for (const key of Object.keys(nav)) {
     try { Object.defineProperty(navigator, key, { get: () => nav[key], configurable: true, enumerable: true }); } catch(e) {}
   }
+  // Android WebView parity: navigator.webdriver must be completely absent, not a getter returning undefined
   try {
     delete Object.getPrototypeOf(navigator).webdriver;
   } catch(e) {}
   try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true, enumerable: false });
+    delete navigator.webdriver;
+  } catch(e) {}
+  if (isMobile) {
+    try {
+      Object.defineProperty(navigator, 'plugins', { get: () => [], configurable: true });
+      Object.defineProperty(navigator, 'mimeTypes', { get: () => [], configurable: true });
+    } catch(e) {}
+    try {
+      if (typeof window.chrome !== 'undefined' && window.chrome) {
+        delete window.chrome.webstore;
+        delete window.chrome.runtime;
+      }
+    } catch(e) {}
+  }
+  try {
+    const origQuery = navigator.permissions && navigator.permissions.query;
+    if (origQuery) {
+      navigator.permissions.query = function(param) {
+        if (param && param.name === 'notifications') {
+          return Promise.resolve({ state: typeof Notification !== 'undefined' ? Notification.permission : 'default', onchange: null });
+        }
+        return origQuery.apply(this, arguments);
+      };
+    }
+  } catch(e) {}
+  try {
+    // Clear CDP / automation globals
+    for (const k in window) {
+      if (typeof k === 'string' && (k.startsWith('cdc_') || k.startsWith('__pw_'))) {
+        try { delete window[k]; } catch(e){}
+      }
+    }
   } catch(e) {}
   try {
     const brands = [{ brand: 'Chromium', version: CONFIG.chMajor || '124' },
@@ -196,6 +251,8 @@ _ANTIDETECT_TEMPLATE = r"""
       orientation: isMobile ? { type: 'portrait-primary', angle: 0 } : { type: 'landscape-primary', angle: 0 }
     }, configurable: true });
     Object.defineProperty(window, 'devicePixelRatio', { get: () => pixelRatio });
+    Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth || screenWidth, configurable: true });
+    Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight || screenHeight, configurable: true });
     if (isMobile) {
       if (typeof window.TouchEvent === 'undefined') { window.TouchEvent = function TouchEvent() {}; }
       window.ontouchstart = function() {};

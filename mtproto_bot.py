@@ -65,6 +65,8 @@ from __future__ import annotations
 import json
 import os
 import queue
+import random
+import datetime
 import re
 import sys
 import threading
@@ -138,6 +140,20 @@ def _is_hour_limit(text, cookies: bool = False) -> bool:
     if cookies and any(p in tl for p in _HOUR_LIMIT_SOLD_OUT):
         return True
     return False
+
+
+def _stock_counter(text):
+    """The N of "Available this hour: N/5700" (None when the text has no counter)."""
+    m = re.search(r"available this hour:\s*(\d+)", (text or "").lower())
+    return int(m.group(1)) if m else None
+
+
+_RESET_MARKERS = ("previous conversation was reset", "start again from the main menu")
+
+
+def _is_conversation_reset(text) -> bool:
+    tl = (text or "").lower()
+    return any(k in tl for k in _RESET_MARKERS)
 
 
 def _is_subscription_confirm(text) -> bool:
@@ -398,8 +414,12 @@ class MtprotoTasklyBot:
         _pin_loop(self._client)
         if not self._client.is_connected():
             self._client.connect()
+        if getattr(self, "_entity", None) is not None and \
+                getattr(self, "_entity_for", None) == self.bot_username:
+            return True          # already resolved: skip the network round trip
         try:
             self._entity = self._client.get_entity(self.bot_username)
+            self._entity_for = self.bot_username
         except Exception as exc:
             self.log(f"[tg] could not resolve {self.bot_username}: {exc}")
             return False
@@ -468,6 +488,30 @@ class MtprotoTasklyBot:
             if len(out) >= n:
                 break
         return out
+
+    def wait_report_accepted(self, timeout: float = 240.0) -> bool:
+        """PayGo 2FA ends WITHOUT a register button: after the one-time code is confirmed on
+        Instagram the bot verifies by itself ("Your report is being verified") and then sends either
+        "✅ 2FA enabled! Report accepted." or "❌ You did not set up 2FA. The report was automatically
+        rejected." Poll for whichever comes first. "Code not found / Time's up! Task cancelled" is only
+        the bot's email-search timer (~2m50 after 📥 Get code) and is NOT a verdict on its own."""
+        end = time.time() + max(5.0, float(timeout))
+        while time.time() < end:
+            try:
+                texts = self._recent_texts(6)
+            except Exception:
+                texts = []
+            for t in texts:
+                low = (t or "").lower()
+                if "report accepted" in low or "2fa enabled" in low:
+                    self.log(f"[tg] bot verdict: {t[:80]}")
+                    return True
+                if "automatically rejected" in low or "did not set up" in low:
+                    self.log(f"[tg] bot verdict: {t[:80]}")
+                    return False
+            time.sleep(2.0)
+        self.log("[tg] no verdict from the bot before the timeout.")
+        return False
 
     def _last_id(self) -> int:
         m = self._last()
@@ -875,6 +919,7 @@ class MtprotoTasklyBot:
             return False
         self.last_task_verdict = None
         want = LABELS.get(task_id, task)
+        self._last_task = task
         # Only the Cookies tasks publish the hourly stock counter
         # ("Available this hour: 0/5700"). A stale 0-stock message from an
         # earlier Cookies check must never mark a 2FA task sold out.
@@ -907,9 +952,16 @@ class MtprotoTasklyBot:
                 # "0/5700" or an old limit notice veto a healthy 2FA pick.
                 try:
                     fresh = []
+                    _now_utc = datetime.datetime.now(datetime.timezone.utc)
                     for m in self._messages(limit=10, min_id=base_id):
                         if getattr(m, "out", False):
                             continue
+                        _d = getattr(m, "date", None)
+                        try:
+                            if _d is not None and (_now_utc - _d).total_seconds() > 120:
+                                continue   # stale history is never evidence of this pick
+                        except Exception:
+                            pass
                         t = (getattr(m, "text", "") or "").strip()
                         if t:
                             fresh.append(t)
@@ -917,8 +969,17 @@ class MtprotoTasklyBot:
                             break
                 except Exception:
                     fresh = []
+                # The NEWEST stock counter decides: a positive "Available this hour: 2333/3500" must
+                # never be vetoed by an older "0/3500" line sitting next to it (false sold-out, which
+                # made Auto-Mine stop Taskly for the whole hour while 1800+ were still available).
+                _stock_positive = False
                 for t in fresh:
-                    if _is_hour_limit(t, cookies=is_cookies_task):
+                    _n = _stock_counter(t)
+                    if _n is not None:
+                        _stock_positive = _n > 0
+                        break
+                for t in fresh:
+                    if _is_hour_limit(t, cookies=is_cookies_task and not _stock_positive):
                         self.last_task_verdict = "soldout"
                         self.log(f"[tg] choose_task: {self.bot_target} hourly limit reached: {t.strip()[:120]}")
                         return False
@@ -938,6 +999,28 @@ class MtprotoTasklyBot:
         self.last_task_verdict = "hidden"
         self.log(f"[tg] task '{want}' not found.")
         return False
+
+    _rate_gate = {}   # bot_target -> unix time before which no account should press Start
+
+    def _recover_conversation_reset(self) -> bool:
+        """The bot answered "Our previous conversation was reset, please start again from the main
+        menu" (a stray Cancel//start from another process, or the preview timing out). The task is
+        gone, so pressing Start again is pointless: go back to the menu and select the task again."""
+        task = getattr(self, "_last_task", None)
+        if not task:
+            return False
+        try:
+            if not any(_is_conversation_reset(t) for t in self._recent_texts(3)):
+                return False
+        except Exception:
+            return False
+        self.log("[tg] bot reset the conversation — re-selecting the task from the main menu.")
+        try:
+            self.reset_to_main_menu()
+            return bool(self.choose_task(task))
+        except Exception as exc:
+            self.log(f"[tg] re-select after reset failed: {exc}")
+            return False
 
     def start_task(self):
         """Press Start and parse fresh creds (never stale, never across a cancel)."""
@@ -964,6 +1047,15 @@ class MtprotoTasklyBot:
                     self.log(f"[tg] start_task: task already in progress "
                              f"({first[:60]!r}) — not pressing Start")
                     return {"first_name": "", "login": "", "password": ""}
+
+            # Shared per-bot back-off: when ANY account was told "too often / wait N sec", the other
+            # accounts hold their Start too instead of hammering the bot (6 accounts retrying every
+            # 5 s kept the limiter armed). Capped, with jitter so they do not all fire together.
+            _gate = MtprotoTasklyBot._rate_gate.get(self.bot_target, 0.0) - time.time()
+            if _gate > 0:
+                _gate = min(_gate, 60.0) + random.uniform(0.0, 3.0)
+                self.log(f"[tg] start_task: bot is rate-limiting — holding Start {_gate:.0f}s.")
+                time.sleep(_gate)
 
             # Wait for the task-preview keyboard; only then is "▶️ Start" real.
             sbtn, smsg = self._wait_for_button("start", timeout=12)
@@ -994,6 +1086,8 @@ class MtprotoTasklyBot:
                         if _is_hour_limit(t, cookies=True):
                             self.log(f"[tg] start_task: {self.bot_target} hourly limit reached: {t.strip()}")
                             return {"error": "limit_reached", "detail": t.strip(), "login": "", "password": ""}
+                    if self._recover_conversation_reset():
+                        continue
                     self.log("[tg] start_task: 'Start' button not present on screen")
                     return {"first_name": "", "login": "", "password": ""}
             self.log(f"[tg] start_task: pressed '{sent}'")
@@ -1045,7 +1139,9 @@ class MtprotoTasklyBot:
             if found and found.get("error") == "limit_reached":
                 return found
             if rate_limited:
-                cooldown = max(5, wait_sec) + 1.5
+                # Grow the wait with every repeat (x1, x2, x3 ...) — a fixed few seconds just re-arms it.
+                cooldown = (max(5, wait_sec) + 1.5) * (attempt + 1)
+                MtprotoTasklyBot._rate_gate[self.bot_target] = time.time() + cooldown
                 self.log(f"[tg] ⏳ anti-flood: bot asked to wait {wait_sec}s — "
                          f"sleeping {cooldown:.1f}s (attempt {attempt + 1}/4)…")
                 time.sleep(cooldown)
@@ -1057,6 +1153,7 @@ class MtprotoTasklyBot:
             # Diagnostic: show what the bot actually said so a miss is explainable.
             self.log(f"[tg] start_task miss #{attempt + 1}: last bot msgs = "
                      f"{[t[:140] for t in self._recent_texts(3)]}")
+            self._recover_conversation_reset()
         self.log("[tg] ❌ Could not obtain fresh task credentials (timed out / rate limited).")
         return {"first_name": "", "login": "", "password": ""}
 
@@ -1131,7 +1228,7 @@ class MtprotoTasklyBot:
         before_id = self._last_id()
         self._send(clean)
         self.log(f"[tg] 2FA key submitted to {self.bot_name}; waiting for one-time code…")
-        deadline = time.time() + 25.0
+        deadline = time.time() + (15.0 if allow_local_fallback else 25.0)
         while time.time() < deadline:
             time.sleep(0.25)
             for m in self._messages(limit=4):
@@ -1355,7 +1452,7 @@ class MtprotoTasklyBot:
         # _wait_for_cookie_prompt). Sending before the prompt lands out of
         # order — this is what the pool path hit (rename is ~0.4s, the prompt
         # had not arrived yet).
-        if not self._wait_for_cookie_prompt(timeout=3.0):
+        if not self._wait_for_cookie_prompt(timeout=1.0):
             # The 2FA step (when a task needs one) runs BEFORE this call and, on
             # FAILURE, the caller aborts instead of submitting — so we never reach
             # here while the bot is genuinely waiting for the 2FA key. Detection
@@ -1434,10 +1531,16 @@ class MtprotoTasklyBot:
         """
         self.open_bot()
         for _round in range(3):
-            before_id = self._last_id()
-            before_txt = self._last_text()
-
-            btns, msg = self._buttons()
+            # ONE fetch gives the baseline AND the keyboard (was 3 round trips).
+            _msgs = self._messages(limit=10)
+            before_id = int(getattr(_msgs[0], "id", 0) or 0) if _msgs else 0
+            before_txt = ((getattr(_msgs[0], "text", "") or "").strip()) if _msgs else ""
+            btns, msg = [], None
+            for _m in _msgs:
+                _b = _reply_button_texts(_m)
+                if _b:
+                    btns, msg = _b, _m
+                    break
             inline = _inline_buttons(msg) if msg is not None else []
             pick = None
             # 1. Exact label match on the reply keyboard (NFKC: FastPay's Confirm

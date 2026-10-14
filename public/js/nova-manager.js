@@ -18,11 +18,11 @@
   }
   function toast(m, k) { if (typeof window.showToast === 'function') window.showToast(m, k); }
 
-  function botLogo(id) { return id === 'paygo' ? 'paygo' : (id === 'fastpay' ? 'fastpay' : 'taskly'); }
+  function botLogo(id) { return id === 'paygo' ? 'paygo' : 'taskly'; }
 
   function botCard(b) {
     var busyTxt = b.busy_other ? (b.busy_other + ' busy elsewhere') : '';
-    var botColor = b.id === 'paygo' ? '#f59e0b' : (b.id === 'fastpay' ? '#10b981' : '#229ED9');
+    var botColor = b.id === 'paygo' ? '#f59e0b' : '#229ED9';
     var flowLabel = (b.flows || []).join('/') || '2fa';
     var taskChips = (b.tasks || []).map(function (t) {
       return '<span class="tgm-task-chip">' + esc(t) + '</span>';
@@ -96,50 +96,162 @@
     '</div>';
   }
 
-  function renderBalances(b) {
+  // ---- Live balances (Taskly + PayGo) --------------------------------------
+  // Balances stream in per account: each row fills the moment its account is read,
+  // so the table is useful right away instead of after the whole pool.
+  var balState = { rows: {}, total: 0, done: 0, running: false, ctrl: null };
+
+  function money(x) { return x && x.ok ? '$' + Number(x.amount || 0).toFixed(2) : null; }
+  function pendTxt(x) { return x && x.ok && x.pending ? '<span class="tgm-pend">+' + Number(x.pending).toFixed(2) + ' pend</span>' : ''; }
+  function cellFor(x, err) {
+    if (x && x.ok) return '<span class="tgm-amt">' + money(x) + '</span>' + pendTxt(x);
+    if (err) return '<span class="tgm-na" title="' + esc(err) + '">—</span>';
+    return '<span class="tgm-na">—</span>';
+  }
+  function balRow(a) {
+    var bots = a.bots || [];
+    var t = bots.filter(function (x) { return x.target === 'taskly'; })[0];
+    var p = bots.filter(function (x) { return x.target === 'paygo'; })[0];
+    var total = (t && t.ok ? Number(t.amount || 0) : 0) + (p && p.ok ? Number(p.amount || 0) : 0);
+    var st = a.busy ? '<span class="profile-status-badge badge-warn">Busy</span>'
+      : (a.ok === false ? '<span class="profile-status-badge badge-rose">Error</span>'
+      : (a.ok ? '<span class="profile-status-badge badge-ok">Read</span>'
+      : '<span class="profile-status-badge badge-inactive">Waiting</span>'));
+    return '<tr data-bal-row="' + esc(a.id) + '">' +
+      '<td><div class="tgm-acct"><strong>' + esc(a.name || a.id) + '</strong><span class="tgm-id">' + esc(a.id) + '</span></div></td>' +
+      '<td>' + st + '</td>' +
+      '<td class="r">' + cellFor(t, a.error) + '</td>' +
+      '<td class="r">' + cellFor(p, a.error) + '</td>' +
+      '<td class="r tgm-tot">' + (a.ok || a.bots ? '$' + total.toFixed(2) : '—') + '</td></tr>';
+  }
+
+  function renderBalTable() {
     var wrap = $('tgm-bal-wrap');
     if (!wrap) return;
-    if (!b || !b.accounts) { wrap.style.display = 'block'; wrap.innerHTML = '<div class="creator-option-hint">' + esc((b && b.error) || 'no result') + '</div>'; return; }
-    var rows = b.accounts.map(function (a) {
-      var t = (a.bots || []).filter(function (x) { return x.target === 'taskly'; })[0];
-      var p = (a.bots || []).filter(function (x) { return x.target === 'paygo'; })[0];
-      var f = (a.bots || []).filter(function (x) { return x.target === 'fastpay'; })[0];
-      var money = function (x) { return x && x.ok ? '$' + Number(x.amount || 0).toFixed(2) : '\u2014'; };
-      var fMoney = function (x) {
-        if (!x || !x.ok) return '\u2014';
-        var s = '$' + Number(x.amount || 0).toFixed(2);
-        if (x.pending) {
-          s += ' <span class="badge-pill" style="margin-left:5px;font-size:10px;padding:1px 5px;background:rgba(234,179,8,0.12);color:#eab308;border:1px solid rgba(234,179,8,0.25);" title="Pending Balance: $' + Number(x.pending).toFixed(2) + '">+' + Number(x.pending).toFixed(2) + ' pend</span>';
-        }
-        return s;
-      };
-      return '<tr><td>' + esc(a.id || '?') + (a.error ? ' <span class="creator-option-hint">' + esc(a.error) + '</span>' : '') +
-        '</td><td class="r">' + money(t) + '</td><td class="r">' + money(p) + '</td><td class="r">' + fMoney(f) + '</td>' +
-        '<td class="r">$' + Number(a.total || 0).toFixed(2) + '</td></tr>';
-    }).join('');
-    var T = b.totals || {};
-    var fpTot = '$' + Number(T.fastpay || 0).toFixed(2);
-    if (T.fastpay_pending) {
-      fpTot += ' <span style="font-size:10px;color:#eab308;font-weight:500;">(+$' + Number(T.fastpay_pending).toFixed(2) + ' pend)</span>';
-    }
-    var T = b.totals || {};
-    var fpTot = '$' + Number(T.fastpay || 0).toFixed(2);
-    if (T.fastpay_pending) {
-      fpTot += ' <span style="font-size:10px;color:#eab308;font-weight:500;">(+$' + Number(T.fastpay_pending).toFixed(2) + ' pend)</span>';
-    }
-    var stamp = '';
-    if (b.elapsed_s != null) {
-      stamp = ' <span class="creator-option-hint" style="margin-left:6px;">'
-        + (b.cached ? 'cached' : 'read in ' + Number(b.elapsed_s).toFixed(1) + 's') + '</span>';
-    }
+    var list = Object.keys(balState.rows).map(function (k) { return balState.rows[k]; });
+    list.sort(function (x, y) { return String(x.name || x.id).localeCompare(String(y.name || y.id)); });
+    var tTaskly = 0, tPaygo = 0;
+    list.forEach(function (a) {
+      (a.bots || []).forEach(function (x) {
+        if (!x.ok) return;
+        if (x.target === 'taskly') tTaskly += Number(x.amount || 0);
+        if (x.target === 'paygo') tPaygo += Number(x.amount || 0);
+      });
+    });
+    var pct = balState.total ? Math.round(balState.done / balState.total * 100) : 0;
+    var running = balState.running;
     wrap.style.display = 'block';
-    wrap.innerHTML = '<div style="margin-bottom:0.6rem;font-weight:600;font-size:0.85rem;color:var(--text-main);"><i class="fa-solid fa-wallet" style="color:#229ed9;margin-right:6px;"></i> Account Balances' + stamp + '</div>' +
-      '<table class="tgm-bal"><thead><tr><th>Account</th><th class="r">Taskly</th><th class="r">PayGo</th><th class="r">FastPay <span style="font-size:10px;font-weight:normal;opacity:0.65;">(Avail + Pend)</span></th><th class="r">Total</th></tr></thead>' +
-      '<tbody>' + rows + '</tbody>' +
-      '<tfoot><tr style="font-weight:700;"><td>TOTAL</td><td class="r">$' + Number(T.taskly || 0).toFixed(2) +
-      '</td><td class="r">$' + Number(T.paygo || 0).toFixed(2) + '</td><td class="r">' + fpTot + '</td><td class="r">$' + Number(T.grand || 0).toFixed(2) +
-      '</td></tr></tfoot></table>';
+    wrap.innerHTML =
+      '<div class="tgm-balhead">' +
+        '<div class="tgm-stats">' +
+          '<div class="tgm-stat"><span>Taskly total</span><strong>$' + tTaskly.toFixed(2) + '</strong></div>' +
+          '<div class="tgm-stat"><span>PayGo total</span><strong>$' + tPaygo.toFixed(2) + '</strong></div>' +
+          '<div class="tgm-stat grand"><span>Grand total</span><strong>$' + (tTaskly + tPaygo).toFixed(2) + '</strong></div>' +
+          '<div class="tgm-stat"><span>Accounts read</span><strong>' + balState.done + ' / ' + balState.total + '</strong></div>' +
+        '</div>' +
+        '<div class="tgm-progress"><div style="width:' + pct + '%"></div></div>' +
+      '</div>' +
+      '<div class="tgm-tablewrap"><table class="tgm-bal"><thead><tr>' +
+        '<th>Account</th><th>Status</th><th class="r">Taskly</th><th class="r">PayGo</th><th class="r">Total</th>' +
+      '</tr></thead><tbody>' +
+        (list.map(balRow).join('') || '<tr><td colspan="6" class="tgm-empty">' + (running ? 'Reading accounts…' : 'Pick accounts and press Check balances.') + '</td></tr>') +
+      '</tbody></table></div>';
   }
+
+  // Read every profile's balance, live.
+  function checkBalances() {
+    var btn = $('tgm-bal');
+    var ids = [];
+    if (balState.ctrl) { try { balState.ctrl.abort(); } catch (e) {} }
+    balState.ctrl = new AbortController();
+    balState.rows = {};
+    balState.done = 0;
+    balState.total = (balState.pool && balState.pool.length) || 0;
+    balState.running = true;
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Reading…'; }
+    renderBalTable();
+    fetch('/api/tg/manager/balance_stream', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}), signal: balState.ctrl.signal,
+    }).then(function (r) {
+      if (!r.ok || !r.body) throw new Error('HTTP ' + r.status);
+      var reader = r.body.getReader(), dec = new TextDecoder('utf-8'), buf = '';
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) return;
+          buf += dec.decode(chunk.value, { stream: true });
+          var lines = buf.split('\n'); buf = lines.pop();
+          lines.forEach(function (ln) {
+            if (!ln.trim()) return;
+            var m; try { m = JSON.parse(ln); } catch (e) { return; }
+            if (m.type === 'total') balState.total = m.count;
+            else if (m.type === 'account' && m.account) {
+              balState.rows[m.account.id] = m.account;
+              balState.done = m.done;
+              renderBalTable();
+            }
+          });
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (e) {
+      if (e && e.name === 'AbortError') return;
+      toast('Balance read failed: ' + e, 'error');
+    }).finally(function () {
+      balState.running = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-wallet"></i> Check balances'; }
+      renderBalTable();
+    });
+  }
+
+  function acctRow(a) {
+    var avatarCls = !a.logged_in ? 'dead' : (a.status === 'busy' ? 'busy' : (!a.enabled ? 'off' : ''));
+    var statusPill = '';
+    if (a.status === 'busy') {
+      statusPill = '<span class="profile-status-badge badge-warn">Busy' +
+        (a.busy_bot ? ' \u00b7 ' + esc(a.busy_bot) : '') + '</span>';
+    } else if (!a.logged_in) {
+      statusPill = '<span class="profile-status-badge badge-rose">Offline</span>';
+    } else if (!a.enabled) {
+      statusPill = '<span class="profile-status-badge badge-inactive">Disabled</span>';
+    }
+    // "ready button remove it": no status pill shown when account is ready
+
+    var meta = [];
+    if (a.phone) meta.push('<span class="tgm-phone"><i class="fa-solid fa-phone" style="font-size:0.62rem;opacity:0.7;margin-right:3px;"></i>' + esc(a.phone) + '</span>');
+    meta.push(esc((a.mode || 'web').toUpperCase()));
+    meta.push((a.tasks_done || 0) + ' tasks');
+    return '<div class="tgm-acct' + (a.status === 'busy' ? ' tgm-busy' : '') + '">' +
+      '<div class="tgm-acct-top">' +
+        '<div class="tgm-avatar ' + avatarCls + '" title="' + esc(a.mode || 'mtproto') + '"><i class="fa-brands fa-telegram"></i></div>' +
+        '<div class="tgm-acct-info">' +
+          '<div class="tgm-acct-title">' +
+            '<strong>' + esc(a.label || a.id) + '</strong>' +
+            '<span class="badge-pill">' + esc(a.id) + '</span>' +
+            statusPill +
+          '</div>' +
+          '<div class="tgm-acct-meta">' + meta.join(' <span style="opacity:0.35;">\u00b7</span> ') + '</div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="tgm-acct-footer">' +
+        '<div class="tgm-acct-status-wrap">' +
+          '<span class="tgm-status-lbl">' + (a.enabled ? 'Enabled' : 'Disabled') + '</span>' +
+        '</div>' +
+        '<div class="tgm-acct-actions">' +
+          '<button type="button" data-tgm-wd="' + esc(a.id) + '" title="Withdraw from ' + esc(a.id) + '"' +
+            ' style="background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.4);border-radius:7px;padding:4px 10px;font-size:0.72rem;font-weight:600;display:inline-flex;align-items:center;gap:5px;cursor:pointer;">' +
+            '<i class="fa-solid fa-money-bill-transfer"></i> Withdraw</button>' +
+          '<label class="switch" title="' + (a.enabled ? 'Disable (stops receiving tasks)' : 'Enable for tasks') + '">' +
+            '<input type="checkbox" data-tgm-enable="' + esc(a.id) + '"' + (a.enabled ? ' checked' : '') +
+            (a.status === 'busy' ? ' disabled' : '') + '><span class="slider"></span></label>' +
+          '<button type="button" class="btn-icon-danger" data-tgm-del="' + esc(a.id) + '"' +
+            ' title="Remove this profile and its session"><i class="fa-solid fa-trash-can"></i></button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }
+
 
   function render() {
     var bots = $('tgm-bots');
@@ -150,6 +262,9 @@
     var c = $('tgm-counts');
     if (c && state.counts) c.textContent = state.counts.total + ' profiles \u00b7 ' + state.counts.connected +
       ' connected \u00b7 ' + state.counts.free + ' free \u00b7 ' + state.counts.busy + ' busy';
+    var idle = $('tgm-start-idle');
+    if (idle && state.counts) idle.innerHTML = '<i class="fa-solid fa-circle" style="color:#4ade80;font-size:.5rem;vertical-align:middle;"></i> ' +
+      state.counts.free + ' idle profile(s) will receive it';
     wireRows();
   }
 
@@ -197,10 +312,6 @@
       var b = el.getAttribute('data-bot');
       el.style.display = enabled.length && enabled.indexOf(b) === -1 ? 'none' : '';
     });
-    if (enabled.indexOf('fastpay') === -1) {
-      var fp = document.querySelector('.nav-sub[data-view="view-tg-classic"][data-bot="fastpay"]');
-      if (fp) fp.style.display = 'none';
-    }
     var sel = $('tg-bot');
     if (sel) {
       Array.prototype.slice.call(sel.options).forEach(function (o) {
@@ -223,17 +334,34 @@
       .catch(function (e) { toast('' + e, 'error'); });
   }
 
-  function checkBalances() {
-    var btn = $('tgm-bal');
-    if (btn) btn.disabled = true;
-    var wrap = $('tgm-bal-wrap');
-    if (wrap) { wrap.style.display = 'block'; wrap.innerHTML = '<div class="creator-option-hint">Reading balances\u2026</div>'; }
-    fetch('/api/tg/manager/balance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      .then(function (r) { return r.json(); })
-      .then(function (b) { renderBalances(b); })
-      .catch(function (e) { renderBalances({ error: String(e) }); })
-      .finally(function () { if (btn) btn.disabled = false; });
+  function sendStart() {
+    var bot = startBot;
+    var label = CHIP_LABELS[bot] || bot;
+    wdConfirm({
+      title: 'Send /start',
+      message: 'Send <b>/start</b> to <b>' + esc(label) + '</b> from every idle, connected Telegram account? Busy accounts are skipped.',
+      confirmText: 'Send'
+    }).then(function (okc) {
+      if (!okc) return;
+      var btn = $('tgm-start');
+      if (btn) btn.disabled = true;
+      if ($('tgm-start-result')) { $('tgm-start-result').style.display = 'flex'; $('tgm-start-result').innerHTML = '<span class="creator-option-hint"><i class="fa-solid fa-spinner fa-spin"></i> Sending…</span>'; }
+      toast('Sending /start…', 'info');
+      fetch('/api/tg/manager/send_start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bot: bot }) })
+        .then(function (r) { return r.json(); })
+        .then(function (j) {
+          if (!j || !j.ok) { toast((j && j.error) || 'send /start failed', 'error'); return; }
+          var msg = '/start sent: ' + j.sent + ' ok · ' + j.failed + ' failed · ' + j.skipped + ' skipped';
+          toast(msg, j.failed ? 'error' : 'success');
+          showStartResult(j);
+          refresh();
+        })
+        .catch(function (e) { toast('' + e, 'error'); })
+        .finally(function () { if (btn) btn.disabled = false; });
+    });
   }
+
+
 
   // ---- Withdraw (USDT BEP-20) -------------------------------------------
   function loadWithdraw() {
@@ -346,41 +474,40 @@
         var acc = ((b && b.accounts) || []).filter(function (a) { return a.id === id; })[0] || {};
         var byBot = {};
         (acc.bots || []).forEach(function (x) { byBot[x.target] = x; });
-        renderWithdrawRows(id, byBot);
+        renderWithdrawRowsTP(id, byBot);
       })
       .catch(function (e) {
         // Balance read can fail (e.g. a profile is leased by the engine). Still
         // render the withdraw rows (balance shows "—") so the user can proceed.
-        try { renderWithdrawRows(id, {}); } catch (e2) {}
+        try { renderWithdrawRowsTP(id, {}); } catch (e2) {}
         var r = $('tgm-wd-rows');
         if (r && !r.querySelector('[data-wd-go]')) r.innerHTML = '<div class="creator-option-hint">balance error: ' + esc('' + e) + '</div>';
       });
   }
 
-  function renderWithdrawRows(id, byBot) {
+
+  // Withdraw rows for Taskly + PayGo only (FastPay is no longer offered).
+  function renderWithdrawRowsTP(id, byBot) {
     var rows = $('tgm-wd-rows');
     if (!rows) return;
-    var specs = { paygo:  { cur: '$', min: 0.20, def: '0.20', step: '0.01' },
-                  taskly: { cur: '$', min: 0.20, def: '0.20', step: '0.01' },
-                  fastpay:{ cur: '\u09f3', min: 50,  def: '50',   step: '1' } };
-    rows.innerHTML = ['paygo', 'taskly', 'fastpay'].map(function (bot) {
+    var specs = { paygo: { cur: '$', min: 0.20, def: '0.20', step: '0.01', label: 'PayGo' },
+                  taskly: { cur: '$', min: 0.20, def: '0.20', step: '0.01', label: 'Taksly' } };
+    rows.innerHTML = ['taskly', 'paygo'].map(function (bot) {
       var sp = specs[bot];
       var x = byBot[bot];
       var bal = (x && x.ok) ? Number(x.amount || 0) : null;
-      var balTxt = (bal == null) ? '\u2014' : (sp.cur + bal.toFixed(bot === 'fastpay' ? 1 : 2));
+      var balTxt = (bal == null) ? '\u2014' : (sp.cur + bal.toFixed(2));
       var enough = (bal == null) || (bal >= sp.min);
       var pad = enough ? '' : 'opacity:.45;pointer-events:none;';
-      return '<div style="display:flex;align-items:center;gap:0.6rem;padding:0.5rem 0.6rem;border:1px solid var(--border-color);border-radius:8px;">' +
-        '<div style="width:64px;font-weight:600;font-size:0.82rem;">' + bot.charAt(0).toUpperCase() + bot.slice(1) + '</div>' +
-        '<div style="width:78px;color:' + (enough ? 'var(--text-muted)' : '#f87171') + ';font-size:0.78rem;">' + balTxt + '</div>' +
-        '<input class="form-control" style="width:96px;" type="number" min="' + sp.min + '" step="' + sp.step + '" value="' + sp.def + '" data-wd-amt="' + bot + '">' +
-        '<button type="button" class="btn btn-sm btn-primary" data-wd-go="' + bot + '" style="margin-left:auto;' + pad + '"' +
-          ' title="' + (enough ? 'Withdraw from this account' : ('Balance below the ' + sp.cur + sp.min + ' minimum')) + '">' +
-          '<i class="fa-solid fa-money-bill-transfer"></i> Withdraw</button>' +
+      return '<div class="tgm-wd-row" style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;' + pad + '">' +
+        '<strong style="min-width:70px;">' + sp.label + '</strong>' +
+        '<span class="tgm-amt">' + balTxt + '</span>' +
+        '<input type="number" class="form-control" data-wd-amt="' + bot + '" min="' + sp.min + '" step="' + sp.step + '" value="' + sp.def + '" style="width:110px;">' +
+        '<button type="button" class="btn btn-sm btn-primary" data-wd-go="' + bot + '" data-wd-id="' + esc(id) + '">Withdraw</button>' +
         '</div>';
     }).join('');
     rows.querySelectorAll('[data-wd-go]').forEach(function (btn) {
-      btn.addEventListener('click', function () { doWithdraw(id, btn.dataset.wdGo); });
+      btn.addEventListener('click', function () { doWithdraw(id, btn.getAttribute('data-wd-go')); });
     });
   }
 
@@ -394,8 +521,8 @@
       var wi = $('tgm-wd-wallet'); if (wi) wi.focus();
       return;
     }
-    var min = (bot === 'fastpay') ? 50 : 0.20;
-    var cur = (bot === 'fastpay') ? '\u09f3' : '$';
+    var min = 0.20;
+    var cur = '$';
     if (amt < min) { toast('Amount must be \u2265 ' + cur + min, 'error'); return; }
     var botName = bot.charAt(0).toUpperCase() + bot.slice(1);
     wdConfirm({
@@ -425,6 +552,10 @@
   function wire() {
     if ($('tgm-refresh')) $('tgm-refresh').addEventListener('click', refresh);
     if ($('tgm-bal')) $('tgm-bal').addEventListener('click', checkBalances);
+    if ($('tgm-start')) $('tgm-start').addEventListener('click', sendStart);
+    document.querySelectorAll('#tgm-start-chips .tgm-chip').forEach(function (c) {
+      c.addEventListener('click', function () { pickStartBot(c.dataset.bot); });
+    });
     if ($('tgm-add')) $('tgm-add').addEventListener('click', function () {
       if (typeof window.openMtprotoModal === 'function') { window.openMtprotoModal(); return; }
       toast('Add-account modal unavailable.', 'error');
@@ -437,6 +568,51 @@
         .catch(function (e) { toast('' + e, 'error'); });
     });
     if ($('tgm-wd-save')) $('tgm-wd-save').addEventListener('click', function () { saveWallet('tgm-wd-wallet'); });
+  }
+
+  var startBot = 'all';
+  function chip(bot, icon, label, color, on) {
+    return '<button type="button" class="tgm-chip" data-bot="' + bot + '" style="display:flex;align-items:center;gap:.5rem;padding:.55rem .95rem;' +
+      'border-radius:10px;border:1px solid ' + (on ? color : 'var(--border-color)') + ';background:' + (on ? 'rgba(255,255,255,.06)' : 'var(--bg-card)') + ';' +
+      'color:var(--text-main);font-weight:600;cursor:pointer;transition:all .15s;">' +
+      '<i class="' + icon + '" style="color:' + color + ';"></i>' + label + '</button>';
+  }
+  var CHIP_COLORS = { all: '#a5b4fc', taskly: '#229ED9', paygo: '#4ade80' };
+  var CHIP_LABELS = { all: 'All bots', taskly: 'Taksly Bot', paygo: 'PayGo Bot' };
+  function pickStartBot(bot) {
+    startBot = bot;
+    document.querySelectorAll('#tgm-start-chips .tgm-chip').forEach(function (c) {
+      var on = c.dataset.bot === bot;
+      c.style.borderColor = on ? CHIP_COLORS[c.dataset.bot] : 'var(--border-color)';
+      c.style.background = on ? 'rgba(255,255,255,.06)' : 'var(--bg-card)';
+    });
+    if ($('tgm-start-label')) $('tgm-start-label').textContent = CHIP_LABELS[bot].replace(' Bot', '');
+  }
+  // Result panel: totals, then one line per account with the bot(s) it reached.
+  function showStartResult(j) {
+    var box = $('tgm-start-result');
+    if (!box) return;
+    function pill(n, label, color) {
+      return '<span style="padding:.3rem .7rem;border-radius:999px;font-size:.8rem;font-weight:700;border:1px solid ' + color + '55;color:' + color + ';background:' + color + '14;">' + n + ' ' + label + '</span>';
+    }
+    var accts = (j.accounts || []).map(function (a) {
+      var st = a.skipped ? '<span style="color:#94a3b8;">skipped — ' + esc(a.skipped) + '</span>'
+        : (a.error ? '<span style="color:#f87171;">' + esc(a.error) + '</span>'
+        : (a.bots || []).map(function (b) {
+            return '<span style="margin-right:8px;color:' + (b.ok ? '#4ade80' : '#f87171') + ';">' +
+              (b.ok ? '\u2713' : '\u2717') + ' ' + esc(b.name || b.target) +
+              (b.ok ? '' : ' (' + esc(b.error || 'failed') + ')') + '</span>';
+          }).join(''));
+      return '<div style="display:flex;gap:.6rem;align-items:baseline;padding:.35rem 0;border-top:1px solid var(--border-color);font-size:.8rem;">' +
+        '<strong style="min-width:150px;color:var(--text-main);">' + esc(a.name || a.id) + '</strong><span>' + st + '</span></div>';
+    }).join('');
+    box.style.display = 'block';
+    box.innerHTML =
+      '<div style="display:flex;gap:.5rem;flex-wrap:wrap;">' +
+        pill(j.sent, 'reached', '#4ade80') + pill(j.skipped, 'skipped', '#94a3b8') +
+        pill(j.failed, 'failed', j.failed ? '#f87171' : '#64748b') +
+        '<span class="creator-option-hint" style="align-self:center;">' + (j.elapsed_s != null ? j.elapsed_s + 's' : '') + '</span></div>' +
+      '<div style="max-height:260px;overflow:auto;margin-top:.6rem;">' + accts + '</div>';
   }
 
   function shell() {
@@ -454,6 +630,24 @@
         '</div>' +
         '<div id="tgm-accounts" class="tgm-grid"></div>' +
         '<div id="tgm-bal-wrap" style="display:none;margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border-color);"></div>' +
+      '</div>' +
+
+      /* ---- Send /start (own card, bottom) ---- */
+      '<div class="card-panel" id="tgm-start-card" style="margin-top:1rem;">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:.9rem;">' +
+          '<div><strong style="display:flex;align-items:center;gap:8px;font-size:.95rem;"><i class="fa-solid fa-paper-plane" style="color:#38bdf8;"></i> Send /start</strong>' +
+          '<div class="creator-option-hint" style="margin-top:2px;">Wakes the bot menu from every idle, connected Telegram profile. Busy profiles are skipped.</div></div>' +
+          '<span id="tgm-start-idle" class="tg-bot-badge">\u2026</span>' +
+        '</div>' +
+        '<div id="tgm-start-chips" style="display:flex;gap:.6rem;flex-wrap:wrap;">' +
+          chip('all', 'fa-solid fa-layer-group', 'All bots', '#a5b4fc', true) +
+          chip('taskly', 'fa-solid fa-bolt', 'Taksly', '#229ED9') +
+          chip('paygo', 'fa-solid fa-coins', 'PayGo', '#4ade80') +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:1rem;margin-top:1rem;flex-wrap:wrap;">' +
+          '<button id="tgm-start" type="button" class="btn btn-primary"><i class="fa-solid fa-paper-plane"></i> Send "/start" to <span id="tgm-start-label">All bots</span></button>' +
+          '<div id="tgm-start-result" style="display:none;gap:.5rem;flex-wrap:wrap;"></div>' +
+        '</div>' +
       '</div>' +
 
       /* ---- Withdraw dialog (per account) ---- */

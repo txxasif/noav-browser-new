@@ -19,35 +19,102 @@ class IgTwofaMixin:
     """TOTP 2FA key scraping & verification (page-scrape, never clipboard)."""
 
     def ig_scrape_2fa_key(self, page) -> Optional[str]:
-        """Read the space-grouped base32 key from page innerText via regex or QR barcode payload.
-
-        Note: the page's "Copy key" button writes to OS clipboard, but
-        navigator.clipboard.readText() is blocked by permissions policy.
+        """Read the Base32 2FA key from page text, input elements, data attributes, or QR payload.
+        Mirrors APK Instatool (eo.java:270) carrier extraction and reveal mechanisms.
         """
         import re
 
-        # 1. Regex match for space-separated groups (e.g. 'RAPQ K7VM RJF7 3CDC')
+        # Only the key screen carries a key. Seen live (2026-10-12): the intro heading "Set up extra
+        # protection for your Meta Account" passed the loose text filter below (letters only, spaces
+        # removed = a valid base32 string), so a junk "key" was sent to the bot and every code was
+        # then rejected. On Accounts Center, refuse to scrape anywhere else.
+        try:
+            _is_ac = "accountscenter.instagram.com" in (page.url or "")
+        except Exception:
+            _is_ac = False
+        if _is_ac:
+            try:
+                _bl = (page.evaluate("() => document.body.innerText || ''") or "").lower()
+            except Exception:
+                _bl = ""
+            if not any(m in _bl for m in ("copy key", "instructions for setup",
+                                          "scan this barcode", "download an authentication app")):
+                return None
+
+        def _is_valid_key(s: str) -> bool:
+            if not s:
+                return False
+            clean = re.sub(r"[\s\u00a0]+", "", s).upper()
+            if not (16 <= len(clean) <= 64):
+                return False
+            if not re.fullmatch(r"[A-Z2-7]+", clean):
+                return False
+            ui_words = ("AUTHENTICATOR", "GOOGLEAUTH", "DUOMOBILE", "DOWNLOADAN",
+                        "AUTHENTICATIONAPP", "INSTRUCTIONSFOR", "BARCODEORQR",
+                        "PASSWORDAND", "TWOFACTOR", "SECURITYCODE", "ACCOUNTSCENTER",
+                        "INSTAGRAM", "YOURCODEFROMYOUR")
+            if any(w in clean for w in ui_words):
+                return False
+            return True
+
+        # 1. Comprehensive carrier extraction (text, input values, data-clipboard-text, code, pre)
+        try:
+            candidates = page.evaluate(r"""() => {
+                const results = [];
+                for (const el of document.querySelectorAll('[data-clipboard-text], [data-copy-text]')) {
+                    const c = el.getAttribute('data-clipboard-text') || el.getAttribute('data-copy-text') || '';
+                    if (c) results.push(c);
+                }
+                for (const el of document.querySelectorAll('input, textarea')) {
+                    const val = el.value || '';
+                    if (val && val.length >= 16 && (el.readOnly || el.disabled || el.type === 'text' || !el.type)) {
+                        results.push(val);
+                    }
+                }
+                for (const el of document.querySelectorAll('code, pre, kbd, [role="textbox"]')) {
+                    const t = el.innerText || el.textContent || '';
+                    if (t) results.push(t);
+                }
+                for (const el of document.querySelectorAll('span, div, p, li')) {
+                    const t = (el.innerText || '').trim();
+                    if (t.length >= 16 && t.length <= 96 && /^[A-Z2-7\s\u00a0]+$/.test(t)) {
+                        results.push(t);
+                    }
+                }
+                return results;
+            }""") or []
+
+            for cand in candidates:
+                if re.search(r"[a-z]", str(cand)):
+                    continue            # a real key is upper-case; words/headings never are
+                cand_clean = re.sub(r"[\s\u00a0]+", "", str(cand)).upper()
+                if _is_valid_key(cand_clean):
+                    return cand_clean
+        except Exception:
+            pass
+
+        # 2. Regex match for space-separated groups from page text (e.g. 'RAPQ K7VM RJF7 3CDC')
         try:
             text = page.evaluate("() => document.body.innerText || ''")
             m = TWOFA_KEY_RE.search(text or "")
             if m:
-                cleaned = m.group(0).replace(" ", "").strip()
-                if len(cleaned) in (16, 26, 32):
+                cleaned = re.sub(r"[\s\u00a0]+", "", m.group(0)).upper()
+                if _is_valid_key(cleaned):
                     return cleaned
         except Exception:
             pass
 
-        # 2. Continuous 16 or 32 character Base32 string
+        # 3. Continuous 16 to 64 character Base32 string from body text
         try:
             text = page.evaluate("() => document.body.innerText || ''")
-            for m in re.finditer(r"\b([A-Z2-7]{16}|[A-Z2-7]{32})\b", text or ""):
+            for m in re.finditer(r"\b([A-Z2-7]{16,64})\b", text or ""):
                 val = m.group(1).strip()
-                if not any(ign in val for ign in ("INSTAGRAM", "AUTHENTICAT")):
+                if _is_valid_key(val):
                     return val
         except Exception:
             pass
 
-        # 3. Barcode / QR image extraction: inspect element attributes for otpauth payload
+        # 4. Barcode / QR image extraction: inspect element attributes for otpauth payload
         try:
             qr_uri = page.evaluate(r"""() => {
                 for (const el of document.querySelectorAll('img, svg, div, a')) {
@@ -60,8 +127,23 @@ class IgTwofaMixin:
             }""")
             if qr_uri:
                 m_sec = re.search(r"secret=([A-Za-z2-7]+)", qr_uri)
-                if m_sec:
-                    return m_sec.group(1).strip()
+                if m_sec and _is_valid_key(m_sec.group(1)):
+                    return m_sec.group(1).strip().upper()
+        except Exception:
+            pass
+
+        # 5. Reveal trigger (APK parity eo.java:270): key might be hidden behind QR
+        try:
+            for phrase in (
+                "can't scan it", "can't scan", "cannot scan", "copy setup key",
+                "copy the key", "copy key", "set up manually", "setup manually",
+                "enter setup key", "enter key manually", "or enter manually"
+            ):
+                rev = page.locator(f'[role="button"]:has-text("{phrase}"), button:has-text("{phrase}"), a:has-text("{phrase}")').first
+                if rev.count() > 0 and rev.is_visible():
+                    self._tap_or_click(page, rev, timeout=1500)
+                    page.wait_for_timeout(800)
+                    break
         except Exception:
             pass
 
@@ -82,6 +164,101 @@ class IgTwofaMixin:
             return self._way_out_escape(p)
         return False
 
+    _AC_TWO_FACTOR_URL = "https://accountscenter.instagram.com/password_and_security/two_factor/"
+
+    def _ac_dismiss_toast(self, p) -> bool:
+        """Close Accounts Center's snackbar ("Meta Account password updated"). It floats over the
+        dialog's primary button and swallows the first click on it (seen live via the DevTools MCP,
+        2026-10-12: Get started needed a second try until the toast was closed)."""
+        try:
+            return bool(p.evaluate("""() => {
+                const alerts = [...document.querySelectorAll('[role="alert"]')]
+                    .filter(a => /updated|saved|changed/i.test(a.textContent || ''));
+                for (const a of alerts) {
+                    let n = a;
+                    for (let i = 0; i < 5 && n; i++, n = n.parentElement) {
+                        const b = [...n.querySelectorAll('[role="button"],button')].find(x =>
+                            /close/i.test((x.getAttribute('aria-label') || '') + (x.textContent || ''))
+                            && !x.closest('[role="dialog"]'));
+                        if (b) { b.click(); return true; }
+                    }
+                }
+                return false;
+            }"""))
+        except Exception:
+            return False
+
+    def _ig_2fa_open_code_screen(self, p) -> bool:
+        """Open the empty "Enter code" screen BEFORE the bot is asked for its code.
+
+        PayGo starts verifying the account the moment it sends the one-time code and only
+        accepts if Instagram's 2FA is already on ~30 s later. Seen live (2026-10-12): the
+        report was accepted when the code went in within seconds, and rejected ("You did not
+        set up 2FA") when opening this screen after the code made the confirm take too long."""
+        sel = ('input[placeholder*="code" i], input[aria-label*="code" i], '
+               'input[name="verificationCode"], input[type="text"]')
+        try:
+            if p.locator(sel).first.is_visible():
+                return True
+            if self._try_click(p, "Enter code", timeout=4000):
+                for _ in range(16):
+                    p.wait_for_timeout(250)
+                    if p.locator(sel).first.is_visible():
+                        return True
+        except Exception:
+            pass
+        return False
+
+    def _ig_2fa_direct_begin(self) -> Optional[str]:
+        """The 2FA entry exactly as driven by hand through the DevTools MCP: open the two-factor
+        page by URL (it loads with the live session, no Accounts Center bounce), close the toast,
+        Get started -> Authentication app -> Continue, then read the 4x4 key. Every transition is
+        verified and retried; the email challenge is solved if it shows up."""
+        p = self._ig_tab()
+        for attempt in range(2):
+            try:
+                p.goto(self._AC_TWO_FACTOR_URL, wait_until="domcontentloaded", timeout=45000)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f'[2fa] direct entry load note: {str(exc)[:80]}')
+            p.wait_for_timeout(1500)
+            if "accountscenter.instagram.com" not in (p.url or ""):
+                self.log(f'[2fa] direct entry left Accounts Center (url={(p.url or "")[:80]}) — giving up on the direct route')
+                return None
+            if self._is_ig_dead_end_chooser(p):
+                raise IGDeadEnd("IG saved-account chooser detected during 2FA entry (session dropped) — aborting immediately")
+            for _step in range(16):
+                self._ac_dismiss_toast(p)
+                try:
+                    low = (p.inner_text("body", timeout=2500) or "").lower()
+                except Exception:
+                    low = ""
+                key = self.ig_scrape_2fa_key(p)
+                if key:
+                    self._ig_2fa_open_code_screen(p)
+                    return key
+                if "check your email" in low or "enter the code we sent" in low or "two step verification" in low:
+                    self._ac_reauth(p)
+                    p.wait_for_timeout(900)
+                    continue
+                if "choose an account" in low:
+                    # "Choose an account to set up two-factor authentication": the INSTAGRAM row
+                    # (the bot logs into Instagram, not into the Meta AI profile).
+                    if not self._ac_pick_profile_row(p, "instagram"):
+                        try:
+                            self._ac_choose_account(p, prefer_instagram=True)
+                        except Exception:
+                            pass
+                    p.wait_for_timeout(300)
+                    continue
+                if self._visible(p, "radio", "Authentication app") is not None:
+                    self._try_click(p, "Authentication app", role="radio", timeout=2000)
+                    self._try_click(p, "Continue", timeout=4000)
+                elif self._visible(p, "button", "Get started") is not None:
+                    self._try_click(p, "Get started", timeout=4000)
+                p.wait_for_timeout(1200)
+            self.log(f'[2fa] direct entry attempt {attempt + 1}/2 did not reach the key — {self._page_tail(p, 160)}')
+        return None
+
     def ig_2fa_begin(self) -> Optional[str]:
         """Start 2FA setup, capture the base32 key, leave the 'Enter code' screen open."""
         p = self._ig_tab()
@@ -91,6 +268,23 @@ class IgTwofaMixin:
             self.log(f'[ac] ig cookies: {sorted(set(names))}')
         except Exception as exc:  # noqa: BLE001
             self.log(f'[ac] cookie dump failed: {exc}')
+
+        try:
+            _direct = self._ig_2fa_direct_begin()
+        except IGDeadEnd:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.log(f'[2fa] direct entry error: {str(exc)[:100]}')
+            _direct = None
+        if _direct:
+            self.insta_secret = _direct
+            self.log('<font color="#00FF00"><b>[🔑] 2FA key captured.</b></font>')
+            return _direct
+        if os.environ.get("PAYGO_SLOW_WALK", "0") != "1":
+            self.log('[⚠️] 2FA: the direct entry did not reach the key — giving up on this account '
+                     '(no section walk; PAYGO_SLOW_WALK=1 re-enables it).')
+            return None
+        self.log('[2fa] direct entry did not reach the key — falling back to the section walk')
 
         self._ac_section("/password_and_security/", "Password and security")
         p = self._ig_tab()
@@ -160,8 +354,10 @@ class IgTwofaMixin:
                 self.log(f'[⚠️] 2FA setup halted: section bounce persisted (url={p.url})')
                 return None
 
-        # If on Accounts Center home, navigate into Password and security
-        if "password_and_security" not in (p.url or ""):
+        # If on Accounts Center home, navigate into Password and security. Already on a
+        # Login-and-security page counts as in: one section entry, not a second click.
+        if ("password_and_security" not in (p.url or "")
+                and "login_and_security" not in (p.url or "")):
             self.log(f'[2fa] On AC root ({p.url[:60]}); clicking Password and security…')
             for sec_sel in (
                 'a[href*="password_and_security"]',
@@ -417,10 +613,13 @@ class IgTwofaMixin:
             try:
                 inp = p.locator(sel).first
                 if inp.count() and inp.is_visible():
-                    self._tap_or_click(p, inp, timeout=2000)
-                    self._human_pause(0.2, 0.4)
-                    inp.press_sequentially(str(code), delay=random.randint(60, 130))
-                    self._human_pause(0.2, 0.5)
+                    # PayGo verifies ~30 s after it sends the code, so every second counts here:
+                    # one plain fill (what worked by hand), slow typing only as a fallback.
+                    try:
+                        inp.fill(str(code), timeout=3000)
+                    except Exception:
+                        self._tap_or_click(p, inp, timeout=2000)
+                        inp.press_sequentially(str(code), delay=random.randint(40, 80))
                     # Verify the value actually landed (React controlled inputs
                     # sometimes swallow fill) — the #1 cause of "code didn't submit".
                     try:
@@ -448,6 +647,16 @@ class IgTwofaMixin:
             p.wait_for_timeout(500)
             try:
                 body_txt = (p.inner_text("body") or "").lower()
+                # Fast rejection detection (APK parity: eo.java:262)
+                if any(err in body_txt for err in (
+                    "code is incorrect", "incorrect code", "wrong code",
+                    "isn't right", "isn't correct", "couldn't verify",
+                    "could not verify", "does not match", "doesn't match",
+                    "please check the code", "try again"
+                )):
+                    self.log(f'[⚠️] 2FA code rejected by Instagram ("{code}") — fast fail for retry.')
+                    return False
+
                 if ("two-factor authentication is on" in body_txt or "authentication is on" in body_txt
                         or "authentication is set up" in body_txt or "two-factor authentication is set up" in body_txt
                         or "backup codes" in body_txt):

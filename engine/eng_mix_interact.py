@@ -171,6 +171,9 @@ class EngineInteractMixin:
         if el is None:
             return False
         try:
+            if hasattr(self, "_tap_or_click"):
+                if self._tap_or_click(page, el, timeout=timeout):
+                    return True
             self._human_click(page, el, timeout)
             return True
         except Exception:

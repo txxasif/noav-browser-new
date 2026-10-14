@@ -11,9 +11,12 @@ import json
 import os
 import random
 import re
+import secrets
 import shutil
 import sys
 import time
+import urllib.parse
+import urllib.request
 
 import os as _os
 import sys as _sys
@@ -22,6 +25,10 @@ try:
     from .eng_constants import _MAILTD_URL  # package import
 except ImportError:  # top-level `import run` (ENGINE_DIR on sys.path)
     from eng_constants import _MAILTD_URL  # noqa: E402
+try:
+    from .eng_constants import CF_MAIL_ADMIN_TOKEN, CF_MAIL_DOMAIN, CF_MAIL_WORKER, YAMIN_MAIL_API, YAMIN_AUTH_KEY, YAMIN_DOMAINS  # package import
+except ImportError:
+    from eng_constants import CF_MAIL_ADMIN_TOKEN, CF_MAIL_DOMAIN, CF_MAIL_WORKER, YAMIN_MAIL_API, YAMIN_AUTH_KEY, YAMIN_DOMAINS  # noqa: E402
 
 class EngineMailMixin:
     @staticmethod
@@ -57,11 +64,44 @@ class EngineMailMixin:
             pass
         return None
 
+    # mail.td says "no" through its API reply. That is final for this attempt, so the caller stops waiting at
+    # once and the provider chain moves on: HTTP 429 / 403 on /api/accounts (rate limit) or
+    # {"error": "ops_quota_exceeded"} (free-plan monthly quota).
+    # NOT used: a 200 {"status": "retry"} (the proof-of-work asking for a higher difficulty) and the page text —
+    # a live check showed "Operations used up" in the page text while a mailbox was being created normally.
+    @staticmethod
+    def _mailtd_limit_reason(responses, page_text=""):
+        """'' while mail.td is merely slow; otherwise a short reason string for the log."""
+        for r in responses or []:
+            status = int(r.get("status") or 0)
+            body = str(r.get("body") or "")
+            if "ops_quota_exceeded" in body:
+                return f"free-plan quota used up (HTTP {status})"
+            if status in (429, 403):
+                return f"rate limited (HTTP {status} {body[:80]})"
+        return ""
+
+    def _mailtd_limit_now(self, page, responses):
+        return self._mailtd_limit_reason(responses)
+
     def open_mailtd(self):
         # A reused runner must never accidentally reuse the previous cycle's
         # address while the new mail.td page is still initializing.
         self.email = None
         self.mail = self.w.context.new_page()
+        # Record every mailbox-creation reply (also the page's own automatic one) so a limit is seen at once.
+        _early = []
+
+        def _on_early(response):
+            try:
+                if "/api/accounts" in response.url and response.request.method == "POST":
+                    _early.append({"status": response.status, "body": response.text()[:300]})
+            except Exception:
+                pass
+        try:
+            self.mail.on("response", _on_early)
+        except Exception:
+            pass
         self.mail.goto(_MAILTD_URL, wait_until="domcontentloaded", timeout=60000)
         self.mail.wait_for_timeout(4000)
 
@@ -73,7 +113,15 @@ class EngineMailMixin:
             if addr:
                 self.email = addr
                 break
+            _why = self._mailtd_limit_now(self.mail, _early)
+            if _why:
+                self.log(f"[⚠️] mail.td refused a new mailbox: {_why} — not waiting any longer.")
+                raise RuntimeError(f"mail.td limit: {_why}")
             self.mail.wait_for_timeout(1000)
+        try:
+            self.mail.remove_listener("response", _on_early)
+        except Exception:
+            pass
 
         if not self.email:
             self.log("[📧] mail.td has no address yet; requesting a new mailbox…")
@@ -188,6 +236,14 @@ class EngineMailMixin:
             while time.time() < end:
                 mail.wait_for_timeout(1000)
                 addr = self._mailtd_address_from_page(mail)
+                if not addr:
+                    _why = self._mailtd_limit_now(mail, create_responses)
+                    if _why:
+                        try:
+                            self.log(f"[⚠️] mail.td refused a new mailbox: {_why} — not waiting any longer.")
+                        except Exception:
+                            pass
+                        return None
                 if addr:
                     addr = addr.lower()
                     if addr != old:
@@ -622,5 +678,348 @@ class EngineMailMixin:
                     pass
             self.mail.wait_for_timeout(900)
         return None
+
+    # -- Cloudflare catch-all provider (no browser tab) --------------------
+    _CF_FIRST_NAMES = (
+        "alex", "sarah", "daniel", "emma", "liam", "olivia", "noah", "ava",
+        "ethan", "mia", "lucas", "chloe", "james", "grace", "owen", "zoe",
+    )
+    _CF_LAST_NAMES = (
+        "miller", "smith", "clark", "davis", "wilson", "brown", "taylor", "moore",
+        "jackson", "martin", "lee", "walker", "hall", "allen", "young", "king",
+    )
+
+    def new_mailcf_address(self, timeout: int = 10):
+        """Generate a natural-looking address on the Cloudflare catch-all domain."""
+        first = random.choice(self._CF_FIRST_NAMES)
+        last = random.choice(self._CF_LAST_NAMES)
+        addr = f"{first}.{last}.{random.randint(10, 999)}@{CF_MAIL_DOMAIN}"
+        self.email = addr
+        self.mail_token = secrets.token_urlsafe(24)
+        self._register_mailcf(addr, self.mail_token)
+        return addr
+
+    def _register_mailcf(self, addr: str, token: str) -> None:
+        """Tell the Worker which read token belongs to this address (needs CF_MAIL_ADMIN_TOKEN)."""
+        if not CF_MAIL_ADMIN_TOKEN:
+            self.log("[⚠️] CF_MAIL_ADMIN_TOKEN not set; mailbox read token not registered.")
+            return
+        req = urllib.request.Request(
+            f"{CF_MAIL_WORKER}/register",
+            data=json.dumps({"email": addr, "token": token}).encode("utf-8"),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {CF_MAIL_ADMIN_TOKEN}",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                pass
+        except Exception as exc:
+            self.log(f"[⚠️] Could not register mailbox read token for {addr}: {exc}")
+
+    def open_mailcf(self):
+        """Allocate an address only: no page, no browser tab, no RAM cost."""
+        self.mail = None
+        self.new_mailcf_address()
+        self.log(f"[📧] Cloudflare Catch-All allocated: {self.email} (zero browser tab overhead)")
+        return self.email
+
+    def fetch_code_cf(self, keyword: str = "meta", timeout: int = 180, subject_hint=None, prefer_len=None):
+        """Poll the OTP Worker over HTTP until the code for self.email arrives."""
+        url = f"{CF_MAIL_WORKER}?email={urllib.parse.quote(self.email)}"
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8", "replace"))
+            except Exception:
+                data = {}
+            code = data.get("code") if isinstance(data, dict) else None
+            if code:
+                self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (Cloudflare Worker): {code}</b></font>')
+                return str(code)
+            time.sleep(2.5)
+        raise RuntimeError(f"{keyword.capitalize()} confirmation code not received on Cloudflare Worker within {timeout}s")
+
+    # -- tempmail.fish browser provider ------------------------------------
+    def open_mailfish(self):
+        """Open a fresh tempmail.fish inbox in the current browser context."""
+        self.email = None
+        self.mail = self.w.context.new_page()
+        self.mail.goto("https://tempmail.fish/", wait_until="domcontentloaded", timeout=60000)
+        self.mail.wait_for_timeout(3000)
+
+        # 1. Read address from #emailInput or localStorage
+        for _ in range(25):
+            try:
+                inp = self.mail.locator("#emailInput").first
+                if inp.count() and inp.is_visible():
+                    val = (inp.input_value() or "").strip().lower()
+                    if "@" in val and "." in val:
+                        self.email = val
+                        break
+            except Exception:
+                pass
+            try:
+                raw = self.mail.evaluate("() => localStorage.getItem('email')")
+                if raw:
+                    import json
+                    val = str(json.loads(raw) if raw.startswith('"') else raw).strip().lower()
+                    if "@" in val and "." in val:
+                        self.email = val
+                        break
+            except Exception:
+                pass
+            self.mail.wait_for_timeout(1000)
+
+        # 2. If no address appeared, trigger New Email
+        if not self.email:
+            self.log("[📧] tempmail.fish has no address yet; clicking New Email…")
+            addr = self.new_mailfish_address(timeout=30)
+            if addr:
+                self.email = addr
+
+        if not self.email:
+            raise RuntimeError("could not read tempmail.fish address")
+
+        self.log(f'<font color="#00FF00"><b>[📧] Meta inbox (tempmail.fish): {self.email}</b></font>')
+
+    def new_mailfish_address(self, timeout: int = 30):
+        """Generate a fresh mailbox on tempmail.fish by clicking New Email."""
+        mail = getattr(self, "mail", None)
+        if mail is None:
+            return None
+
+        old = (getattr(self, "email", "") or "").strip().lower()
+
+        try:
+            btn = mail.locator('button:has-text("New Email")').first
+            if btn.count() and btn.is_visible():
+                btn.click(timeout=10000)
+        except Exception:
+            pass
+
+        end = time.time() + max(5, timeout)
+        while time.time() < end:
+            mail.wait_for_timeout(1000)
+            try:
+                inp = mail.locator("#emailInput").first
+                if inp.count() and inp.is_visible():
+                    val = (inp.input_value() or "").strip().lower()
+                    if "@" in val and "." in val and val != old:
+                        self.email = val
+                        self.log(f'<font color="#00FF00"><b>[📧] Fresh tempmail.fish address: {val}</b></font>')
+                        return val
+            except Exception:
+                pass
+            try:
+                raw = mail.evaluate("() => localStorage.getItem('email')")
+                if raw:
+                    import json
+                    val = str(json.loads(raw) if raw.startswith('"') else raw).strip().lower()
+                    if "@" in val and "." in val and val != old:
+                        self.email = val
+                        self.log(f'<font color="#00FF00"><b>[📧] Fresh tempmail.fish address: {val}</b></font>')
+                        return val
+            except Exception:
+                pass
+        return None
+
+    def fetch_code_mailfish(self, keyword: str = "meta", timeout: int = 240, subject_hint=None, prefer_len=None):
+        """Poll incoming messages from the tempmail.fish browser tab."""
+        if not getattr(self, "mail", None) or self.mail.is_closed():
+            self.log("[⚠️] tempmail.fish tab is closed; reopening…")
+            self.open_mailfish()
+
+        stale = set(getattr(self, "_seen_codes", None) or set())
+        last_beat = time.time()
+        end = time.time() + timeout
+
+        self.log(f"[📧] Waiting for {keyword} email on tempmail.fish ({self.email})…")
+
+        while time.time() < end:
+            msgs = []
+            try:
+                msgs = self.mail.evaluate("""async (email) => {
+                    try {
+                        let rawKey = localStorage.getItem("authKey") || "";
+                        let authKey = rawKey.startsWith('"') ? JSON.parse(rawKey) : rawKey;
+                        let r = await fetch("https://api.tempmail.fish/emails/emails?emailAddress=" + encodeURIComponent(email), {
+                            headers: authKey ? {"Authorization": authKey} : {}
+                        });
+                        if (!r.ok) return [];
+                        return await r.json();
+                    } catch (e) {
+                        return [];
+                    }
+                }""", self.email)
+            except Exception:
+                msgs = []
+
+            if not isinstance(msgs, list):
+                msgs = []
+
+            for msg in msgs:
+                if not isinstance(msg, dict):
+                    continue
+                subject = str(msg.get("subject") or "").lower()
+                sender = str(msg.get("from") or msg.get("sender") or "").lower()
+
+                if subject_hint:
+                    hints = [h.strip().lower() for h in str(subject_hint).split("|") if h.strip()]
+                    if not any(h in subject or h in sender for h in hints):
+                        continue
+
+                text = " ".join([
+                    subject,
+                    str(msg.get("body") or ""),
+                    str(msg.get("text") or ""),
+                    str(msg.get("html") or ""),
+                    str(msg.get("content") or ""),
+                    " ".join(self._flatten_values(msg))
+                ])
+
+                code = self._pick_code(text, keyword, stale, prefer_len=prefer_len)
+                if code:
+                    self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (tempmail.fish): {code} (subject: {subject[:40]})</b></font>')
+                    try:
+                        used = getattr(self, "_used_email_codes", None) or set()
+                        used.add(code)
+                        self._used_email_codes = used
+                    except Exception:
+                        pass
+                    return code
+
+            # Also check DOM text in case message rendered directly
+            try:
+                dom_text = self._mail_text()
+                code = self._pick_code(dom_text or "", keyword, stale, prefer_len=prefer_len)
+                if code:
+                    self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (tempmail.fish DOM): {code}</b></font>')
+                    try:
+                        used = getattr(self, "_used_email_codes", None) or set()
+                        used.add(code)
+                        self._used_email_codes = used
+                    except Exception:
+                        pass
+                    return code
+            except Exception:
+                pass
+
+            if time.time() - last_beat >= 15:
+                last_beat = time.time()
+                try:
+                    self.log(f'[📧] tempmail.fish: {len(msgs)} message(s), no {keyword} code yet…')
+                except Exception:
+                    pass
+
+            self.mail.wait_for_timeout(2000)
+
+        raise RuntimeError(f"{keyword.capitalize()} confirmation code not received on tempmail.fish within {timeout}s")
+
+    # -- yamin.bd APK provider ---------------------------------------------
+    YAMIN_MAIL_API = YAMIN_MAIL_API
+    YAMIN_AUTH_KEY = YAMIN_AUTH_KEY
+    YAMIN_DOMAINS = YAMIN_DOMAINS
+
+    def open_yamin(self):
+        """Allocate an address only: zero browser tab overhead (yamin.bd API)."""
+        self.mail = None
+        self.new_yamin_address()
+        self.log(f'[📧] Yamin Mailbox allocated: {self.email} (zero browser tab overhead)')
+        return self.email
+
+    def new_yamin_address(self, timeout: int = 10):
+        """Generate a natural-looking address on Yamin domains (epicz.xyz only)."""
+        domains = getattr(self, "YAMIN_DOMAINS", ("epicz.xyz",))
+        domain = random.choice(domains)
+        first = random.choice(self._CF_FIRST_NAMES)
+        last = random.choice(self._CF_LAST_NAMES)
+        user = f"{first}.{last}.{random.randint(100, 9999)}"
+        self.email = f"{user}@{domain}"
+        self.yamin_user = user
+        self.yamin_domain = domain
+        return self.email
+
+    def fetch_code_yamin(self, keyword: str = "instagram", timeout: int = 180, subject_hint=None, prefer_len=None):
+        """Poll email.yamin.bd over HTTP until the code for self.email arrives."""
+        email = getattr(self, "email", "") or ""
+        if "@" in email:
+            user, domain = email.split("@", 1)
+        else:
+            user = getattr(self, "yamin_user", "")
+            domain = getattr(self, "yamin_domain", "epicz.xyz")
+
+        base_url = getattr(self, "YAMIN_MAIL_API", "https://email.yamin.bd")
+        auth_key = getattr(self, "YAMIN_AUTH_KEY", "yamin12134@!")
+        headers = {
+            "Authorization": auth_key,
+            "X-Api-Key": auth_key,
+            "User-Agent": "Mozilla/5.0 (Linux; Android 12; Mobile) AppleWebKit/537.36",
+        }
+
+        list_url = f"{base_url}/?action=getMessages&user={urllib.parse.quote(user)}&domain={urllib.parse.quote(domain)}"
+        start = time.time()
+        self.log(f"[📧] Polling Yamin API for {keyword} code: {user}@{domain}...")
+
+        while time.time() - start < timeout:
+            try:
+                req = urllib.request.Request(list_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    messages = json.loads(resp.read().decode("utf-8", "replace"))
+            except Exception:
+                messages = []
+
+            if isinstance(messages, list) and len(messages) > 0:
+                candidate_ids = []
+                for m in messages:
+                    if not isinstance(m, dict):
+                        continue
+                    mid = str(m.get("id") or "").strip()
+                    if not mid:
+                        continue
+                    m_from = str(m.get("from") or "").lower()
+                    if any(k in m_from for k in ("meta.com", "instagram", "facebook")) or not candidate_ids:
+                        candidate_ids.append((m.get("timestamp") or 0, mid))
+
+                candidate_ids.sort(key=lambda x: x[0], reverse=True)
+
+                for _, mid in candidate_ids:
+                    read_url = f"{base_url}/?action=readMessage&user={urllib.parse.quote(user)}&domain={urllib.parse.quote(domain)}&id={urllib.parse.quote(mid)}"
+                    try:
+                        r_req = urllib.request.Request(read_url, headers=headers)
+                        with urllib.request.urlopen(r_req, timeout=10) as r_resp:
+                            msg_body = json.loads(r_resp.read().decode("utf-8", "replace"))
+                    except Exception:
+                        msg_body = {}
+
+                    if isinstance(msg_body, dict):
+                        extracted = str(msg_body.get("code_extracted") or "").strip()
+                        if extracted and re.match(r"^\d{6,8}$", extracted):
+                            self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (Yamin API): {extracted}</b></font>')
+                            return extracted
+
+                        html = str(msg_body.get("htmlBody") or msg_body.get("body") or "")
+                        if html:
+                            clean = re.sub(r'(?is)<(style|script)[^>]*>.*?</\1>', ' ', html)
+                            text = re.sub(r'<[^>]+>', ' ', clean)
+                            m_code = re.search(r'(?i)code[^0-9]{0,80}?\b(\d{6,8})\b', text)
+                            if not m_code:
+                                m_code = re.search(r'\b(\d{6})\b', text)
+                            if m_code:
+                                code = m_code.group(1)
+                                self.log(f'<font color="#00FF00"><b>[📧] {keyword} code (Yamin HTML parse): {code}</b></font>')
+                                return code
+
+            time.sleep(2.5)
+
+        raise RuntimeError(f"{keyword.capitalize()} confirmation code not received on Yamin Mail API within {timeout}s")
 
     # -- steps --------------------------------------------------------------

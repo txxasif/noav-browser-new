@@ -31,6 +31,500 @@ class IgPasswordMixin:
         """Legacy alias: delegates to ig_set_password using the Meta profile row."""
         return self.ig_set_password(new_password, current_password=current_password)
 
+    _AC_CHALLENGE_WORDS = ("check your email", "enter the code we sent", "enter code we sent",
+                           "get a new code", "sent a code to", "enter the 6-digit code",
+                           "enter the 8-digit code")
+
+    def ig_ac_preauth(self, current_password: str, max_wait: float = 300.0) -> bool:
+        """Clear Accounts Center's "Check your email" challenge BEFORE the bot task starts.
+
+        Touching the Change-password form's Current password field makes Meta send an
+        email OTP, which can take seconds to minutes to arrive. Once one code is
+        accepted, Meta does not ask again for the next few minutes (observed live
+        2026-10-12: the follow-up password change needed no code). Doing the wait here,
+        before the PayGo task timer starts, keeps the real task window for the steps
+        that must happen inside it. Best-effort: returns False instead of raising, and
+        the normal password step still handles a challenge if one appears later.
+        """
+        if not current_password:
+            return False
+        p = self._ig_tab()
+        try:
+            # Old flow (direct): the change-password form is opened by URL, as before.
+            p.goto("https://accountscenter.instagram.com/password_and_security/password/change/",
+                   referer="https://www.instagram.com/", wait_until="domcontentloaded", timeout=30000)
+            inp = p.locator('input[type="password"]').first
+            inp.wait_for(state="visible", timeout=20000)
+            inp.click(force=True, timeout=3000)
+            inp.fill("")
+            inp.fill(current_password)   # one step: the challenge dialog must not steal focus mid-typing
+        except Exception as exc:
+            self.log(f"[⚠️] AC pre-auth: could not open the change-password form ({str(exc)[:80]}).")
+            return False
+
+        def _challenge_up() -> bool:
+            try:
+                body = (p.inner_text("body") or "").lower()
+            except Exception:
+                return False
+            return any(w in body for w in self._AC_CHALLENGE_WORDS)
+
+        p.wait_for_timeout(1500)
+        if not _challenge_up():
+            self.log("[🔐] AC pre-auth: no email challenge shown (already verified).")
+            return True
+        self.log("[🔐] AC pre-auth: email challenge shown — solving it before the bot task starts…")
+        end = time.time() + max_wait
+        while time.time() < end and _challenge_up():
+            try:
+                self._ac_reauth(p, password=current_password)
+            except Exception as exc:
+                self.log(f"[ac] pre-auth re-auth error: {str(exc)[:80]}")
+            p.wait_for_timeout(2000)
+        solved = not _challenge_up()
+        self.log("[🔐] AC pre-auth: " + ("verified — the password step will not need a code."
+                                       if solved else "challenge still open (timed out)."))
+        return solved
+
+    def _ac_pick_profile_row(self, p, which: str) -> bool:
+        """Click one row of Accounts Center's "Choose an account…" list.
+
+        Rows are buttons named "Profile picture, <user> <user> Instagram" and
+        "Profile picture, <user> <user> Muse, Meta AI and more". Seen live (DevTools MCP,
+        2026-10-12): the password change belongs on the META row (the stored password is accepted
+        there and no email challenge comes up; the Instagram row answers "Invalid credentials"),
+        while 2FA belongs on the INSTAGRAM row, because the bot logs into Instagram.
+        ``which`` is "meta" or "instagram"."""
+        import re as _re
+        try:
+            rows = p.get_by_role("button", name=_re.compile(r"^profile picture,", _re.I))
+            n = rows.count()
+            for i in range(n):
+                row = rows.nth(i)
+                if not row.is_visible():
+                    continue
+                label = (row.get_attribute("aria-label") or row.inner_text() or "").strip().lower()
+                is_ig = label.endswith("instagram")
+                if (which == "instagram") == is_ig:
+                    row.click(timeout=4000)
+                    self.log(f'[ac] chose the {which} row: "{label[:50]}"')
+                    return True
+        except Exception as exc:  # noqa: BLE001
+            self.log(f'[ac] profile row pick note: {str(exc)[:70]}')
+        return False
+
+    _AC_PW_FORM_URL = "https://accountscenter.instagram.com/password_and_security/password/change/"
+
+    _AC_CONTACT_URL = "https://accountscenter.instagram.com/youraccount/contact_points/"
+
+    def ig_link_email_fast(self, email: str, code_fetcher=None, budget: float = 150.0) -> str:
+        """Link the bot-issued email, driven exactly like the DevTools MCP runs.
+
+        contact page -> "Add new contact (info)" -> "Add email" -> "Enter email" (+ tick the Instagram
+        account when the dialog lists accounts) -> Next -> "Enter your confirmation code" -> the code
+        comes from the bot's 📥 Get code (``code_fetcher``) -> Next -> "You've added your email to the
+        accounts selected". Returns "linked", "in_use" ("The email address you entered is already in
+        use" — the bot reuses mailboxes, so this is normal and the caller just carries on to 2FA) or
+        "failed". Never raises on a UI miss.
+        """
+        import re as _re
+        import time as _time
+        p = self._ig_tab()
+        email = (email or "").strip()
+        if not email:
+            return "failed"
+        self.log(f'[✉️] Linking the bot email {email}…')
+        try:
+            p.goto(self._AC_CONTACT_URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f'[✉️] contact page load note: {str(exc)[:70]}')
+
+        def _btn(pattern, scope=None):
+            try:
+                root = scope or p
+                b = root.get_by_role("button", name=_re.compile(pattern, _re.I)).first
+                return b if b.count() and b.is_visible() else None
+            except Exception:
+                return None
+
+        deadline = _time.time() + budget
+        typed = False
+        code_sent = False
+        code_entered_at = 0.0
+        while _time.time() < deadline:
+            if "accountscenter.instagram.com" not in (p.url or ""):
+                return "failed"
+            try:
+                body = (p.inner_text("body", timeout=2500) or "").lower().replace("\u2019", "'")
+            except Exception:
+                body = ""
+
+            if "added your email" in body or "contact information update results" in body:
+                self.log('[✉️] Bot email linked.')
+                try:
+                    c = _btn(r"^close$", p.locator('div[role="dialog"]'))
+                    if c is not None:
+                        c.click(timeout=2000)
+                except Exception:
+                    pass
+                return "linked"
+            if "already in use" in body or "already linked" in body or "already associated" in body:
+                self.log('[✉️] The bot email is already in use elsewhere — carrying on to 2FA.')
+                return "in_use"
+
+            if any(k in body for k in ("check your email", "enter the code we sent", "two step verification")):
+                try:
+                    self._ac_reauth(p)
+                except IGDeadEnd:
+                    raise
+                except Exception:
+                    pass
+                continue
+
+            code_box = None
+            try:
+                cb = p.get_by_role("textbox", name=_re.compile(r"confirmation code", _re.I)).first
+                if cb.count() and cb.is_visible():
+                    code_box = cb
+            except Exception:
+                pass
+            if code_box is not None:
+                if not code_sent and code_fetcher is not None:
+                    code = None
+                    try:
+                        code = code_fetcher()
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(f'[✉️] bot code fetch error: {str(exc)[:70]}')
+                    code_sent = True
+                    if not code:
+                        self.log('[✉️] No confirmation code from the bot — carrying on to 2FA.')
+                        return "failed"
+                    try:
+                        code_box.fill(str(code), timeout=3000)
+                        nxt = _btn(r"^next$", p.locator('div[role="dialog"]'))
+                        if nxt is not None:
+                            nxt.click(timeout=4000)
+                        code_entered_at = _time.time()
+                        self.log(f'[✉️] Confirmation code entered ({code}).')
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(f'[✉️] code entry note: {str(exc)[:70]}')
+                p.wait_for_timeout(400)
+                continue
+
+            email_box = None
+            try:
+                eb = p.get_by_role("textbox", name=_re.compile(r"^enter email$", _re.I)).first
+                if eb.count() and eb.is_visible():
+                    email_box = eb
+            except Exception:
+                pass
+            if email_box is not None:
+                dlg = p.locator('div[role="dialog"]')
+                if not typed:
+                    try:
+                        email_box.fill(email, timeout=3000)
+                        typed = True
+                    except Exception:
+                        pass
+                # "Choose accounts for this email": tick the Instagram account (the bot logs into it)
+                try:
+                    # the checkbox's name ("<user> Instagram") comes from its <label>, so select by
+                    # accessible name — reading attributes finds nothing
+                    ig_box = dlg.get_by_role("checkbox", name=_re.compile(r"instagram", _re.I)).first
+                    if ig_box.count() and not ig_box.is_checked():
+                        try:
+                            ig_box.check(timeout=2500)
+                        except Exception:
+                            ig_box.click(force=True, timeout=2000)
+                except Exception:
+                    pass
+                nxt = _btn(r"^next$", dlg)
+                if nxt is not None:
+                    try:
+                        if nxt.is_enabled():
+                            nxt.click(timeout=4000)
+                            p.wait_for_timeout(600)
+                    except Exception:
+                        pass
+                p.wait_for_timeout(300)
+                continue
+
+            if code_sent and code_entered_at and _time.time() - code_entered_at > 5:
+                if not any(k in body for k in ("isn't right", "incorrect", "try again", "invalid", "expired",
+                                               "something went wrong", "couldn't")):
+                    seen_local = email.split("@")[0].lower() in body
+                    self.log('[✉️] Confirmation accepted — the dialog closed'
+                             + (' and the account row shows the bot email.' if seen_local else '.'))
+                    return "linked"
+            add_email = _btn(r"^add email$")
+            if add_email is not None:
+                try:
+                    add_email.click(timeout=3000)
+                except Exception:
+                    pass
+                p.wait_for_timeout(400)
+                continue
+            add_new = _btn(r"^add new contact")
+            if add_new is not None:
+                try:
+                    add_new.click(timeout=3000)
+                except Exception:
+                    pass
+                p.wait_for_timeout(400)
+                continue
+            p.wait_for_timeout(300)
+
+        self.log('[✉️] Email link did not finish in time — carrying on to 2FA.')
+        return "failed"
+
+    def _ac_solve_challenge_fast(self, p, budget: float = 170.0) -> bool:
+        """Solve Accounts Center's "Check your email" challenge in a tight loop (seen live via the
+        DevTools MCP: dialog "Two Step Verification", textbox "Code", button "Continue", link
+        "Get a new code"). The code is read from the account inbox through ``self.fetch_code``; if no
+        mail shows up within ~45 s the code is re-sent once, then once more, and after ``budget``
+        seconds the account is given up on (Instagram occasionally never delivers — the old solver
+        sat there for 2+ minutes). Returns True when the dialog closed with a code accepted."""
+        import re as _re
+        import time as _time
+        fetcher = getattr(self, "fetch_code", None)
+        if not callable(fetcher):
+            return False
+        end = _time.time() + budget
+        hint = "authenticate your profile|authenticate|security code|meta account code|instagram|security"
+        resends = 0
+        while _time.time() < end:
+            dlg = p.locator('div[role="dialog"]')
+            try:
+                box = dlg.get_by_role("textbox", name=_re.compile(r"^code$", _re.I)).first
+                if not (box.count() and box.is_visible()):
+                    return True            # the dialog is gone: solved (or never there)
+            except Exception:
+                return True
+            code = None
+            try:
+                # Seen live: the challenge mail lands anywhere from ~10 s to ~50 s after it opens, and
+                # sometimes never; resending early did not speed it up. Wait properly first
+                # (90 s), then ONE resend + 50 s, then give the account up (a resend can invalidate a code in flight).
+                wait_s = (90, 50)[min(resends, 1)]
+                try:
+                    code = fetcher("instagram", timeout=wait_s,
+                                   subject_hint=hint, prefer_len=None)
+                except TypeError:
+                    code = fetcher("instagram", timeout=wait_s)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f'[ac] fetch_code error: {str(exc)[:70]}')
+            if not code:
+                if resends >= 1 or _time.time() >= end:
+                    break
+                try:
+                    resend = dlg.get_by_role("button", name=_re.compile(r"get a new code", _re.I)).first
+                    if not (resend.count() and resend.is_visible()):
+                        resend = dlg.get_by_role("link", name=_re.compile(r"get a new code", _re.I)).first
+                    resend.click(timeout=3000)
+                    resends += 1
+                    self.log(f'[✉️] No email yet — asked Instagram for a new code ({resends}/1).')
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f'[ac] resend note: {str(exc)[:60]}')
+                    break
+                continue
+            try:
+                box.fill(str(code), timeout=3000)
+                dlg.get_by_role("button", name=_re.compile(r"^continue$", _re.I)).last.click(timeout=4000)
+                self.log(f'[✉️] Challenge code entered ({code}).')
+            except Exception as exc:  # noqa: BLE001
+                self.log(f'[ac] challenge entry note: {str(exc)[:70]}')
+            # wait for the dialog to close (accepted) or show an error (try the next code)
+            t_end = _time.time() + 20
+            while _time.time() < t_end:
+                p.wait_for_timeout(400)
+                try:
+                    if not (box.count() and box.is_visible()):
+                        return True
+                except Exception:
+                    return True
+        self.log('[⚠️] The email challenge could not be solved (no code delivered).')
+        return False
+
+    def ig_set_password_fast(self, new_password: str, current_password: Optional[str] = None) -> Optional[bool]:
+        """Change the password the way it was driven by hand through the DevTools MCP.
+
+        One navigation (the change-password URL loads with the live session), then a state loop that
+        reacts to whatever screen is showing — no section walking, no fixed sleeps:
+          chooser ("Choose an account…")  -> pick the Instagram profile
+          "Check your email" challenge    -> solve it; the form stays open afterwards, so submit again
+          form                            -> fill current/new/re-type once, press "Change password"
+          toast "Meta Account password updated" -> done
+          "You can't make this change at the moment" -> new-device block (no retry can pass)
+          "Invalid credentials"/"incorrect" -> the stored current password is wrong
+        Returns True (changed), False (definitively failed, ``_pw_fail_reason`` set) or None (could not
+        operate the form at all and nothing was submitted — the caller may fall back to the old walk).
+        """
+        import re as _re
+        import time as _time
+        p = self._ig_tab()
+        self._pw_fail_reason = None
+        curr = (current_password or self.password or "").strip()
+        new_password = (new_password or "").strip()
+        if not new_password:
+            self.log('[⚠️] Password change skipped: new password missing.')
+            return False
+        if new_password == curr:
+            self.log('[✓] Target password is already identical to current password — skipping Change Password form.')
+            return True
+
+        self.log('[🔑] Changing the password (direct form)…')
+        if not (p.url or "").startswith(self._AC_PW_FORM_URL):
+            try:
+                p.goto(self._AC_PW_FORM_URL, wait_until="domcontentloaded", timeout=45000)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f'[🔑] change-password URL load note: {str(exc)[:80]}')
+
+        def _field(pattern):
+            try:
+                loc = p.get_by_role("textbox", name=_re.compile(pattern, _re.I)).first
+                return loc if loc.count() and loc.is_visible() else None
+            except Exception:
+                return None
+
+        def _set(loc, val) -> bool:
+            try:
+                loc.fill(val, timeout=4000)
+                if loc.input_value() != val:
+                    self._react_set_value(loc, val)
+                return loc.input_value() == val
+            except Exception:
+                return False
+
+        deadline = _time.time() + 150
+        idle_since = _time.time()
+        reloads = 0
+        refills = 0
+        filled = False
+        submits = 0
+        cleared = 0          # email challenges solved so far
+        need_resubmit = False
+        last_submit = 0.0
+        while _time.time() < deadline:
+            if "accountscenter.instagram.com" not in (p.url or ""):
+                self.log(f'[🔑] left Accounts Center (url={(p.url or "")[:70]})')
+                return None if not submits else False
+            try:
+                body = (p.inner_text("body", timeout=2500) or "").lower().replace("\u2019", "'")
+            except Exception:
+                body = ""
+
+            if "password updated" in body or "you changed your meta password" in body:
+                self.password = new_password
+                self.log('<font color="#00FF00"><b>[✔] Password set (Meta account).</b></font>')
+                return True
+            if "can't make this change at the moment" in body:
+                self._pw_fail_reason = "device_block"
+                self.log('[🚫] Meta blocked the password change ("can\'t make this change at the moment" — '
+                         'new-device check). Stopping this account; no retry.')
+                return False
+            if submits and ("invalid credentials" in body or "current password is incorrect" in body):
+                self._pw_fail_reason = "rejected"
+                self.log('[⚠️] Password change rejected: the stored current password is wrong.')
+                return False
+            if self._is_ig_dead_end_chooser(p):
+                raise IGDeadEnd("IG saved-account chooser detected during password change (session dropped) — aborting immediately")
+
+            # 1) email challenge
+            if any(k in body for k in ("check your email", "enter the code we sent", "enter code we sent")):
+                self.log('[✉️] Email challenge — solving…')
+                idle_since = _time.time()
+                cleared += 1
+                if cleared > 3:
+                    self._pw_fail_reason = "otp_not_accepted"
+                    return False
+                if not self._ac_solve_challenge_fast(p):
+                    self._pw_fail_reason = "otp_not_delivered"
+                    return False
+                need_resubmit = bool(submits)     # the form stays open and is NOT submitted by the code
+                continue
+
+            # 2) real account chooser -> the META row for a password change
+            if "choose an account" in body:
+                idle_since = _time.time()
+                if not self._ac_pick_profile_row(p, "meta"):
+                    try:
+                        self._ac_choose_account(p, prefer_instagram=False)
+                    except Exception:
+                        pass
+                p.wait_for_timeout(300)
+                continue
+
+            # 3) the form
+            cur_f = _field(r"^current password")
+            new_f = _field(r"^new password")
+            re_f = _field(r"re-type")
+            if new_f is not None and re_f is not None:
+                idle_since = _time.time()
+                # The dialog can come back EMPTY (it re-renders after a submit or a challenge). Seen
+                # live: the old loop still believed it was filled and kept pressing a disabled button.
+                try:
+                    _emptied = (new_f.input_value() == "")
+                except Exception:
+                    _emptied = False
+                if filled and _emptied:
+                    if refills >= 4:
+                        self._pw_fail_reason = "form_keeps_resetting"
+                        self.log('[⚠️] The change-password form keeps resetting — giving up on this account.')
+                        return False
+                    refills += 1
+                    filled = False
+                    need_resubmit = False
+                    last_submit = 0.0
+                    self.log(f'[🔑] The form was reset (fields empty) — filling it again ({refills}/4).')
+                if not filled:
+                    ok_c = True if cur_f is None else _set(cur_f, curr)
+                    ok_n = _set(new_f, new_password)
+                    ok_r = _set(re_f, new_password)
+                    self.log(f'[🔑] form filled (current={ok_c}, new={ok_n}, retype={ok_r})')
+                    if not (ok_c and ok_n and ok_r):
+                        self._pw_fail_reason = "type_failed"
+                        return None if not submits else False
+                    filled = True
+                if submits == 0 or need_resubmit or (_time.time() - last_submit > 12 and "being validated" not in body):
+                    btn = p.locator('div[role="dialog"]').get_by_role("button", name=_re.compile(r"^change password$", _re.I)).last
+                    try:
+                        if not btn.is_enabled():
+                            p.wait_for_timeout(400)
+                            continue
+                        btn.click(timeout=5000)
+                        submits += 1
+                        last_submit = _time.time()
+                        need_resubmit = False
+                        self.log(f'[🔑] "Change password" pressed (#{submits})')
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(f'[🔑] submit click note: {str(exc)[:70]}')
+                p.wait_for_timeout(300)
+                continue
+
+            # 4) still on the Login and security list: open the form
+            try:
+                row = p.get_by_role("button", name=_re.compile(r"^change password$", _re.I)).first
+                if row.count() and row.is_visible() and "re-type" not in body:
+                    row.click(timeout=3000)
+                    idle_since = _time.time()
+            except Exception:
+                pass
+            # Nothing recognisable for a few seconds (the page sat idle while the bot task started and
+            # went stale / blank): load the form again instead of waiting out the whole budget.
+            if _time.time() - idle_since > 6 and reloads < 3 and not submits:
+                reloads += 1
+                self.log(f'[🔑] no known screen for 6 s — reloading the change-password form ({reloads}/3)')
+                try:
+                    p.goto(self._AC_PW_FORM_URL, wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    pass
+                idle_since = _time.time()
+            p.wait_for_timeout(300)
+
+        self._pw_fail_reason = "not_confirmed" if submits else "form_not_found"
+        self.log(f'[⚠️] Password change not confirmed ({self._pw_fail_reason}) | {self._page_tail(p, 160)}')
+        return False if submits else None
+
     def ig_set_password(self, new_password: str, current_password: Optional[str] = None) -> bool:
         """Change the password on the **Meta** account row in Accounts Center:
         Current ← Meta password (or current_password), New ← new_password.
@@ -51,6 +545,14 @@ class IgPasswordMixin:
         if new_password == curr:
             self.log('[✓] Target password is already identical to current password — skipping Change Password form.')
             return True
+        _fast = self.ig_set_password_fast(new_password, curr)
+        if _fast is not None or os.environ.get("PAYGO_SLOW_WALK", "0") != "1":
+            # No fallback to the old section walk (it went through the Instagram feed and
+            # Settings and was the source of the extra page loads): a miss fails the account.
+            if _fast is None:
+                self._pw_fail_reason = self._pw_fail_reason or "form_not_found"
+            return bool(_fast)
+        self.log('[🔑] Direct form could not be operated — falling back to the section walk.')
         import time as _time
         _pw_t0 = _time.time()
         self.log('[🔑] Setting password via Accounts Center (Meta profile row)…')
@@ -95,6 +597,18 @@ class IgPasswordMixin:
                     return False
             except Exception:
                 pass
+            challenge_words = ("check your email", "enter the code we sent",
+                               "enter code we sent", "get a new code",
+                               "sent a code to", "enter the 6-digit code",
+                               "enter the 8-digit code")
+            # The "Check your email" card is not always a role=dialog/aria-modal
+            # (the pool drain screenshot shows it as a plain card), so the page
+            # body is checked as well — otherwise the OTP is never requested.
+            try:
+                if any(k in (p.inner_text("body") or "").lower() for k in challenge_words):
+                    return True
+            except Exception:
+                pass
             for sel in (
                 'div[role="dialog"]',
                 'div[aria-modal="true"]',
@@ -103,10 +617,7 @@ class IgPasswordMixin:
                     for cand in p.locator(sel).all():
                         if cand.is_visible():
                             txt = (cand.inner_text() or "").lower()
-                            if any(k in txt for k in ("check your email", "enter the code we sent",
-                                                      "enter code we sent", "get a new code",
-                                                      "sent a code to", "enter the 6-digit code",
-                                                      "enter the 8-digit code")):
+                            if any(k in txt for k in challenge_words):
                                 return True
                 except Exception:
                     pass
@@ -164,7 +675,19 @@ class IgPasswordMixin:
         # Step 2: Patiently resolve Account Chooser and/or Email OTP challenge until form is genuinely open
         self.log('[🔑] Navigating to Change Password form (handling account selection & OTP challenges)…')
         t_max = _time.time() + 90.0
+        meta_row_done = False
         while _time.time() < t_max:
+            # Meta's new-device check ("You can't make this change at the moment"): no code
+            # or retry helps. Stop this account now instead of clicking through to the form.
+            try:
+                _body = (p.inner_text("body") or "").lower().replace("\u2019", "'")
+            except Exception:
+                _body = ""
+            if "can't make this change at the moment" in _body:
+                self._pw_fail_reason = "device_block"
+                self.log('[🚫] Meta blocked the password change ("can\'t make this change at the moment" — '
+                         'new-device check). Stopping this account; no retry.')
+                return False
             if self._is_ig_dead_end_chooser(p):
                 raise IGDeadEnd("IG saved-account chooser detected during password change (session dropped) — aborting immediately")
 
@@ -179,7 +702,30 @@ class IgPasswordMixin:
             if _form_open():
                 break
 
-            # C. If account selection screen is visible, choose Meta account
+            # C. If account selection screen is visible, choose Meta account.
+            #    Learned live (DevTools MCP + the engine log, 2026-10-12): the header row of the
+            #    CHANGE-PASSWORD dialog ("Meta symbol <email> 2 profiles") looks like an account row,
+            #    but tapping it opens the profile list ("In this Meta Account") and the form is never
+            #    reached. Only act on a REAL chooser ("Choose an account…"); while the form dialog is
+            #    loading, just wait.
+            try:
+                _bl = (p.inner_text("body") or "").lower()
+            except Exception:
+                _bl = ""
+            _in_form = any(k in _bl for k in ("current password", "re-type new password",
+                                              "log out of other devices", "forgot your password"))
+            _chooser = ("choose an account" in _bl or "select an account" in _bl)
+            if "in this meta account" in _bl and not _chooser:
+                # Landed on the profile list by mistake: go straight back to the change form.
+                self.log('[🔑] On the profile list ("In this Meta Account") — returning to the Change password form…')
+                try:
+                    p.goto("https://accountscenter.instagram.com/password_and_security/password/change/",
+                           wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    pass
+                p.wait_for_timeout(1500)
+                continue
+            _allow_pick = _chooser and not _in_form
             meta_btn = None
             try:
                 name_cand = p.locator(f'div[role="button"]:has-text("{self.name}")').first if self.name else None
@@ -206,12 +752,20 @@ class IgPasswordMixin:
             except Exception:
                 pass
 
+            if not _allow_pick:
+                meta_btn = None
+            # The Meta account row was already opened once: tapping it again just
+            # re-renders the same "Meta Account" page (the 90 s stall). Fall through
+            # to "Login and security" → "Change password" instead.
+            if meta_btn is not None and meta_row_done:
+                meta_btn = None
             if meta_btn is not None:
                 self.log('[🔑] Selecting Meta account row in Accounts Center…')
                 try:
                     self._tap_or_click(p, meta_btn)
                 except Exception:
                     meta_btn.click(force=True, timeout=2000)
+                meta_row_done = True
                 p.wait_for_timeout(2500)
                 # Close any stray help tab opened by misclick
                 try:
@@ -223,7 +777,7 @@ class IgPasswordMixin:
                     pass
                 continue
 
-            if self._ac_choose_account(p, prefer_instagram=False):
+            if _allow_pick and self._ac_choose_account(p, prefer_instagram=False):
                 self.log('[🔑] Account chosen via _ac_choose_account.')
                 p.wait_for_timeout(2500)
                 # Close any stray help tab opened by misclick
@@ -243,6 +797,12 @@ class IgPasswordMixin:
                     pw_row = p.locator('div[role="button"]:has-text("Change password")').first
                     if pw_row.count() > 0 and pw_row.is_visible():
                         self._tap_or_click(p, pw_row)
+                    elif meta_row_done:
+                        # On the Meta Account page: "Change password" lives under "Login and security".
+                        sec_row = p.locator('div[role="button"]:has-text("Login and security")').first
+                        if sec_row.count() > 0 and sec_row.is_visible():
+                            self.log('[🔑] Opening "Login and security" to reach Change password…')
+                            self._tap_or_click(p, sec_row)
                 except Exception:
                     pass
 
@@ -323,7 +883,7 @@ class IgPasswordMixin:
             return False
 
         # Step 4: Type fields with calm, human pacing and verify every value
-        def _safe_type_field(el, val, name):
+        def _safe_type_field(el, val, name, atomic=False):
             if el is None:
                 return False
             try:
@@ -343,7 +903,15 @@ class IgPasswordMixin:
                 p.wait_for_timeout(300)
                 el.fill("")
                 p.wait_for_timeout(200)
-                el.press_sequentially(val, delay=35)
+                if atomic:
+                    # Touching the Current password field opens the "Two Step
+                    # Verification / Check your email" dialog. Typing key by key
+                    # lets that dialog steal focus mid-password, so the TAIL of
+                    # the password lands in the Code box ("3#$#$"). Set it in one
+                    # step instead.
+                    el.fill(val)
+                else:
+                    el.press_sequentially(val, delay=35)
                 p.wait_for_timeout(200)
                 # Unconditionally invoke React native setter so synthetic state always updates
                 self._react_set_value(el, val)
@@ -362,11 +930,21 @@ class IgPasswordMixin:
                 return False
 
         if curr_inp is not None:
-            if not _safe_type_field(curr_inp, curr, "Current password"):
+            if not _safe_type_field(curr_inp, curr, "Current password", atomic=True):
                 self._pw_fail_reason = "type_current_failed"
                 self.log("[⚠️] Failed to fill Current password — aborting.")
                 return False
-            p.wait_for_timeout(600)
+            p.wait_for_timeout(1200)
+            # The email challenge opens right after the current password is
+            # entered — solve it NOW, before typing the new password, or the
+            # next keystrokes go into the Code box.
+            if _challenge_present():
+                self.log('[✉️] Email challenge opened right after Current password — solving it before the new password…')
+                try:
+                    self._ac_reauth(p, password=curr)
+                except Exception as exc:
+                    self.log(f"[ac] early re-auth error: {exc}")
+                p.wait_for_timeout(1500)
 
         if not _safe_type_field(new_inp, new_password, "New password"):
             self._pw_fail_reason = "type_new_failed"
@@ -524,6 +1102,17 @@ class IgPasswordMixin:
                 self._ac_reauth(p, password=curr)
             except Exception as exc:
                 self.log(f"[ac] password re-auth error: {exc}")
+            # Learned live via the DevTools MCP (2026-10-12): once the emailed code is accepted the
+            # dialog closes but the form stays open and the change is NOT submitted — press
+            # "Change password" a second time.
+            try:
+                p.wait_for_timeout(1200)
+                if new_inp.is_visible() and not _challenge_present():
+                    self.log('[🔑] Challenge cleared — submitting "Change password" again…')
+                    self._tap_or_click(p, submit_btn, 3000)
+                    submit_btn.evaluate("el => el.click()")
+            except Exception:
+                pass
             for _poll in range(40):
                 p.wait_for_timeout(500)
                 body = (p.inner_text("body") or "").lower()
@@ -574,6 +1163,21 @@ class IgPasswordMixin:
         """Poll the mail.td tab for the Instagram password-reset link."""
         mail = getattr(self, "mail", None) or self.page
         end = time.time() + timeout
+        if getattr(self, "mail_provider", "") == "guerrilla" and getattr(self, "email", ""):
+            # API inbox: no mail tab to click through — read the message HTML over HTTP.
+            import html as _html
+            import re as _re
+            from core import guerrilla_api
+            self.log('[✉️] Waiting for Instagram reset email in Guerrilla Mail…')
+            while time.time() < end and self.w.is_running:
+                for m in guerrilla_api.list_messages(self.email, getattr(self, "_guerrilla_sid", "")):
+                    blob = _html.unescape((m.get("html") or "") + " " + (m.get("text") or ""))
+                    hit = _re.search(r"https?://[^\s\"'<>]*password/reset/confirm[^\s\"'<>]*", blob)
+                    if hit:
+                        self.log('[🔗] Found Instagram reset link in email.')
+                        return hit.group(0)
+                time.sleep(3)
+            return None
         self.log('[✉️] Waiting for Instagram reset email in mail.td…')
         while time.time() < end and self.w.is_running:
             try:

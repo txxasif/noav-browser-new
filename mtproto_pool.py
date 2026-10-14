@@ -8,6 +8,7 @@ import cycle.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import queue
 import sys
@@ -26,7 +27,9 @@ def _mtproto_owner_loop(q_in, q_out, session_path, tg_id, bot_target, log):
     """Owner thread: one Telethon client per session, commands run FIFO."""
     bot = None
     while True:
-        cmd, target, args, kwargs = q_in.get()
+        item_in = q_in.get()
+        cmd, target, args, kwargs = item_in[:4]
+        rid = item_in[4] if len(item_in) > 4 else None
         if cmd == "shutdown":
             try:
                 if bot is not None:
@@ -51,9 +54,9 @@ def _mtproto_owner_loop(q_in, q_out, session_path, tg_id, bot_target, log):
                                        bot_target=tgt, log=kwargs.get("log", log) or log)
             fn = getattr(bot, cmd)
             res = fn(*args, **kwargs)
-            q_out.put((True, res))
+            q_out.put((True, res, rid))
         except Exception as e:
-            q_out.put((False, e))
+            q_out.put((False, e, rid))
 
 
 class MtprotoPooledBot:
@@ -65,6 +68,7 @@ class MtprotoPooledBot:
 
     _pool = {}
     _pool_lock = threading.Lock()
+    _rid_seq = itertools.count(1)
     _WARM_IDLE_SECS = 1800
 
     def __init__(self, profile_dir=None, bot_name=None, bot_target="taskly",
@@ -157,19 +161,39 @@ class MtprotoPooledBot:
                 self._key, self.session_path, self.tg_id,
                 self.bot_target, self.log)
             ent = self._ent
-        ent["q_in"].put((cmd, self.bot_target, args, kwargs))
+        rid = next(MtprotoPooledBot._rid_seq)
+        ent["q_in"].put((cmd, self.bot_target, args, kwargs, rid))
+        # Replies are matched by request id. A cycle that failed/aborted mid-command leaves its
+        # reply behind (the owner thread finishes the command after the lease is released); the
+        # next lease holder used to read THAT reply as its own, so start_task() came back as a
+        # str/bool ("'str' object has no attribute 'get'") and every cycle failed + cancelled.
+        # 'open' = connect + auth check: if it has not answered in a minute the session is wedged (locked
+        # session file / dead connection) - fail fast so the slot moves on instead of idling 3 minutes.
         try:
-            item = ent["q_out"].get(timeout=180)
-        except queue.Empty:
-            raise RuntimeError(f"MTProto bot thread hung on '{cmd}' (180s)")
-        # A non-tuple here means a stale sentinel from a reaped owner, never
-        # a real reply — fail loud with the cause, not "cannot unpack
-        # non-iterable bool object".
-        if not isinstance(item, tuple) or len(item) != 2:
-            raise RuntimeError(
-                f"MTProto bot session for '{self.tg_id}' was reaped mid-task "
-                f"(stale pool reply) on '{cmd}' — retry the task")
-        ok, res = item
+            _open_s = float(os.environ.get("MTPROTO_OPEN_TIMEOUT_SEC", "60") or 60)
+        except (TypeError, ValueError):
+            _open_s = 60.0
+        _limit = _open_s if cmd == "open" else 180.0
+        deadline = time.time() + _limit
+        while True:
+            try:
+                item = ent["q_out"].get(timeout=max(0.1, deadline - time.time()))
+            except queue.Empty:
+                raise RuntimeError(f"MTProto bot thread hung on '{cmd}' ({int(_limit)}s)")
+            if not isinstance(item, tuple):
+                raise RuntimeError(
+                    f"MTProto bot session for '{self.tg_id}' was reaped mid-task "
+                    f"(stale pool reply) on '{cmd}' — retry the task")
+            if len(item) == 3:
+                if item[2] != rid:
+                    continue            # orphaned reply from an earlier, abandoned call
+                ok, res = item[0], item[1]
+                break
+            if len(item) == 2:          # shutdown sentinel from a reaped owner
+                raise RuntimeError(
+                    f"MTProto bot session for '{self.tg_id}' was reaped mid-task "
+                    f"(stale pool reply) on '{cmd}' — retry the task")
+            raise RuntimeError(f"unexpected pool reply on '{cmd}'")
         if not ok:
             raise res
         return res
@@ -221,6 +245,9 @@ class MtprotoPooledBot:
 
     def mark_registered(self):
         return self._call("mark_registered")
+
+    def wait_report_accepted(self, timeout=90.0):
+        return self._call("wait_report_accepted", timeout=timeout)
 
     def reset_to_main_menu(self, timeout=30):
         return self._call("reset_to_main_menu", timeout=timeout)

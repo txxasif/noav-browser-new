@@ -84,11 +84,6 @@
           <span>Instagram Creator</span>
           <span id="metainsta-badge-ig" class="nav-pill nav-pill--tool">0</span>
         </button>
-        <button class="nav-item" data-view="view-ig-checker" title="Bulk-check Instagram accounts — live, damaged, flagged">
-          <i class="fa-solid fa-user-check" style="color: #34d399;"></i>
-          <span>IG Checker</span>
-          <span class="nav-pill nav-pill--tool">TOOL</span>
-        </button>
 
         <div class="nav-section-title">TELEGRAM</div>
         <button class="nav-item nav-parent" id="nav-tg-toggle" type="button" aria-expanded="true" title="Telegram bots — pick a submenu item">
@@ -147,31 +142,27 @@
             </button>
           </div>
 
-          <!-- ===== FastPay ===== -->
-          <button class="nav-item nav-parent nav-parent--bot" type="button" data-bot-group="fastpay" data-bot="fastpay" aria-expanded="false" title="FastPay Bot — tasks">
-            <img src="img/bot_logo/fastpay.png" width="16" height="16" alt="" style="border-radius:4px;object-fit:cover;flex:none;">
-            <span>FastPay</span>
-            <i class="fa-solid fa-chevron-down nav-caret"></i>
-          </button>
-          <div class="nav-submenu nav-submenu--nested collapsed" data-bot-menu="fastpay">
-            <button class="nav-item nav-sub" data-view="view-tg-classic" data-bot="fastpay" data-task="Instagram 2FA" title="FastPay Instagram 2FA — create + payout">
-              <span>Instagram 2FA</span>
-            </button>
-            <button class="nav-item nav-sub" data-view="view-tg-fastpay2fa" title="FastPay Instagram 2FA — pooled IG drain (no Meta)">
-              <span>Instagram 2FA</span>
-              <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">POOL</span>
-            </button>
-          </div>
+
         </div>
-        <button class="nav-item" data-view="view-tg-failover" title="Cookie Fleet — universal cookie drain: pick task, set priority, start">
-          <i class="fa-solid fa-shuffle" style="color: #4ade80;"></i>
-          <span>Cookie Fleet</span>
-          <span class="nav-pill nav-pill--tool" style="background:rgba(74,222,128,.15);color:#4ade80;">AUTO</span>
-        </button>
         <button class="nav-item" data-view="view-tg-manager" title="Connect & manage Telegram accounts — lease, enable/disable, balances">
           <i class="fa-solid fa-sliders" style="color: #a78bfa;"></i>
           <span>TG Manager</span>
         </button>
+        <button class="nav-item nav-parent" id="nav-tools-toggle" type="button" aria-expanded="true" title="Tools — IG Checker, Mr Follower">
+          <i class="fa-solid fa-screwdriver-wrench" style="color: #fbbf24;"></i>
+          <span>Tools</span>
+          <i class="fa-solid fa-chevron-down nav-caret"></i>
+        </button>
+        <div class="nav-submenu" id="tools-submenu">
+          <button class="nav-item nav-sub" data-view="view-ig-checker" title="Bulk-check Instagram accounts — live, damaged, flagged">
+            <i class="fa-solid fa-user-check" style="color: #34d399;"></i>
+            <span>IG Checker</span>
+          </button>
+          <button class="nav-item nav-sub" data-view="view-follow-maker" title="Mr Follower — gives the oldest IG accounts their 5 follows, then returns them to the list">
+            <i class="fa-solid fa-user-plus" style="color: #f472b6;"></i>
+            <span>Mr Follower</span>
+          </button>
+        </div>
         <div class="nav-section-title">HELP</div>
         <button class="nav-item" data-view="view-guide" title="Telegram setup guide — create api_id / api_hash">
           <i class="fa-solid fa-book-open" style="color: #06b6d4;"></i>
@@ -200,6 +191,9 @@
         <div class="sidebar-actions-row">
           <button id="btn-theme-toggle" class="btn-sidebar-icon" title="Toggle Dark/Light Mode">
             <i class="fa-solid fa-moon"></i>
+          </button>
+          <button id="btn-settings" class="btn-sidebar-icon" title="Settings" onclick="location.hash='#/settings'">
+            <i class="fa-solid fa-gear"></i>
           </button>
         </div>
       </div>
@@ -359,6 +353,11 @@
             </div>
           </div>
         </section>
+        <!-- ================= VIEW: MR FOLLOWER ================= -->
+        <section id="view-follow-maker" class="view-panel" aria-label="Mr Follower">
+          <div id="fm-root"></div>
+        </section>
+
         <!-- ================= VIEW: TG CLASSIC ================= -->
         <section id="view-tg-classic" class="view-panel">
           <!-- NOT class="creator-mount": nova-meta-insta.js claims every
@@ -377,10 +376,7 @@
           <div id="tg-tasklycookie-root"></div>
         </section>
 
-        <!-- ================= VIEW: FASTPAY 2FA (POOL DRAIN) ================= -->
-        <section id="view-tg-fastpay2fa" class="view-panel" aria-label="FastPay 2FA pool drain">
-          <div id="tg-fastpay2fa-root"></div>
-        </section>
+
 
         <!-- ================= VIEW: PAYGO POOL (POOL DRAIN) ================= -->
         <section id="view-tg-paygopool" class="view-panel" aria-label="PayGo Cookie drain">
@@ -397,12 +393,25 @@
           <div id="tg-paygo2fa-root"></div>
         </section>
 
-        <!-- ================= VIEW: COOKIE FLEET (UNIVERSAL FAILOVER) ================= -->
-        <section id="view-tg-failover" class="view-panel" aria-label="Cookie Fleet universal failover drain">
-          <div id="tg-failover-root"></div>
+        <!-- ================= VIEW: TG MANAGER ================= -->
+        <section id="view-settings" class="view-panel" aria-label="Settings">
+          <div class="page-title-box">
+            <div class="page-title-row"><div>
+              <h2><i class="fa-solid fa-gear" style="color:#94a3b8;"></i> Settings</h2>
+              <p>Your own API keys. Stored locally on this machine only.</p>
+            </div></div>
+          </div>
+          <div class="creator-service" style="max-width:560px;">
+            <div class="creator-service-title"><i class="fa-solid fa-fish" style="color:#38bdf8;"></i> tempmail.fish API key</div>
+            <div class="creator-service-note">
+              <input type="password" id="set-mailfish-key" class="form-control" autocomplete="off" style="display:inline-block;width:280px;">
+              <button type="button" class="btn" id="set-mailfish-save" style="margin-left:4px;">Save key</button>
+              <button type="button" class="btn" id="set-mailfish-clear" style="margin-left:4px;">Remove</button>
+            </div>
+            <div class="creator-service-note" id="set-mailfish-status"></div>
+          </div>
         </section>
 
-        <!-- ================= VIEW: TG MANAGER ================= -->
         <section id="view-tg-manager" class="view-panel" aria-label="Telegram account manager">
           <div class="page-title-box">
             <div class="page-title-row">
@@ -789,7 +798,7 @@
   <script src="js/nova-core.js?v=8" defer></script>
   <script src="js/nova-license.js?v=2" defer></script>
   <script src="js/nova-diag.js?v=3" defer></script>
-  <script src="js/nova-meta-insta.js?v=7" defer></script>
+  <script src="js/nova-meta-insta.js?v=13" defer></script>
   <!-- ?v=N cache-busts the dashboard scripts. Without a changing query, a
        browser can keep serving a stale nova-tg.js (the TG Start preflight then
        disagreed with the pool card). Bump these when shipping JS changes. -->
@@ -797,14 +806,14 @@
   <script src="js/nova-pool-panel.js?v=1" defer></script>
   <script src="js/nova-taskly2fa.js?v=8" defer></script>
   <script src="js/nova-tasklycookie.js?v=4" defer></script>
-  <script src="js/nova-fastpay2fa.js?v=5" defer></script>
   <script src="js/nova-paygopool.js?v=8" defer></script>
-  <script src="js/nova-failover.js?v=13" defer></script>
   <script src="js/nova-paygocookie.js?v=2" defer></script>
   <script src="js/nova-paygo2fa.js?v=4" defer></script>
   <script src="js/nova-igcheck.js?v=1" defer></script>
+  <script src="js/nova-followmaker.js?v=1" defer></script>
   <!-- nova-fastpay.js (standalone payout page) intentionally not loaded:
        FastPay is a TG Classic create bot now. The file is kept on disk. -->
   <script src="js/nova-manager.js?v=12" defer></script>
+  <script src="js/nova-settings.js?v=1" defer></script>
 </body>
 </html>

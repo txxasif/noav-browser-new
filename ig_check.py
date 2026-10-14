@@ -284,6 +284,8 @@ def main(argv) -> int:
                     help="JSON array of usernames to check")
     ap.add_argument("--delay-ms", type=int, default=600,
                     help="pause between checks (rate-limit courtesy)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="parallel lookups (1 = one at a time; each worker keeps its own --delay-ms pause)")
     ap.add_argument("--ndjson", action="store_true",
                     help="stream one JSON object per line as results arrive "
                          "(for the dashboard live feed) instead of a final summary")
@@ -294,33 +296,46 @@ def main(argv) -> int:
         names = []
     names = [normalize_instagram_username(n) for n in (names or [])]
     names = [n for n in names if n][:100]
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    workers = max(1, min(int(args.workers or 1), 8))
+    pause = max(0, args.delay_ms) / 1000.0
+
+    def check_one(uname):
+        try:
+            return check_instagram_account(uname)
+        except Exception as exc:
+            return {"username": uname, "status": "error", "message": str(exc)}
+
     if args.ndjson:
+        out_lock = threading.Lock()
+        done = [0]
         sys.stdout.write(json.dumps({"type": "total", "count": len(names)}) + "\n")
         sys.stdout.flush()
-        done = 0
-        for i, uname in enumerate(names):
-            try:
-                res = check_instagram_account(uname)
-            except Exception as exc:
-                res = {"username": uname, "status": "error", "message": str(exc)}
-            done += 1
-            sys.stdout.write(json.dumps({
-                "type": "result", "result": res,
-                "progress": {"done": done, "total": len(names)}}) + "\n")
-            sys.stdout.flush()
-            if i + 1 < len(names):
-                time.sleep(max(0, args.delay_ms) / 1000.0)
+
+        def work(uname):
+            res = check_one(uname)
+            with out_lock:                       # results are written as each one finishes
+                done[0] += 1
+                sys.stdout.write(json.dumps({
+                    "type": "result", "result": res,
+                    "progress": {"done": done[0], "total": len(names)}}) + "\n")
+                sys.stdout.flush()
+            time.sleep(pause)                    # per-worker courtesy pause
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(work, names))
         sys.stdout.write('{"type": "done"}\n')
         sys.stdout.flush()
         return 0
-    results = []
-    for i, uname in enumerate(names):
-        try:
-            results.append(check_instagram_account(uname))
-        except Exception as exc:
-            results.append({"username": uname, "status": "error", "message": str(exc)})
-        if i + 1 < len(names):
-            time.sleep(max(0, args.delay_ms) / 1000.0)
+
+    def work_ordered(uname):
+        res = check_one(uname)
+        time.sleep(pause)
+        return res
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(work_ordered, names))
     sys.stdout.write(json.dumps({"results": results}))
     sys.stdout.write("\n")
     return 0

@@ -32,9 +32,19 @@ _JS_FETCH = """async (a) => {
   const csrf = (document.cookie.match(/(?:^|; )csrftoken=([^;]+)/) || [])[1] || '';
   let claim = '0';
   try { claim = sessionStorage.getItem('www-claim-v2') || '0'; } catch (e) {}
+  // The page's own XHRs carry the build's rollout hash plus fb_dtsg/jazoest in the body; a bare
+  // fetch without them gets the HTML shell back instead of JSON.
+  let html = '';
+  try { html = document.documentElement.innerHTML; } catch (e) {}
+  const rollout = ((html.match(/"rollout_hash":"([^"]+)"/) || [])[1]) || '1';
+  let dtsg = '';
+  try { dtsg = require('DTSGInitialData').token || ''; } catch (e) {}
+  if (!dtsg) dtsg = ((html.match(/"DTSGInitialData",\\[\\],\\{"token":"([^"]+)"/) || [])[1]) || '';
+  let jazoest = '';
+  if (dtsg) { let n = 0; for (let i = 0; i < dtsg.length; i++) n += dtsg.charCodeAt(i); jazoest = '2' + n; }
   const h = Object.assign({
     'X-CSRFToken': csrf, 'X-IG-App-ID': a.appId, 'X-ASBD-ID': '359341',
-    'X-IG-WWW-Claim': claim, 'X-Instagram-AJAX': '1',
+    'X-IG-WWW-Claim': claim, 'X-Instagram-AJAX': rollout,
     'X-Requested-With': 'XMLHttpRequest', 'Accept': '*/*'
   }, a.headers || {});
   let body;
@@ -47,7 +57,9 @@ _JS_FETCH = """async (a) => {
       body = fd;
     } else { body = u; }
   } else if (a.form) {
-    body = new URLSearchParams(a.form).toString();
+    const f = Object.assign({}, a.form);
+    if (dtsg && f.fb_dtsg === undefined) { f.fb_dtsg = dtsg; f.jazoest = jazoest; }
+    body = new URLSearchParams(f).toString();
     h['Content-Type'] = 'application/x-www-form-urlencoded';
   }
   try {
@@ -112,7 +124,7 @@ def pk_of(page, username: str, log=None) -> str:
 
 def follow(page, pk: str) -> tuple:
     ok, js, why = _call(page, f"/api/v1/friendships/create/{pk}/", form={
-        "container_module": "profile", "user_id": pk})
+        "container_module": "profile", "user_id": pk, "include_follow_friction_check": "1"})
     if ok and (js.get("friendship_status") or {}).get("following") is False \
             and not (js.get("friendship_status") or {}).get("outgoing_request"):
         return False, "not persisted"

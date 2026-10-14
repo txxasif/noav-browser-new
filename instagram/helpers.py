@@ -163,9 +163,80 @@ class IgHelpersMixin:
         return False
 
     def _tap_or_click(self, p, loc, timeout: int = 4000) -> bool:
-        """Attempt touch tap, randomized bounding-box click, or forced click on a locator."""
+        """Attempt touch tap with Meta Bloks TouchEvent dispatch, pointer touch sequence, or randomized bounding-box click."""
+        # 1. Bloks & Pointer Touch dispatch (InstaTool p40.java pattern):
+        # Meta Bloks buttons ([class*="wbloks"]) strictly require touchstart/touchend with valid Touch objects.
+        # Standard web buttons require pointerdown ('touch') -> mousedown -> pointerup -> mouseup -> click.
         try:
-            # First try randomized position within bounding box to avoid center-coordinate fingerprint
+            res = loc.evaluate(
+                """async (el) => {
+                    try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch(e){}
+                    var r = el.getBoundingClientRect();
+                    if (r.width <= 0 && r.height <= 0) return false;
+                    var x = r.left + r.width / 2;
+                    var y = r.top + r.height / 2;
+                    var t = document.elementFromPoint(x, y);
+                    if (!t || !el.contains(t)) t = el;
+                    if (el.closest('[class*="wbloks"]') || (t && t.closest && t.closest('[class*="wbloks"]'))) {
+                        var touch = new Touch({
+                            identifier: Date.now(),
+                            target: t,
+                            clientX: x,
+                            clientY: y,
+                            pageX: x + (window.scrollX || 0),
+                            pageY: y + (window.scrollY || 0),
+                            screenX: x,
+                            screenY: y,
+                            radiusX: 5,
+                            radiusY: 5,
+                            force: 1
+                        });
+                        var to = function(list) {
+                            return {
+                                bubbles: true,
+                                cancelable: true,
+                                composed: true,
+                                view: window,
+                                touches: list,
+                                targetTouches: list,
+                                changedTouches: [touch]
+                            };
+                        };
+                        t.dispatchEvent(new TouchEvent('touchstart', to([touch])));
+                        await new Promise(function(resolve) { setTimeout(resolve, 80); });
+                        t.dispatchEvent(new TouchEvent('touchend', to([])));
+                        return true;
+                    }
+                    var o = {
+                        bubbles: true,
+                        cancelable: true,
+                        composed: true,
+                        view: window,
+                        clientX: x,
+                        clientY: y,
+                        button: 0,
+                        buttons: 1,
+                        pointerId: 1,
+                        pointerType: 'touch',
+                        isPrimary: true
+                    };
+                    t.dispatchEvent(new PointerEvent('pointerdown', o));
+                    t.dispatchEvent(new MouseEvent('mousedown', o));
+                    o.buttons = 0;
+                    t.dispatchEvent(new PointerEvent('pointerup', o));
+                    t.dispatchEvent(new MouseEvent('mouseup', o));
+                    t.dispatchEvent(new MouseEvent('click', o));
+                    return true;
+                }""",
+                timeout=min(2500, timeout),
+            )
+            if res:
+                return True
+        except Exception:
+            pass
+
+        # 2. Try randomized position within bounding box to avoid center-coordinate fingerprint
+        try:
             box = loc.bounding_box(timeout=min(1500, timeout))
             if box and box.get("width", 0) > 4 and box.get("height", 0) > 4:
                 rx = box["x"] + box["width"] * random.uniform(0.25, 0.75)
@@ -178,19 +249,55 @@ class IgHelpersMixin:
                     return True
         except Exception:
             pass
+
+        # 3. Native locator tap
         try:
             loc.tap(timeout=timeout)
             return True
         except Exception:
             pass
+
+        # 4. Forced click
         try:
             loc.click(force=True, timeout=timeout)
             return True
         except Exception:
             pass
+
+        # 5. Human click fallback
         try:
             self._human_click(p, loc, timeout=timeout)
             return True
+        except Exception:
+            return False
+
+    def _react_set_value(self, locator, text: str) -> bool:
+        """Force a (React-controlled) input to hold text via native prototype setter and modern InputEvent (p40.java:setVal)."""
+        try:
+            return bool(locator.evaluate(
+                """(el, val) => {
+                    try { el.focus(); } catch(e){}
+                    var proto = (el instanceof HTMLTextAreaElement)
+                        ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    var d = Object.getOwnPropertyDescriptor(proto, 'value');
+                    if (d && d.set) { d.set.call(el, val); } else { el.value = val; }
+                    try {
+                        el.dispatchEvent(new InputEvent('input', {
+                            bubbles: true,
+                            cancelable: true,
+                            composed: true,
+                            inputType: 'insertReplacementText',
+                            data: val
+                        }));
+                    } catch(e) {
+                        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                    }
+                    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                    el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+                    return true;
+                }""",
+                str(text),
+            ))
         except Exception:
             return False
 
@@ -221,6 +328,17 @@ class IgHelpersMixin:
         except Exception:
             try:
                 loc.fill(text)
+            except Exception:
+                pass
+
+        # React controlled input desync safeguard (p40.java:setVal)
+        try:
+            val = loc.input_value(timeout=1000)
+            if val != text:
+                self._react_set_value(loc, text)
+        except Exception:
+            try:
+                self._react_set_value(loc, text)
             except Exception:
                 pass
 
@@ -838,7 +956,7 @@ class IgHelpersMixin:
         of closing out.
         """
         try:
-            tail = (p.inner_text("body") or "").lower()
+            tail = (p.inner_text("body", timeout=2500) or "").lower()
             url = (p.url or "").lower()
         except Exception:
             return False
