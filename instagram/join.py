@@ -606,22 +606,102 @@ class IgJoinMixin:
                 pass
 
         # 3. Meta Account Linking: "To create an Instagram account with your Meta account, allow the following"
+        # or EU/Accounts Center: "Finish creating your Instagram profile in this Meta Account" -> "Allow and create"
+        # The screen lands right after the username step and its button can be below the fold of a
+        # scrolled modal: sweep it generically first (all localizations + pointer/mouse dispatch),
+        # then fall through to the labelled loop below.
+        try:
+            if self._accept_ig_eu_interstitial(p):
+                self.log('[✔] Instagram: combine/allow interstitial accepted after the username step.')
+        except Exception:
+            pass
         for _ in range(8):
             _text = (self._page_text(p) if hasattr(self, "_page_text") else self._page_tail(p, 600)).lower()
-            if "allow the following" in _text or "allow and continue" in _text or p.locator('button:has-text("Allow and continue"), div[role="button"]:has-text("Allow and continue")').count() > 0:
-                for sel in (
-                    'div[role="button"]:has-text("Allow and continue")',
-                    'button:has-text("Allow and continue")',
-                    '[aria-label="Allow and continue"]',
+            is_allow_screen = (
+                "allow and create" in _text
+                or "finish creating your instagram profile" in _text
+                or "allow the following" in _text
+                or "allow and continue" in _text
+                or "more personalized experiences" in _text
+                or "tillåt och skapa" in _text
+                or "erlauben und erstellen" in _text
+                or "autoriser et créer" in _text
+                or "permitir y crear" in _text
+                or p.locator(
+                    'button:has-text("Allow and create"), div[role="button"]:has-text("Allow and create"), '
+                    'button:has-text("Allow and continue"), div[role="button"]:has-text("Allow and continue")'
+                ).count() > 0
+            )
+            if is_allow_screen:
+                clicked_allow = False
+                for btn_text in (
+                    "Allow and create", "Allow and continue",
+                    "Tillåt och skapa", "Tillåt och fortsätt",
+                    "Zulassen und erstellen", "Erlauben und erstellen",
+                    "Autoriser et créer", "Autoriser et continuer",
+                    "Permitir y crear", "Permitir y continuar",
+                    "Consenti e crea", "Consenti e continua",
+                    "Permitir e criar", "Permitir e continuar"
                 ):
+                    for sel in (
+                        f'button:has-text("{btn_text}")',
+                        f'div[role="button"]:has-text("{btn_text}")',
+                        f'[aria-label="{btn_text}"]',
+                    ):
+                        try:
+                            btn = p.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible():
+                                btn.scroll_into_view_if_needed(timeout=2000)
+                                self._tap_or_click(p, btn)
+                                self.log(f'[✔] Instagram: "{btn_text}" clicked.')
+                                p.wait_for_timeout(3500)
+                                clicked_allow = True
+                                break
+                        except Exception:
+                            pass
+                    if clicked_allow:
+                        break
+                else:
+                    # Resilient JS dispatch fallback
                     try:
-                        btn = p.locator(sel).first
-                        if btn.count() > 0 and btn.is_visible():
-                            btn.scroll_into_view_if_needed(timeout=2000)
-                            self._tap_or_click(p, btn)
-                            self.log('[✔] Instagram: "Allow and continue" clicked.')
+                        js_clicked = p.evaluate("""() => {
+                            // Scroll modal containers down if the button is below viewport
+                            const scrollables = Array.from(document.querySelectorAll('div, [role="dialog"], section, body'));
+                            scrollables.forEach(el => {
+                                if (el.scrollHeight > el.clientHeight && el.clientHeight > 100) {
+                                    el.scrollTop = el.scrollHeight;
+                                }
+                            });
+                            window.scrollTo(0, document.body.scrollHeight);
+
+                            const btns = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"], [role="button"]'));
+                            for (const b of btns) {
+                                const t = (b.innerText || b.textContent || '').trim().toLowerCase();
+                                if (t.includes('allow and create') || t.includes('allow and continue') ||
+                                    t.includes('tillåt och skapa') || t.includes('tillåt och fortsätt') ||
+                                    t.includes('erlauben und erstellen') || t.includes('zulassen und erstellen') ||
+                                    t.includes('autoriser et créer') || t.includes('permitir y crear')) {
+                                    b.scrollIntoView({ behavior: 'instant', block: 'center' });
+                                    const r = b.getBoundingClientRect();
+                                    const cx = r.left + r.width / 2;
+                                    const cy = r.top + r.height / 2;
+                                    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(evt => {
+                                        try {
+                                            const ev = evt.startsWith('pointer')
+                                                ? new PointerEvent(evt, {bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerId: 1, pointerType: 'mouse', isPrimary: true})
+                                                : new MouseEvent(evt, {bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy});
+                                            b.dispatchEvent(ev);
+                                        } catch(e) {}
+                                    });
+                                    try { b.click(); } catch(e) {}
+                                    return (b.innerText || '').trim();
+                                }
+                            }
+                            return null;
+                        }""")
+                        if js_clicked:
+                            self.log(f'[✔] Instagram: "{js_clicked}" clicked via JS.')
                             p.wait_for_timeout(3500)
-                            break
                     except Exception:
                         pass
                 break
@@ -672,9 +752,19 @@ class IgJoinMixin:
                 self.log('[❌] Instagram: "Can\'t find account" dialog detected. Quitting immediately.')
                 raise RuntimeError("Instagram: Can't find account")
 
-            # Check if still showing "I agree" or "Allow and continue"
-            if "allow the following" in _text or "allow and continue" in _text:
-                for sel in ('button:has-text("Allow and continue")', 'div[role="button"]:has-text("Allow and continue")'):
+            # Check if still showing "I agree" or "Allow and continue" or "Allow and create"
+            if (
+                "allow the following" in _text
+                or "allow and continue" in _text
+                or "allow and create" in _text
+                or "finish creating your instagram profile" in _text
+            ):
+                for sel in (
+                    'button:has-text("Allow and create")',
+                    'div[role="button"]:has-text("Allow and create")',
+                    'button:has-text("Allow and continue")',
+                    'div[role="button"]:has-text("Allow and continue")'
+                ):
                     try:
                         b = p.locator(sel).first
                         if b.count() > 0 and b.is_visible():

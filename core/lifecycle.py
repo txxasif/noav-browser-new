@@ -462,6 +462,11 @@ class LifecycleMixin:
         # tempmail.fish keeps its own storage, so its address-level identity is saved here.
         if getattr(self, "mail_provider", "") == "mailfish" and getattr(self, "email", ""):
             mail_tokens = dict(mail_tokens or {}, mailfish_email=self.email)
+        # grabmail.io has no token: the address IS the session, and it stays readable for
+        # 5 days (a premium address also needs the key, which is read from settings at read time).
+        if getattr(self, "mail_provider", "") == "grabmail" and getattr(self, "email", ""):
+            mail_tokens = dict(mail_tokens or {}, grabmail_email=self.email,
+                               grabmail_public="" if getattr(self, "_grabmail_premium", False) else "1")
 
         # Extract cookies before saving (only for Instagram accounts; Meta Creator does not store cookies)
         cookies_list = []

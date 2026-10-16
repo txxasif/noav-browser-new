@@ -79,6 +79,7 @@ const MI_MAIL_PROVIDERS = [
   { value: 'mailcf', icon: 'fa-solid fa-envelope', color: 'var(--accent-green)', label: 'Cloudflare Catch-All (@lumencreative.site)', hint: 'Catch-All', disabled: true },
   { value: 'mailtd', icon: 'fa-solid fa-inbox', color: 'var(--accent-green)', label: 'mail.td' },
   { value: 'mailfish', icon: 'fa-solid fa-fish', color: '#38bdf8', label: 'tempmail.fish', hint: '(Clean domains)' },
+  { value: 'grabmail', icon: 'fa-solid fa-envelope-open-text', color: '#a3e635', label: 'grabmail.io', hint: '(API, no browser tab)' },
   // DISABLED (no longer offered): { value: 'guerrilla', icon: 'fa-solid fa-mask', color: '#a78bfa', label: 'Guerrilla Mail', hint: 'API, no browser tab' },
 ];
 

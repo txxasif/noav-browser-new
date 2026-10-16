@@ -55,6 +55,8 @@ def _mail_provider(tokens) -> str:
         return "yamin"
     if t.get("guerrilla_email"):
         return "guerrilla"               # Guerrilla Mail API inbox (address survives an expired sid)
+    if t.get("grabmail_email"):
+        return "grabmail"                # grabmail.io API inbox: the address is the session
     if t.get("mailfish_email") and t.get("mailfish_api"):
         return "mailfish_api"            # new accounts: inbox created through the premium API
     if t.get("mailfish_email") and t.get("mailfish_auth_key"):
@@ -97,6 +99,10 @@ def _mail_tokens_for_account(acc) -> dict:
         return {"yamin_email": email}
     if domain == str(Urls.CF_MAIL_DOMAIN).lower():
         return {"mailcf_email": email}
+    if domain in {d.lower() for d in getattr(Urls, "GRABMAIL_DOMAINS", ())}:
+        # Public grabmail domains need no token, so an account saved before this provider
+        # existed still reads fine from its address alone.
+        return {"grabmail_email": email, "grabmail_public": "1"}
     return {}
 
 
@@ -126,6 +132,12 @@ def _mail_messages(tokens, runner=None) -> list:
         elif prov == "mailfish_api":
             from core import mailfish_api
             for m in mailfish_api.list_messages(tokens["mailfish_email"]):
+                out.append(m)
+        elif prov == "grabmail":
+            # grabmail's list endpoint carries headers only; the body is fetched lazily by
+            # _mail_body() so a poll costs one list call plus one read per new message.
+            from core import grabmail_api
+            for m in grabmail_api.list_messages(tokens["grabmail_email"]):
                 out.append(m)
         elif prov == "mailfish":
             import json as _json
@@ -194,6 +206,13 @@ def _mail_body(tokens, msg) -> tuple:
         return msg["text"], msg.get("code")
     if _mail_provider(tokens) == "mailtd":
         return _mailtd_http_body(tokens, msg["id"]), None
+    if _mail_provider(tokens) == "grabmail":
+        try:
+            from core import grabmail_api
+            body = grabmail_api.read_message(tokens["grabmail_email"], msg["id"])
+            return grabmail_api.body_text(body), None
+        except Exception:
+            return "", None
     if _mail_provider(tokens) == "yamin":
         try:
             import json as _json

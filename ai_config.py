@@ -82,7 +82,10 @@ class Urls:
     # --- Temp-mail providers ---
     MAILTD = "https://mail.td/"
     TEMPMAILFISH = "https://tempmail.fish/"
-    MAIL_PROVIDERS = ("mailtd", "mailfish", "yamin", "mailcf", "guerrilla")
+    GRABMAIL = "https://grabmail.io/"
+    MAIL_PROVIDERS = ("mailtd", "mailfish", "grabmail", "yamin", "mailcf", "guerrilla")
+    # Public grabmail domains (keyless). A premium key swaps these for the private pool.
+    GRABMAIL_DOMAINS = ("grabmail.io", "mixozia.com", "linqmail.com")
     # Switched OFF: new accounts never use these (they are kept in the code, just not chosen).
     # Remove a name from this tuple to turn that provider back on. Reading saved accounts still works.
     DISABLED_MAIL_PROVIDERS = ("yamin", "mailcf", "guerrilla")

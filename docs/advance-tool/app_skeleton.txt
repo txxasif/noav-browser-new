@@ -1,0 +1,1872 @@
+====================================================================================================
+MODULE  __main__
+  6 code objects {'func': 6}   last source line: ~60
+====================================================================================================
+
+def  _log_uncaught_exception(exctype, value, tb)                                   # line 27
+
+def  _thread_excepthook(args)                                                      # line 39
+
+def  run_application()                                                             # line 60
+
+class SafeNullWriter                                                               # ~line 10
+    def  write(self, s)                                                             # line 10
+    def  flush(self)                                                                # line 16
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  combined_engine
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  combined_engine.combined_hook
+  6 code objects {'func': 6}   last source line: ~61
+====================================================================================================
+
+class get_or_create_async_loop()                                                   # line 24
+    def  run_loop()                                                                 # line 29
+
+def  run_async(coro, timeout)                                                      # line 36
+
+class make_combined_sell_hook(tg_client, bot_entity, bot_steps, do_change_username, do_change_password, do_send_2fa, do_send_cookie, password_method, step_delay, log_fn, base_dir)# line 41
+    def  hook(driver, acc_num, acc_record, initial_username, initial_password, totp_secret_key, cookie_str, mail_update_key)# line 61
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  combined_engine.combined_tab
+  18 code objects {'func': 18}   last source line: ~368
+====================================================================================================
+
+class CombinedEngineTab()                                                          # line 13
+    def  __init__(self, master, master_suite, bg, **kwargs)                         # line 14
+    def  _build_ui(self)                                                            # line 50
+    def  log(self, text, tag)                                                       # line 207
+    def  _insert()                                                                  # line 210
+    def  _clear_console(self)                                                       # line 215
+    def  _copy_console(self)                                                        # line 218
+    def  _refresh_tg_accounts_list(self)                                            # line 225
+    def  _get_active_tg_wrapper(self)                                               # line 238
+    def  start_combined(self)                                                       # line 248
+    def  resolve_entity()                                                           # line 277
+    def  stop_combined(self)                                                        # line 323
+    def  save_current_config(self)                                                  # line 338
+    def  load_saved_config(self)                                                    # line 368
+
+# 4 module/comprehension/expression code objects (lines 1..301)
+
+====================================================================================================
+MODULE  combined_engine.sell_actions
+  7 code objects {'func': 6, 'generator': 1}   last source line: ~422
+====================================================================================================
+
+def  parse_cookie_string(raw_cookie)                                               # line 15
+
+def  fast_backend_change_username(cookie_str, target_login, worker_tag, log_fn)    # line 48
+
+def  selenium_change_username(driver, target_login, worker_tag, log_fn)            # line 129
+
+def  selenium_change_password(driver, current_pass, new_pass, email_info, worker_tag, log_fn)# line 213
+
+def  selenium_fast_manage_move_out_and_create_password(driver, bot_password, worker_tag, log_fn)# line 422
+
+# 2 module/comprehension/expression code objects (lines 1..112)
+
+====================================================================================================
+MODULE  combined_engine.tg_connector
+  8 code objects {'func': 3, 'coroutine': 5}   last source line: ~213
+====================================================================================================
+
+def  extract_bot_credentials(message_text)                                         # line 19
+
+def  safe_send_telegram_message(client, entity, text, max_retries, worker_tag, log_fn)# line 70
+
+class click_keyboard_button(client, message, keyword, delay, log_fn, worker_tag, *args, **kwargs)# line 86
+    def  is_match(btn_txt)                                                          # line 92
+
+def  request_bot_task_credentials(client, bot_entity, bot_steps, worker_tag, step_delay, log_fn)# line 126
+
+def  send_2fa_and_confirm_registration(client, bot_entity, two_fa_key, delay, worker_tag, log_fn, is_cookie)# line 174
+
+def  cancel_telegram_task(client, bot_entity, delay, log_fn)                       # line 213
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  config
+  2 code objects {'func': 2}   last source line: ~8
+====================================================================================================
+
+def  _dyn_decrypt_sec(enc_data, mask_data)                                         # line 8
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  core
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  core.mail_key_manager
+  16 code objects {'func': 16}   last source line: ~191
+====================================================================================================
+
+class MailKeyManager()                                                             # line 22
+    def  __init__(self, storage_path)                                               # line 25
+    def  _resolve_storage_path(self)                                                # line 33
+    def  load(self)                                                                 # line 50
+    def  save(self)                                                                 # line 80
+    def  validate_key(self, key)                                                    # line 88
+    def  create_key(self, name, expires_days)                                       # line 116
+    def  revoke_key(self, key)                                                      # line 134
+    def  activate_key(self, key)                                                    # line 143
+    def  delete_key(self, key)                                                      # line 152
+    def  list_keys(self)                                                            # line 161
+    def  record_usage(self, key, email_generated, otp_fetched)                      # line 170
+    def  get_first_active_key(self)                                                 # line 180
+
+def  get_key_manager()                                                             # line 191
+
+# 2 module/comprehension/expression code objects (lines 1..168)
+
+====================================================================================================
+MODULE  core.mailcow_dialog
+  27 code objects {'func': 27}   last source line: ~680
+====================================================================================================
+
+class MailcowConfigDialog()                                                        # line 56
+    def  __init__(self, parent, config_path, on_save_callback)                      # line 59
+    def  _load_current_values(self)                                                 # line 94
+    def  _build_ui(self)                                                            # line 111
+    def  _toggle_key()                                                              # line 233
+    def  _paste_key()                                                               # line 239
+    def  _on_dom_change(*args)                                                      # line 288
+    def  _test_api_async(self)                                                      # line 367
+    def  _task()                                                                    # line 374
+    def  _cb()                                                                      # line 391
+    def  _test_full_workflow_async(self)                                            # line 402
+    def  _task()                                                                    # line 413
+    def  _cb_err()                                                                  # line 421
+    def  _cb_res()                                                                  # line 448
+    def  _fetch_domains_async(self)                                                 # line 470
+    def  _task()                                                                    # line 476
+    def  _cb()                                                                      # line 491
+    def  _save_settings(self)                                                       # line 508
+    def  _open_web_dashboard(self)                                                  # line 576
+    def  _start_srv()                                                               # line 585
+    def  _open_key_manager_dialog(self)                                             # line 597
+    def  _do_create()                                                               # line 626
+    def  _refresh_table()                                                           # line 644
+    def  _cp(k)                                                                     # line 665
+    def  _del(k)                                                                    # line 670
+
+def  open_mailcow_dialog(parent, config_path, on_save_callback)                    # line 680
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  core.mailcow_dynamic
+  25 code objects {'func': 23, 'generator': 2}   last source line: ~897
+====================================================================================================
+
+def  is_valid_meta_otp(code)                                                       # line 61
+
+def  extract_otp_from_text(subject, body)                                          # line 83
+
+def  decode_mime_header(header_value)                                              # line 209
+
+def  extract_email_bodies(msg)                                                     # line 229
+
+def  load_config_defaults()                                                        # line 278
+
+class MailcowDynamicManager()                                                      # line 319
+    def  __init__(self, domain, api_key, password, user, log_fn)                    # line 328
+    def  _update_derived_urls(self)                                                 # line 345
+    def  log(self, message)                                                         # line 352
+    def  update_config(self, domain, api_key, save_to_file)                         # line 356
+    def  _save_to_config_json(self)                                                 # line 371
+    def  create_mailbox(self, username, quota)                                      # line 425
+    def  read_inbox_emails(self, email_address, timeout_sec, baseline_time, stop_check, exclude_otps, log_fn)# line 562
+    def  delete_mailbox(self, email_address)                                        # line 640
+    def  test_api_connection(self)                                                  # line 717
+    def  list_domains(self)                                                         # line 770
+    def  generate_random_email(self, prefix)                                        # line 813
+
+def  get_mailcow_manager()                                                         # line 833
+
+def  create_mailbox(username, domain, api_key)                                     # line 841
+
+def  read_inbox_emails(email_address, domain, password, timeout_sec, baseline_time, stop_check, exclude_otps, log_fn)# line 865
+
+def  delete_mailbox(email_address, domain, api_key)                                # line 897
+
+# 4 module/comprehension/expression code objects (lines 1..816)
+
+====================================================================================================
+MODULE  core.mailcow_imap
+  35 code objects {'func': 33, 'generator': 2}   last source line: ~1280
+====================================================================================================
+
+def  is_valid_meta_otp(code)                                                       # line 41
+
+def  extract_otp_from_text(subject, body)                                          # line 63
+
+def  decode_mime_header(header_value)                                              # line 189
+
+def  extract_email_bodies(msg)                                                     # line 209
+
+def  store_cached_otp(email_addr, otp, subject, timestamp, sender)                 # line 285
+
+def  get_cached_otp(email_addr, baseline_timestamp, exclude_otps)                  # line 319
+
+def  extract_all_recipient_emails(msg)                                             # line 340
+
+def  is_email_addressed_to_target(recipients, msg, clean_target)                   # line 370
+
+class MailcowIMAPClient()                                                          # line 414
+    def  __init__(self, host, port, user, password, domain, api_key, server_url, use_ssl, timeout, log_fn)# line 420
+    def  log(self, message)                                                         # line 447
+    def  fetch_mailcow_domains(cls, api_key, server_url)                            # line 461
+    def  fetch_mailcow_catchall_alias(cls, api_key, server_url)                     # line 506
+    def  test_mailcow_api_key(cls, api_key, server_url)                             # line 546
+    def  validate_api_key(self, provided_key)                                       # line 599
+    def  generate_task_email(self, domain, prefix, length, client_api_key)          # line 609
+    def  connect_imap(self)                                                         # line 654
+    def  _get_active_imap_connection(self)                                          # line 745
+    def  disconnect_imap(self)                                                      # line 773
+    def  test_connection(self, client_api_key)                                      # line 789
+    def  _harvest_inbox_locked(self, clean_target, baseline_timestamp, exclude_otps, stop_check)# line 821
+    def  fetch_otp_for_email(self, target_email, timeout_sec, baseline_timestamp, client_api_key, stop_check, exclude_otps)# line 998
+
+def  fetch_mailcow_domains(api_key, server_url)                                    # line 1079
+
+class MailcowAPIRequestHandler()                                                   # line 1087
+    def  _send_json_response(self, status_code, data)                               # line 1094
+    def  _extract_request_api_key(self, query_params)                               # line 1107
+    def  do_OPTIONS(self)                                                           # line 1122
+    def  do_GET(self)                                                               # line 1129
+    def  do_POST(self)                                                              # line 1202
+
+def  start_mailcow_api_server(client, host, port, run_in_background)               # line 1280
+
+# 5 module/comprehension/expression code objects (lines 1..872)
+
+====================================================================================================
+MODULE  core.network_manager
+  37 code objects {'func': 34, 'generator': 3}   last source line: ~435
+====================================================================================================
+
+def  get_current_public_ip(timeout)                                                # line 22
+
+def  rotate_ip_via_url(rotation_url, timeout)                                      # line 55
+
+def  renew_dhcp_ip()                                                               # line 71
+
+def  generate_random_mac()                                                         # line 81
+
+def  list_network_adapters()                                                       # line 89
+
+def  restart_adapter(adapter_name)                                                 # line 159
+
+def  set_adapter_mac(reg_index, adapter_name, new_mac_colon)                       # line 171
+
+def  reset_adapter_mac(reg_index, adapter_name)                                    # line 201
+
+class NetworkToolsDialog                                                           # ~line 230
+    def  __init__(self, parent, config_path, on_ip_refresh)                         # line 230
+    def  _load_rotation_url(self)                                                   # line 250
+    def  _save_rotation_url(self)                                                   # line 259
+    def  _build_ui(self)                                                            # line 272
+    def  refresh_ip_async(self)                                                     # line 355
+    def  _task()                                                                    # line 358
+    def  trigger_rotation_async(self)                                               # line 371
+    def  _task()                                                                    # line 377
+    def  trigger_dhcp_async(self)                                                   # line 396
+    def  _task()                                                                    # line 398
+    def  randomize_mac_action(self)                                                 # line 413
+    def  restore_mac_action(self)                                                   # line 435
+
+# 17 module/comprehension/expression code objects (lines 1..410)
+
+====================================================================================================
+MODULE  core.remote_db
+  3 code objects {'func': 3}   last source line: ~20
+====================================================================================================
+
+def  is_response_blocked(res)                                                      # line 6
+
+def  query_remote_database(hwid, action, is_working, success, failed, endpoint)    # line 20
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  core.security
+  10 code objects {'func': 10}   last source line: ~241
+====================================================================================================
+
+def  read_reg_value(name)                                                          # line 19
+
+def  write_reg_value(name, value)                                                  # line 31
+
+def  get_system_hwid()                                                             # line 42
+
+def  perform_security_integrity_check()                                            # line 130
+
+def  calculate_legacy_license_key(hwid, secret)                                    # line 153
+
+def  verify_license_string(hwid, key_str, secret)                                  # line 159
+
+def  verify_saved_license()                                                        # line 207
+
+def  save_valid_license(license_key)                                               # line 230
+
+def  delete_saved_license()                                                        # line 241
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  git_updater
+  5 code objects {'func': 5}   last source line: ~163
+====================================================================================================
+
+def  get_configured_repo()                                                         # line 55
+
+def  is_git_repository()                                                           # line 71
+
+def  check_remote_update_info()                                                    # line 81
+
+def  apply_github_update(progress_cb)                                              # line 163
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  instagram_engine
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  instagram_engine.app_gui
+  145 code objects {'func': 126, 'generator': 19}   last source line: ~4899
+====================================================================================================
+
+def  get_random_full_name()                                                        # line 83
+
+def  get_random_full_name()                                                        # line 86
+
+def  _dyn_decrypt_sec(enc_data, mask_data)                                         # line 103
+
+def  get_full_mail_update_key(email, acc_record)                                   # line 150
+
+def  save_success_mail_key(email, acc_record)                                      # line 202
+
+def  save_updated_mail_keys()                                                      # line 227
+
+def  clear_windows_clipboard()                                                     # line 262
+
+def  get_windows_clipboard_text()                                                  # line 276
+
+def  get_screen_resolution()                                                       # line 298
+
+def  calculate_grid_geometry(slot_idx, total_threads, screen_w, screen_h)          # line 308
+
+def  apply_browser_zoom_and_view(driver, zoom_percent)                             # line 340
+
+def  remove_readonly(func, path, excinfo)                                          # line 381
+
+def  robust_remove_temp_dir(dir_path, retries, delay)                              # line 388
+
+def  read_reg_value(name)                                                          # line 403
+
+def  write_reg_value(name, value)                                                  # line 412
+
+def  kill_driver_process_tree(driver)                                              # line 420
+
+def  kill_zombie_chrome_processes()                                                # line 449
+
+def  get_system_hwid()                                                             # line 463
+
+def  calculate_legacy_license_key(hwid, secret)                                    # line 546
+
+def  verify_license_string(hwid, key_str, secret)                                  # line 552
+
+def  verify_saved_license()                                                        # line 586
+
+def  save_valid_license(license_key)                                               # line 606
+
+def  delete_saved_license()                                                        # line 615
+
+def  query_remote_database(hwid, action, is_working, success, failed, endpoint)    # line 622
+
+def  get_network_time_offset()                                                     # line 655
+
+def  calculate_totp_code(secret_key, offset_seconds)                               # line 674
+
+def  parse_mail_timestamp(dt_val)                                                  # line 695
+
+def  is_valid_meta_otp(code)                                                       # line 709
+
+def  extract_meta_email_otp(subject, raw_body)                                     # line 724
+
+def  generate_stealth_js_payload(salt_val, webgl_vendor, webgl_renderer, zoom_percent)# line 825
+
+class extract_full_instagram_cookies(driver, timeout)                              # line 1040
+    def  _collect()                                                                 # line 1048
+
+def  main_entry()                                                                  # line 4899
+
+class HWIDLockDialog                                                               # ~line 889
+    def  __init__(self, hwid)                                                       # line 889
+    def  _auto_register_to_remote_db(self)                                          # line 911
+    def  _build_ui(self)                                                            # line 924
+    def  _copy_hwid(self)                                                           # line 1009
+    def  _attempt_activation(self)                                                  # line 1014
+    def  run(self)                                                                  # line 1031
+
+class PhantomShieldApp                                                             # ~line 1111
+    def  __init__(self, root, hwid, license_info, container, is_embedded)           # line 1111
+    def  _configure_styles(self)                                                    # line 1253
+    def  _build_ui(self)                                                            # line 1281
+    def  _manual_clean_chromes(self)                                                # line 1331
+    def  _build_dashboard_tab(self)                                                 # line 1335
+    def  _build_settings_tab(self)                                                  # line 1468
+    def  _switch_tab(self, tab_name)                                                # line 1644
+    def  _manual_save_settings_alert(self)                                          # line 1659
+    def  _quick_refresh_ip(self)                                                    # line 1664
+    def  _worker()                                                                  # line 1665
+    def  save_current_config(self)                                                  # line 1684
+    def  load_saved_config(self)                                                    # line 1747
+    def  _fetch_worker_domains_dynamic(self)                                        # line 1842
+    def  _worker_fetch()                                                            # line 1843
+    def  _start_live_timer_loop(self)                                               # line 1874
+    def  update_timer()                                                             # line 1875
+    def  _start_database_heartbeat_loop(self)                                       # line 1887
+    def  heartbeat_worker()                                                         # line 1888
+    def  _send_db_heartbeat_cycle(self, action)                                     # line 1901
+    def  _handle_remote_blocked_alert(self)                                         # line 1920
+    def  _start_hardware_monitor(self)                                              # line 1929
+    def  _refresh_ip_async(self)                                                    # line 1933
+    def  _fetch_network_ip_worker(self)                                             # line 1936
+    def  _update_hardware_metrics(self)                                             # line 1963
+    def  MEMORYSTATUSEX()                                                           # line 1985
+    def  _bind_mousewheel_recursive(self, widget)                                   # line 2004
+    def  _on_mousewheel(self, event)                                                # line 2012
+    def  _change_license(self)                                                      # line 2017
+    def  _browse_profile_pics_folder(self)                                          # line 2023
+    def  _get_random_profile_pic(self, folder_path)                                 # line 2031
+    def  _browse_file(self)                                                         # line 2042
+    def  _clear_pending_accounts(self)                                              # line 2050
+    def  _browse_custom_usernames_file(self)                                        # line 2099
+    def  _load_custom_usernames(self, path)                                         # line 2108
+    def  _get_next_custom_username(self)                                            # line 2121
+    def  _browse_custom_user_agents_file(self)                                      # line 2126
+    def  _load_custom_user_agents(self, path)                                       # line 2135
+    def  _get_active_user_agent(self, default_ua)                                   # line 2150
+    def  _browse_mail_keys_file(self)                                               # line 2156
+    def  _load_mail_keys_into_registry(self, file_path)                             # line 2164
+    def  log(self, message, category)                                               # line 2313
+    def  _poll_log_queue(self)                                                      # line 2331
+    def  _send_telegram_alert(self, username, password, totp_key, cookie_str, email, acc_record)# line 2368
+    def  tg_post()                                                                  # line 2371
+    def  start_automation(self)                                                     # line 2436
+    def  stop_automation(self)                                                      # line 2607
+    def  _on_close(self)                                                            # line 2624
+    def  _run_multithreaded_tasks(self, accounts_list, url)                         # line 2640
+    def  _get_target_follow_list(self, raw_target_str, follow_count)                # line 2682
+    def  _wait_and_click(self, driver, xpath, timeout)                              # line 2713
+    def  _wait_and_type(self, driver, xpath, text, timeout)                         # line 2730
+    def  _dismiss_cookie_dialogs(self, driver)                                      # line 2752
+    def  _update_accounts_stats(self)                                               # line 2785
+    def  _record_failed_account(self, email, password, reason)                      # line 2802
+    def  _sync_to_google_sheet(self, webhook_url, username, password, totp_secret, cookie_str, mail_key)# line 2831
+    def  async_push()                                                               # line 2835
+    def  _type_into_visible_code_box(self, driver, code_text, timeout)              # line 2863
+    def  _click_modal_button_robust(self, driver, button_text)                      # line 2931
+    def  _extract_totp_secret_key(self, acc_num, driver)                            # line 2974
+    def  _detect_content_unavailable(self, driver)                                  # line 3103
+    def  _handle_content_unavailable_and_refresh(self, driver, acc_num, zoom_percent)# line 3115
+    def  _check_and_handle_checkpoint_warnings(self, driver, acc_num, zoom_percent) # line 3192
+    def  _execute_two_factor_setup(self, acc_num, driver, email_info, target_username, zoom_percent)# line 3224
+    def  _do_single_two_factor_setup(self, acc_num, driver, email_info, target_username, zoom_percent, attempt_idx)# line 3264
+    def  _remove_account_from_files(self, email_to_remove)                          # line 3829
+    def  _upload_profile_picture(self, acc_num, driver, folder_path, zoom_percent)  # line 3897
+    def  _process_single_account(self, acc_num, slot_idx, total_threads, acc_record, url, device_spec, headless, use_uc, stealth_enabled, webrtc_protect, follow_enabled, enable_2fa, save_cookies, use_incognito, enable_pic, pics_folder, target_user, gsheet_webhook, zoom_pct, tile_windows, engine_name)# line 4004
+
+# 39 module/comprehension/expression code objects (lines 1..4904)
+
+====================================================================================================
+MODULE  instagram_engine.automation_engine
+  17 code objects {'func': 15, 'generator': 2}   last source line: ~1065
+====================================================================================================
+
+class InstagramAutomationWorker                                                    # ~line 76
+    def  __init__(self, app)                                                        # line 76
+    def  wait_and_click(self, driver, xpath, timeout)                               # line 79
+    def  wait_and_type(self, driver, xpath, text, timeout)                          # line 96
+    def  dismiss_cookie_dialogs(self, driver)                                       # line 118
+    def  type_into_visible_code_box(self, driver, code_text, timeout)               # line 153
+    def  click_modal_button_robust(self, driver, button_text)                       # line 221
+    def  extract_totp_secret_key(self, acc_num, driver)                             # line 264
+    def  detect_content_unavailable(self, driver)                                   # line 393
+    def  handle_content_unavailable_and_refresh(self, driver, acc_num, zoom_percent)# line 404
+    def  check_and_handle_checkpoint_warnings(self, driver, acc_num, zoom_percent)  # line 468
+    def  execute_two_factor_setup(self, acc_num, driver, email_info, target_username, zoom_percent)# line 498
+    def  _do_single_two_factor_setup(self, acc_num, driver, email_info, target_username, zoom_percent, attempt_idx)# line 537
+    def  upload_profile_picture(self, acc_num, driver, folder_path, zoom_percent)   # line 1065
+
+# 4 module/comprehension/expression code objects (lines 1..724)
+
+====================================================================================================
+MODULE  instagram_engine.browser_utils
+  11 code objects {'func': 11}   last source line: ~199
+====================================================================================================
+
+def  clear_windows_clipboard()                                                     # line 17
+
+def  get_windows_clipboard_text()                                                  # line 30
+
+def  get_screen_resolution()                                                       # line 51
+
+def  calculate_grid_geometry(slot_idx, total_threads, screen_w, screen_h)          # line 61
+
+def  apply_browser_zoom_and_view(driver, zoom_percent)                             # line 93
+
+def  remove_readonly(func, path, excinfo)                                          # line 134
+
+def  robust_remove_temp_dir(dir_path, retries, delay)                              # line 141
+
+def  kill_driver_process_tree(driver)                                              # line 156
+
+def  kill_zombie_chrome_processes()                                                # line 185
+
+def  generate_stealth_js_payload(salt_val, webgl_vendor, webgl_renderer, zoom_percent)# line 199
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  instagram_engine.config
+  4 code objects {'func': 4}   last source line: ~26
+====================================================================================================
+
+def  get_random_full_name()                                                        # line 9
+
+def  get_random_full_name()                                                        # line 12
+
+def  _dyn_decrypt_sec(enc_data, mask_data)                                         # line 26
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  instagram_engine.mail_services
+  40 code objects {'func': 29, 'generator': 11}   last source line: ~1489
+====================================================================================================
+
+def  get_full_mail_update_key(email, acc_record)                                   # line 35
+
+def  save_success_mail_key(email, acc_record)                                      # line 86
+
+def  parse_mail_timestamp(dt_val)                                                  # line 110
+
+def  is_valid_meta_otp(code)                                                       # line 124
+
+def  extract_meta_email_otp(subject, raw_body)                                     # line 139
+
+def  fetch_boomlify_messages_and_otp(email, email_id, api_key, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp)# line 217
+
+def  fetch_maildrop_messages_and_otp(email, mailbox, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp)# line 340
+
+def  fetch_tempmail_lol_messages_and_otp(email, token, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp)# line 419
+
+def  fetch_cloudflare_worker_messages_and_otp(email, base_url, token, api_key, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp, log_fn)# line 487
+
+def  fetch_microsoft_oauth_messages_and_otp(email, refresh_token, client_id, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp, acc_record)# line 652
+
+def  fetch_inboxes_messages_and_otp(email, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp)# line 726
+
+def  delete_cloudflare_worker_mailbox(base_url, token, api_key)                    # line 784
+
+def  clear_mailtd_inbox(account_id, api_key, mailbox_token)                        # line 811
+
+def  clear_mailgw_inbox(token)                                                     # line 830
+
+def  fetch_mailgw_messages_and_otp(email, token, mail_password, stale_mail_ids, blacklisted_otps, only_snapshot)# line 848
+
+def  get_mailtd_token_from_config(api_key)                                         # line 916
+
+def  get_smailpro_key_from_config(api_key)                                         # line 946
+
+def  fetch_smailpro_messages_and_otp(email, api_key, mode, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp, log_fn)# line 977
+
+def  _mailtd_rate_wait()                                                           # line 1086
+
+def  _mailtd_request(url, headers, method, timeout, max_retries)                   # line 1097
+
+def  get_jwt_sub(token)                                                            # line 1139
+
+def  resolve_mailtd_uuid(email, api_key, mailbox_token)                            # line 1151
+
+def  fetch_mailtd_messages_and_otp(email, api_key, account_id, mailbox_token, stale_mail_ids, blacklisted_otps, only_snapshot, baseline_timestamp, log_fn)# line 1182
+
+def  get_existing_inbox_snapshot(email, mail_secret, token, provider_hint, api_key, account_id, mailbox_token, mail_password, acc_record, worker_api_key, worker_base_url)# line 1283
+
+def  fetch_otp_for_email_account(email, mail_secret, token, provider_hint, timeout_sec, exclude_otps, initial_mail_ids, api_key, account_id, mailbox_token, mail_password, baseline_timestamp, acc_record, worker_api_key, worker_base_url, log_fn)# line 1489
+
+# 15 module/comprehension/expression code objects (lines 1..1739)
+
+====================================================================================================
+MODULE  instagram_engine.security
+  12 code objects {'func': 12}   last source line: ~271
+====================================================================================================
+
+def  read_reg_value(name)                                                          # line 35
+
+def  write_reg_value(name, value)                                                  # line 44
+
+def  get_system_hwid()                                                             # line 52
+
+def  calculate_legacy_license_key(hwid, secret)                                    # line 132
+
+def  verify_license_string(hwid, key_str, secret)                                  # line 138
+
+def  verify_saved_license()                                                        # line 183
+
+def  save_valid_license(license_key)                                               # line 203
+
+def  delete_saved_license()                                                        # line 212
+
+def  query_remote_database(hwid, action, is_working, success, failed, endpoint)    # line 219
+
+def  get_network_time_offset()                                                     # line 252
+
+def  calculate_totp_code(secret_key, offset_seconds)                               # line 271
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  instagram_engine.ui_dialogs
+  9 code objects {'func': 9}   last source line: ~159
+====================================================================================================
+
+class HWIDLockDialog                                                               # ~line 17
+    def  __init__(self, hwid)                                                       # line 17
+    def  _auto_register_to_remote_db(self)                                          # line 39
+    def  _build_ui(self)                                                            # line 52
+    def  _copy_hwid(self)                                                           # line 137
+    def  _attempt_activation(self)                                                  # line 142
+    def  run(self)                                                                  # line 159
+
+# 3 module/comprehension/expression code objects (lines 1..112)
+
+====================================================================================================
+MODULE  mail_service_app
+  12 code objects {'func': 12}   last source line: ~828
+====================================================================================================
+
+def  get_service_config()                                                          # line 48
+
+class ADTMailServiceHandler()                                                      # line 516
+    def  _send_json(self, status, data)                                             # line 522
+    def  _extract_api_key(self, query)                                              # line 535
+    def  do_OPTIONS(self)                                                           # line 550
+    def  do_GET(self)                                                               # line 557
+    def  do_POST(self)                                                              # line 647
+    def  _connect_imap(self)                                                        # line 683
+    def  _fetch_recent_inbox_emails(self, limit)                                    # line 706
+    def  _poll_otp_strict(self, target_email, timeout_sec, baseline_ts)             # line 756
+
+def  run_server(host, port)                                                        # line 828
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  master_suite
+  53 code objects {'func': 53}   last source line: ~917
+====================================================================================================
+
+class MasterSuiteGUI()                                                             # line 25
+    def  __init__(self, hwid, license_info)                                         # line 26
+    def  _build_top_master_bar(self)                                                # line 59
+    def  _save_all_tool_settings()                                                  # line 106
+    def  _open_mailcow_dialog(self)                                                 # line 189
+    def  _on_save(mc_data)                                                          # line 192
+    def  _open_network_tools_dialog(self)                                           # line 202
+    def  _refresh_master_ip(self)                                                   # line 209
+    def  _worker()                                                                  # line 210
+    def  _build_content_areas(self)                                                 # line 222
+    def  switch_master_tab(self, tab_id)                                            # line 275
+    def  _build_pipeline_tab_ui(self)                                               # line 340
+    def  toggle_sync()                                                              # line 398
+    def  _clear_pipeline_tree()                                                     # line 458
+    def  _open_file_if_exists(self, filename)                                       # line 490
+    def  _start_periodic_metrics_updater(self)                                      # line 497
+    def  _updater()                                                                 # line 498
+    def  _refresh_pipeline_metrics_ui(self)                                         # line 506
+    def  _on_pipeline_sync_event(self, record)                                      # line 520
+    def  _add_record_to_tree(self, r)                                               # line 524
+    def  _refresh_pipeline_table(self)                                              # line 543
+    def  _manual_sync_existing_accounts(self)                                       # line 563
+    def  _clear_all_pending_accounts(self)                                          # line 572
+    def  _build_updater_tab_ui(self)                                                # line 621
+    def  _updater_log(self, text)                                                   # line 678
+    def  _check_github_update_status(self, silent)                                  # line 683
+    def  _start_github_update_flow(self)                                            # line 710
+    def  run_update()                                                               # line 718
+    def  progress_cb(pct, msg_text)                                                 # line 719
+    def  _update_progress_ui(self, pct, msg)                                        # line 727
+    def  _on_update_completed(self, success, message)                               # line 731
+    def  _build_license_tab_ui(self)                                                # line 744
+    def  copy_hwid()                                                                # line 761
+    def  _clean_hung_processes(self)                                                # line 806
+    def  _reset_suite_license(self)                                                 # line 815
+    def  _launch_standalone_meta(self)                                              # line 822
+    def  _launch_standalone_ig(self)                                                # line 829
+    def  _launch_standalone_sell(self)                                              # line 836
+    def  _save_master_suite_settings(self)                                          # line 843
+    def  _load_master_suite_settings(self)                                          # line 890
+    def  _on_app_close(self)                                                        # line 917
+
+# 12 module/comprehension/expression code objects (lines 1..800)
+
+====================================================================================================
+MODULE  meta_engine
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  meta_engine.browser_automation
+  7 code objects {'func': 5, 'generator': 2}   last source line: ~792
+====================================================================================================
+
+def  extract_cookies_str(context)                                                  # line 117
+
+def  handle_meta_registration_phase(page, identifier, dob, password, first_name, last_name, full_name, fetch_otp_func, twocaptcha_key, log_func, user_agent, selfie_path, cookies_str, stop_check, use_2captcha, is_waterfall_mode, stats, mail_session_info)# line 244
+
+def  run_single_worker_task(task_id, initial_identifier, password, target_url, output_file, headless, stats, user_agent, twocaptcha_key, mail_provider_mode, selfie_path, log_func, profile_dir, custom_ext_path, custom_ext_key, auto_clear_data, stop_event, use_2captcha, mailcx_token, mailtd_token, boomlify_key, worker_url, worker_api_key, preferred_domain, is_waterfall_mode, manual_account, proxy_str, check_proxy, worker_slot, window_pos_x, window_pos_y, window_width, window_height, *args, **kwargs)# line 792
+
+# 4 module/comprehension/expression code objects (lines 1..898)
+
+====================================================================================================
+MODULE  meta_engine.browser_utils
+  23 code objects {'func': 23}   last source line: ~569
+====================================================================================================
+
+def  parse_proxy_string(proxy_str)                                                 # line 24
+
+def  test_proxy_connection(proxy_dict, timeout_sec)                                # line 59
+
+def  format_netscape_cookies(cookies)                                              # line 83
+
+def  _decode_secret(encoded)                                                       # line 102
+
+def  get_telegram_chat_ids()                                                       # line 130
+
+class dispatch_telegram_alert(email, password, provider)                           # line 177
+    def  _worker()                                                                  # line 182
+
+def  cleanup_orphaned_edge_processes()                                             # line 210
+
+def  safe_remove_worker_temp_dir(dir_path, max_retries)                            # line 247
+
+def  cleanup_edge_background_processes(user_data_dir, kill_processes)              # line 260
+
+def  prepare_worker_profile_environment(base_user_data_dir, task_id)               # line 273
+
+def  get_random_user_agent()                                                       # line 316
+
+def  human_delay(min_sec, max_sec)                                                 # line 319
+
+def  generate_random_name()                                                        # line 322
+
+def  generate_random_dob()                                                         # line 337
+
+def  generate_pure_waterfall_url()                                                 # line 350
+
+def  generate_meta_auth_url(custom_waterfall_id)                                   # line 354
+
+def  get_fallback_selfie(custom_path)                                              # line 385
+
+def  _persist_mail_session(email, password, mail_session_info, status)             # line 401
+
+def  save_account_credentials(output_file, email, password, mail_session_info, cookies_list)# line 438
+
+def  save_failed_meta_account(email, password, reason)                             # line 546
+
+def  save_not_verified_account(email, password, mail_session_info)                 # line 569
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  meta_engine.email_services
+  129 code objects {'func': 126, 'generator': 3}   last source line: ~2092
+====================================================================================================
+
+def  configure_optimized_session(s)                                                # line 30
+
+def  is_valid_meta_otp(code)                                                       # line 37
+
+def  extract_meta_otp(subject, raw_body)                                           # line 59
+
+class BaseTempMailAPI()                                                            # line 178
+    def  generate_temp_email(self)                                                  # line 179
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 180
+    def  get_session_info(self)                                                     # line 181
+    def  close(self)                                                                # line 182
+
+class MailCxAPIHandler()                                                           # line 190
+    def  __init__(self, log_callback, api_token, domain)                            # line 197
+    def  generate_temp_email(self)                                                  # line 212
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 238
+    def  get_session_info(self)                                                     # line 307
+
+class TempMailLolAPIHandler()                                                      # line 316
+    def  __init__(self, log_callback)                                               # line 319
+    def  generate_temp_email(self)                                                  # line 330
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 344
+    def  get_session_info(self)                                                     # line 377
+
+class GuerrillaMailAPIHandler()                                                    # line 384
+    def  __init__(self, log_callback)                                               # line 387
+    def  generate_temp_email(self)                                                  # line 397
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 411
+    def  get_session_info(self)                                                     # line 450
+
+class NoopMailAPIHandler()                                                         # line 457
+    def  __init__(self, log_callback)                                               # line 458
+    def  generate_temp_email(self)                                                  # line 472
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 488
+    def  get_session_info(self)                                                     # line 519
+
+class MailGwOfficialHandler()                                                      # line 527
+    def  __init__(self, log_callback)                                               # line 528
+    def  generate_temp_email(self)                                                  # line 541
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 568
+    def  get_session_info(self)                                                     # line 606
+
+class DropMailAPIHandler()                                                         # line 615
+    def  __init__(self, log_callback)                                               # line 618
+    def  generate_temp_email(self)                                                  # line 629
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 654
+    def  get_session_info(self)                                                     # line 692
+
+class MailTmOfficialHandler()                                                      # line 699
+    def  __init__(self, log_callback)                                               # line 700
+    def  generate_temp_email(self)                                                  # line 713
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 740
+    def  get_session_info(self)                                                     # line 778
+
+class TMailorAPIHandler()                                                          # line 787
+    def  __init__(self, log_callback)                                               # line 788
+    def  generate_temp_email(self)                                                  # line 801
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 826
+    def  get_session_info(self)                                                     # line 894
+
+class TempMailFishAPIHandler()                                                     # line 901
+    def  __init__(self, log_callback)                                               # line 902
+    def  generate_temp_email(self)                                                  # line 914
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 929
+    def  get_session_info(self)                                                     # line 963
+
+class TempMailTool()                                                               # line 970
+    def  __init__(self, worker_url, api_key)                                        # line 971
+    def  _headers(self)                                                             # line 979
+    def  get_domains(self)                                                          # line 986
+    def  create_email(self, domain, prefix)                                         # line 1000
+    def  check_otp(self, token)                                                     # line 1017
+    def  close(self)                                                                # line 1062
+
+class PersonalTempMailHandler()                                                    # line 1068
+    def  __init__(self, log_callback, domain, worker_url, api_key)                  # line 1069
+    def  generate_temp_email(self)                                                  # line 1078
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 1099
+    def  get_session_info(self)                                                     # line 1111
+    def  close(self)                                                                # line 1118
+
+class BoomlifyAPIHandler()                                                         # line 1122
+    def  __init__(self, log_callback, api_key)                                      # line 1123
+    def  generate_temp_email(self)                                                  # line 1131
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 1141
+    def  get_session_info(self)                                                     # line 1163
+
+def  _meta_mailtd_rate_wait()                                                      # line 1172
+
+def  fetch_mailtd_domains(api_token)                                               # line 1181
+
+class MailTdAPIHandler()                                                           # line 1213
+    def  __init__(self, log_callback, api_key, preferred_domain)                    # line 1221
+    def  _get_active_domains(self)                                                  # line 1248
+    def  generate_temp_email(self)                                                  # line 1251
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 1310
+    def  get_session_info(self)                                                     # line 1388
+
+class SmailProAPIHandler()                                                         # line 1392
+    def  __init__(self, log_callback, api_key, mode)                                # line 1401
+    def  generate_temp_email(self)                                                  # line 1428
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 1469
+    def  get_session_info(self)                                                     # line 1539
+
+class CustomDomainMailHandler()                                                    # line 1548
+    def  __init__(self, log_callback, domain, worker_url, api_key)                  # line 1549
+    def  generate_temp_email(self)                                                  # line 1558
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 1574
+    def  get_session_info(self)                                                     # line 1587
+    def  close(self)                                                                # line 1597
+
+class MailcowCatchallIMAPHandler()                                                 # line 1601
+    def  __init__(self, log_callback, imap_host, imap_port, imap_user, imap_password, domain, api_key, use_ssl)# line 1609
+    def  generate_temp_email(self)                                                  # line 1673
+    def  fetch_otp(self, timeout_sec, stop_check)                                   # line 1697
+    def  get_session_info(self)                                                     # line 1719
+    def  close(self)                                                                # line 1733
+
+def  load_custom_mail_providers()                                                  # line 1793
+
+def  save_custom_mail_provider(name, domain, api_key, worker_url)                  # line 1813
+
+def  remove_custom_mail_provider(name)                                             # line 1837
+
+class register_mail_provider(name, handler_class, factory, description, domain, worker_url, api_key)# line 1850
+    def  _factory(log, **kw)                                                        # line 1861
+    def  _factory(log, **kw)                                                        # line 1868
+
+def  auto_discover_handlers()                                                      # line 1884
+
+def  get_available_mail_providers()                                                # line 1900
+
+class create_robust_mailbox(preferred_mode, log_func, mailtd_token, preferred_domain, boomlify_key, worker_url, worker_api_key, mailcx_token, mailcow_host, mailcow_port, mailcow_user, mailcow_password, mailcow_domain, mailcow_api_key, mailcow_ssl, **kwargs)# line 1914
+    def  log_func(msg)                                                              # line 1941
+
+def  fetch_otp_from_saved_session(session_info, timeout_sec)                       # line 2092
+
+# 22 module/comprehension/expression code objects (lines 1..2172)
+
+====================================================================================================
+MODULE  meta_engine.extension_manager
+  16 code objects {'func': 12, 'generator': 4}   last source line: ~621
+====================================================================================================
+
+def  ensure_2captcha_extension(api_key, log_func)                                  # line 19
+
+def  login_2captcha_extension(context, api_key, log_func, primary_page)            # line 128
+
+def  compute_unpacked_extension_ids(ext_dir)                                       # line 172
+
+def  get_extension_popup_html(ext_dir)                                             # line 208
+
+def  get_loaded_extension_ids(context, exclude_id)                                 # line 251
+
+def  wait_for_extension_ready(context, max_wait_sec)                               # line 281
+
+def  activate_custom_captcha_extension(context, ext_dir, license_key, worker_dir, log_func)# line 294
+
+def  wait_and_click_solve_with_2captcha(page, log_func, max_wait_sec)              # line 531
+
+def  is_captcha_solved_status(page)                                                # line 564
+
+def  check_if_recaptcha_solved(page, use_2captcha)                                 # line 592
+
+def  find_profile_extensions(search_dirs)                                          # line 621
+
+# 5 module/comprehension/expression code objects (lines 1..655)
+
+====================================================================================================
+MODULE  meta_engine.fingerprint
+  6 code objects {'func': 6}   last source line: ~319
+====================================================================================================
+
+def  FingerprintProfile()                                                          # line 8
+
+def  generate_fingerprint_profile(custom_locale)                                   # line 122
+
+def  build_stealth_injection_script(profile)                                       # line 154
+
+def  get_browser_context_options(profile)                                          # line 303
+
+def  apply_stealth_to_context(context, profile)                                    # line 319
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  meta_engine.gui
+  130 code objects {'func': 121, 'generator': 9}   last source line: ~2308
+====================================================================================================
+
+def  get_system_hwid()                                                             # line 37
+
+def  verify_saved_license()                                                        # line 38
+
+def  read_reg_raw_value(k)                                                         # line 39
+
+def  write_reg_raw_value(k, v)                                                     # line 40
+
+def  run_single_worker_task(*args, **kwargs)                                       # line 62
+
+def  cleanup_orphaned_edge_processes()                                             # line 64
+
+def  generate_pure_waterfall_url()                                                 # line 65
+
+def  generate_meta_auth_url()                                                      # line 66
+
+def  start_silent_update_check(*args, **kwargs)                                    # line 87
+
+def  check_update_manifest(*args, **kwargs)                                        # line 88
+
+def  is_newer_version(r, c)                                                        # line 89
+
+def  get_available_mail_providers()                                                # line 114
+
+def  save_custom_mail_provider(name, domain, api_key, worker_url)                  # line 121
+
+def  remove_custom_mail_provider(name)                                             # line 122
+
+def  load_custom_mail_providers()                                                  # line 123
+
+def  fetch_otp_from_saved_session(session, timeout_sec)                            # line 124
+
+def  get_stylish_font(family_role)                                                 # line 160
+
+def  calculate_window_geometry(slot_id, total_slots, screen_w, screen_h)           # line 174
+
+class GradientHeader()                                                             # line 239
+    def  __init__(self, parent, height, **kwargs)                                   # line 240
+    def  _draw_gradient(self, event)                                                # line 245
+
+class ModernPulsingBeacon()                                                        # line 276
+    def  __init__(self, parent, size, **kwargs)                                     # line 277
+    def  start(self)                                                                # line 286
+    def  stop(self)                                                                 # line 290
+    def  _loop(self)                                                                # line 297
+    def  _render_state(self)                                                        # line 304
+
+class AddMailProviderDialog()                                                      # line 315
+    def  __init__(self, parent, on_success_callback, log_func)                      # line 316
+    def  _build_ui(self)                                                            # line 329
+    def  _refresh_custom_list(self)                                                 # line 421
+    def  save_new_mail(self)                                                        # line 428
+    def  delete_selected_custom(self)                                               # line 448
+
+class OTPFetcherDialog()                                                           # line 460
+    def  __init__(self, parent, log_func)                                           # line 461
+    def  _build_ui(self)                                                            # line 474
+    def  copy_otp(self)                                                             # line 531
+    def  load_saved_emails(self)                                                    # line 538
+    def  do_fetch(self)                                                             # line 550
+    def  _worker()                                                                  # line 557
+    def  _apply()                                                                   # line 560
+
+class AutomationGUI()                                                              # line 571
+    def  __init__(self, root, license_status, container, is_embedded, *args, **kwargs)# line 572
+    def  _configure_ttk_styles(self)                                                # line 625
+    def  _build_header_gradient(self)                                               # line 667
+    def  _on_header_resize(event)                                                   # line 695
+    def  _build_tabs_and_pages(self)                                                # line 716
+    def  _build_dashboard_tab(self)                                                 # line 735
+    def  _build_engine_tab(self)                                                    # line 914
+    def  _build_mail_tab(self)                                                      # line 1029
+    def  _on_mail_canvas_configure(event)                                           # line 1045
+    def  _on_card_configure(event)                                                  # line 1049
+    def  _on_mail_mousewheel(event)                                                 # line 1053
+    def  _on_mc_dom_change(*args)                                                   # line 1273
+    def  _on_mail_mode_changed(*args)                                               # line 1315
+    def  open_mailcow_setup_dialog(self)                                            # line 1366
+    def  _on_save(mc_data)                                                          # line 1370
+    def  _test_mailcow_connection_async(self)                                       # line 1382
+    def  _test()                                                                    # line 1386
+    def  _fetch_mailcow_domains_async(self)                                         # line 1444
+    def  _worker()                                                                  # line 1445
+    def  _apply()                                                                   # line 1490
+    def  _fetch_mailtd_domains_async(self)                                          # line 1505
+    def  _fetch()                                                                   # line 1507
+    def  _apply()                                                                   # line 1513
+    def  _fetch_worker_domains_async(self)                                          # line 1524
+    def  _fetch(url, key)                                                           # line 1530
+    def  _update_domain_combo_values(self, dom_list)                                # line 1551
+    def  _build_security_tab(self)                                                  # line 1561
+    def  _create_input(self, parent, var, justify)                                  # line 1590
+    def  _create_metric_tile(self, parent, title, init_val, accent_color, icon)     # line 1605
+    def  _init_worker_chips(self, count)                                            # line 1617
+    def  set_worker_status(self, worker_id, status_text, status_type)               # line 1635
+    def  refresh_mail_providers(self)                                               # line 1662
+    def  open_add_mail_dialog(self)                                                 # line 1671
+    def  _on_added(new_name)                                                        # line 1672
+    def  copy_active_mail(self)                                                     # line 1680
+    def  browse_proxy_file(self)                                                    # line 1687
+    def  browse_password_file(self)                                                 # line 1693
+    def  browse_selfie(self)                                                        # line 1697
+    def  browse_custom_extension(self)                                              # line 1701
+    def  manual_check_update(self)                                                  # line 1705
+    def  _check()                                                                   # line 1707
+    def  _apply()                                                                   # line 1709
+    def  _schedule_log_pump(self)                                                   # line 1725
+    def  log(self, msg, level, *args, **kwargs)                                     # line 1748
+    def  update_pool_count(self)                                                    # line 1822
+    def  _clear_pending_accounts(self)                                              # line 1842
+    def  _tick_timer(self)                                                          # line 1896
+    def  update_stats(self, s, f, cap, c, t)                                        # line 1906
+    def  start_automation(self)                                                     # line 1913
+    def  _worker_slot_runner(slot_id)                                               # line 2011
+    def  slot_logger(msg)                                                           # line 2028
+    def  _master_pipeline_thread()                                                  # line 2088
+    def  stop_automation(self)                                                      # line 2102
+    def  _manual_save_settings_alert(self)                                          # line 2114
+    def  _refresh_ip_action(self)                                                   # line 2118
+    def  _worker(pin)                                                               # line 2120
+    def  _save_current_settings(self)                                               # line 2143
+    def  _load_saved_settings(self)                                                 # line 2211
+    def  _on_window_close(self)                                                     # line 2308
+
+class GoogleSheetLicenseManager                                                    # ~line 42
+    def  __init__(self, hwid)                                                       # line 42
+    def  check_user_access(self)                                                    # line 43
+
+class StatsTracker                                                                 # ~line 204
+    def  __init__(self, total_target, ui_update_callback)                           # line 204
+    def  add_success(self, identifier)                                              # line 212
+    def  add_failure(self, identifier, reason)                                      # line 218
+    def  add_captcha_solved(self)                                                   # line 224
+    def  _notify(self)                                                              # line 229
+
+# 22 module/comprehension/expression code objects (lines 1..2137)
+
+====================================================================================================
+MODULE  meta_engine.licensing
+  20 code objects {'func': 20}   last source line: ~324
+====================================================================================================
+
+def  _dyn_decrypt_sec(enc_data, mask_data)                                         # line 14
+
+def  read_reg_raw_value(name)                                                      # line 39
+
+def  write_reg_raw_value(name, value)                                              # line 51
+
+def  read_reg_value(name)                                                          # line 62
+
+def  write_reg_value(name, value)                                                  # line 65
+
+def  get_system_hwid()                                                             # line 70
+
+def  calculate_legacy_license_key(hwid, secret)                                    # line 172
+
+def  verify_license_string(hwid, key_str, secret)                                  # line 178
+
+def  verify_saved_license()                                                        # line 213
+
+def  save_valid_license(license_key)                                               # line 236
+
+class GoogleSheetLicenseManager()                                                  # line 246
+    def  __init__(self, hwid, script_url)                                           # line 247
+    def  check_user_access(self)                                                    # line 251
+
+class HWIDActivationWindow()                                                       # line 266
+    def  __init__(self, parent_root, on_success_callback)                           # line 267
+    def  _build_ui(self)                                                            # line 277
+    def  copy_hwid(self)                                                            # line 306
+    def  activate_license(self)                                                     # line 312
+    def  exit_app(self)                                                             # line 324
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  meta_engine.main
+  3 code objects {'func': 3}   last source line: ~24
+====================================================================================================
+
+def  main()                                                                        # line 24
+
+# 2 module/comprehension/expression code objects (lines 1..40)
+
+====================================================================================================
+MODULE  meta_engine.page_actions
+  34 code objects {'func': 25, 'generator': 9}   last source line: ~1136
+====================================================================================================
+
+def  inject_consent_cookies(context)                                               # line 10
+
+def  enforce_single_active_tab(context, log_func, primary_page, allow_2captcha_tab)# line 32
+
+def  apply_stealth_evasions(context)                                               # line 65
+
+def  clear_browser_session_data(context, page, log_func)                           # line 86
+
+def  dismiss_cookie_dialogs(page, log_func)                                        # line 121
+
+def  ensure_mobile_view_scrolling(page)                                            # line 246
+
+def  scroll_and_click(page, selector, timeout)                                     # line 261
+
+def  fill_input_natively(page, selector, value)                                    # line 274
+
+def  fast_submit_name_step(page, first_name, last_name)                            # line 321
+
+def  fill_name_fields(page, first_name, last_name, log_func)                       # line 366
+
+def  select_dob_field(page, field_type, target_val, alt_vals, log_func)            # line 412
+
+def  click_next_or_submit(page)                                                    # line 459
+
+def  click_checkpoint_continue(page, log_func)                                     # line 506
+
+def  trigger_meta_otp_resend(page, log_func)                                       # line 554
+
+def  fill_otp_input(page, otp_code, log_func)                                      # line 583
+
+def  fast_inject_selfie_file(page, file_path)                                      # line 635
+
+def  handle_meta_ai_login_prompt(page, log_func, identifier, password)             # line 672
+
+def  is_meta_ai_modal_open(page)                                                   # line 839
+
+def  dismiss_meta_ai_modal(page, log_func)                                         # line 853
+
+class setup_fast_page_routes(page)                                                 # line 906
+    def  _route_handler(route)                                                      # line 909
+
+def  click_post_selfie_login(page, log_func, identifier, password)                 # line 944
+
+def  handle_post_selfie_login_form(page, identifier, password, log_func)           # line 1059
+
+def  is_meta_login_successful(page)                                                # line 1136
+
+# 10 module/comprehension/expression code objects (lines 1..1189)
+
+====================================================================================================
+MODULE  meta_engine.security_guard
+  8 code objects {'func': 8}   last source line: ~108
+====================================================================================================
+
+class SecurityGuard()                                                              # line 20
+    def  is_debugger_active()                                                       # line 27
+    def  detect_reverse_engineering_tools()                                         # line 52
+    def  verify_files_integrity(expected_hashes, base_dir)                          # line 71
+    def  enforce_runtime_security()                                                 # line 94
+
+def  initialize_guard()                                                            # line 108
+
+# 2 module/comprehension/expression code objects (lines 1..84)
+
+====================================================================================================
+MODULE  meta_engine.updater
+  16 code objects {'func': 16}   last source line: ~161
+====================================================================================================
+
+class check_for_updates(parent_window, silent_mode)                                # line 129
+    def  _worker()                                                                  # line 131
+    def  _prompt()                                                                  # line 143
+
+def  start_silent_update_check(parent_window)                                      # line 161
+
+class UpdateDownloaderDialog                                                       # ~line 20
+    def  __init__(self, parent, download_url, new_version)                          # line 20
+    def  _build_ui(self)                                                            # line 34
+    def  start_download(self)                                                       # line 64
+    def  _download_worker(self)                                                     # line 67
+    def  _update_progress(self, percent, d_mb, t_mb)                                # line 96
+    def  _apply_update_and_restart(self, new_exe_path)                              # line 101
+
+# 6 module/comprehension/expression code objects (lines 1..156)
+
+====================================================================================================
+MODULE  pipeline_bridge
+  21 code objects {'func': 20, 'generator': 1}   last source line: ~458
+====================================================================================================
+
+def  _get_base_dir()                                                               # line 17
+
+def  set_auto_sync(enabled)                                                        # line 22
+
+def  is_auto_sync_enabled()                                                        # line 27
+
+def  add_sync_listener(callback)                                                   # line 32
+
+def  remove_sync_listener(callback)                                                # line 37
+
+def  get_synced_history()                                                          # line 42
+
+def  get_pipeline_history()                                                        # line 46
+
+def  _dispatch_event(event)                                                        # line 50
+
+def  notify_meta_account_created(email, password, mail_session_info)               # line 64
+
+def  _get_search_dirs()                                                            # line 134
+
+def  remove_meta_account(email)                                                    # line 150
+
+def  record_failed_meta_account(email, password, reason)                           # line 187
+
+def  notify_ig_account_created(username, password, totp_key, cookie_str, mail_key, email, *args, **kwargs)# line 212
+
+def  notify_account_created(username, password, totp_key, cookie_str, mail_key, *args, **kwargs)# line 355
+
+def  remove_sell_account(username)                                                 # line 359
+
+def  notify_account_sold(username, bot_name, status, details, *args, **kwargs)     # line 391
+
+class get_pipeline_metrics()                                                       # line 423
+    def  count_lines(fname)                                                         # line 427
+
+def  sync_existing_saved_accounts(saved_file, target_file)                         # line 458
+
+# 2 module/comprehension/expression code objects (lines 1..433)
+
+====================================================================================================
+MODULE  sell_engine
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.config
+  4 code objects {'func': 4}   last source line: ~153
+====================================================================================================
+
+def  _dyn_decrypt_sec(enc_data, mask_data)                                         # line 9
+
+def  load_config()                                                                 # line 93
+
+def  save_config(cfg)                                                              # line 153
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.core
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.core.remote_db
+  3 code objects {'func': 3}   last source line: ~24
+====================================================================================================
+
+def  is_response_blocked(res)                                                      # line 10
+
+def  query_remote_database(hwid, action, is_working, success, failed, endpoint)    # line 24
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.core.security
+  10 code objects {'func': 10}   last source line: ~241
+====================================================================================================
+
+def  read_reg_value(name)                                                          # line 19
+
+def  write_reg_value(name, value)                                                  # line 31
+
+def  get_system_hwid()                                                             # line 42
+
+def  perform_security_integrity_check()                                            # line 130
+
+def  calculate_legacy_license_key(hwid, secret)                                    # line 153
+
+def  verify_license_string(hwid, key_str, secret)                                  # line 159
+
+def  verify_saved_license()                                                        # line 207
+
+def  save_valid_license(license_key)                                               # line 230
+
+def  delete_saved_license()                                                        # line 241
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.main
+  2 code objects {'func': 2}   last source line: ~12
+====================================================================================================
+
+def  main_entry()                                                                  # line 12
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.services
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.services.browser_engine
+  17 code objects {'func': 5, 'coroutine': 8, 'generator': 4}   last source line: ~665
+====================================================================================================
+
+def  generate_stealth_browser_script(profile, salt)                                # line 101
+
+def  scrape_account_email_from_page(page, worker_tag)                              # line 156
+
+def  parse_cookie_string(raw_cookie)                                               # line 210
+
+def  smart_click_element(page, locators_list, step_name, js_finder_script, verify_selector, wait_after, timeout_seconds)# line 245
+
+def  check_account_status(page, worker_tag)                                        # line 293
+
+def  precheck_cookie_status(playwright_instance, cookie_str, worker_tag, headless) # line 312
+
+def  navigate_to_username_section(page, worker_tag)                                # line 371
+
+def  fast_backend_change_username(cookie_str, target_login, worker_tag)            # line 438
+
+def  apply_username_to_open_page(page, target_login, worker_tag)                   # line 510
+
+def  manage_meta_account_and_create_password(page, bot_password, worker_tag)       # line 584
+
+def  change_password_via_email_otp(page, current_pass, new_pass, mail_keys_file, known_email, worker_tag)# line 665
+
+# 6 module/comprehension/expression code objects (lines 1..754)
+
+====================================================================================================
+MODULE  sell_engine.services.mail_apis
+  31 code objects {'func': 30, 'generator': 1}   last source line: ~866
+====================================================================================================
+
+def  get_jwt_sub(token)                                                            # line 16
+
+def  extract_any_otp_code(text)                                                    # line 29
+
+class PersonalWorkerMailAPI()                                                      # line 82
+    def  _get_headers_list(cls, record)                                             # line 84
+    def  get_messages(cls, record)                                                  # line 124
+    def  get_message_detail(cls, record, message_id)                                # line 157
+    def  poll_for_code(cls, record, timeout, baseline_ids)                          # line 178
+
+def  resolve_sell_mailtd_uuid(email, api_key, mailbox_token)                       # line 238
+
+class MailTdAPI()                                                                  # line 271
+    def  _get_auth_headers(cls, token)                                              # line 275
+    def  get_messages(cls, record)                                                  # line 283
+    def  get_message_detail(cls, record, message_id)                                # line 371
+    def  poll_for_code(cls, record, timeout, baseline_ids)                          # line 401
+
+class TempMailPlusAPI()                                                            # line 459
+    def  get_mails(email, epin)                                                     # line 461
+    def  get_mail_detail(mail_id, email, epin)                                      # line 476
+    def  poll_for_code(cls, email, timeout, epin, baseline_ids)                     # line 489
+
+class MicrosoftOAuthMailAPI()                                                      # line 523
+    def  get_access_token(refresh_token, client_id)                                 # line 525
+    def  poll_for_code(cls, record, timeout, baseline_ids)                          # line 543
+
+class InboxesAPI()                                                                 # line 595
+    def  get_messages(email)                                                        # line 597
+    def  get_message_detail(msg_id)                                                 # line 611
+    def  poll_for_code(cls, email, timeout, baseline_ids)                           # line 625
+
+def  parse_mail_keys_file(file_path)                                               # line 659
+
+def  match_masked_email(masked_str, mail_records)                                  # line 804
+
+class UnifiedEmailManager()                                                        # line 864
+    def  poll_for_otp(cls, record, timeout, baseline_ids)                           # line 866
+
+# 3 module/comprehension/expression code objects (lines 1..855)
+
+====================================================================================================
+MODULE  sell_engine.services.telegram_helper
+  15 code objects {'func': 10, 'coroutine': 5}   last source line: ~292
+====================================================================================================
+
+def  get_tg_device_profile(phone)                                                  # line 22
+
+class MyTelegramOrgHelper()                                                        # line 27
+    def  __init__(self)                                                             # line 28
+    def  send_code(self, phone)                                                     # line 36
+    def  _extract_keys_from_html(html)                                              # line 51
+    def  login_and_fetch_keys(self, code)                                           # line 64
+
+def  extract_bot_credentials(message_text)                                         # line 135
+
+def  safe_send_telegram_message(client, entity, text, max_retries, worker_tag)     # line 185
+
+class click_keyboard_button(client, message_or_entity, keyword, delay, worker_tag, *args, **kwargs)# line 200
+    def  is_match(btn_txt)                                                          # line 205
+
+def  send_2fa_and_confirm_registration(client, bot_entity, two_fa_key, delay, worker_tag, is_cookie)# line 261
+
+def  cancel_telegram_task(client, bot_entity, delay)                               # line 292
+
+class TelegramSessionWrapper                                                       # ~line 83
+    def  __init__(self, phone, api_id, api_hash, session_name, title)               # line 83
+    def  connect_and_check(self)                                                    # line 108  # async
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.ui
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.ui.hwid_dialog
+  8 code objects {'func': 8}   last source line: ~134
+====================================================================================================
+
+class HWIDLockDialog                                                               # ~line 13
+    def  __init__(self, hwid)                                                       # line 13
+    def  _build_ui(self)                                                            # line 26
+    def  _copy_hwid(self)                                                           # line 112
+    def  _attempt_activation(self)                                                  # line 117
+    def  run(self)                                                                  # line 134
+
+# 3 module/comprehension/expression code objects (lines 1..87)
+
+====================================================================================================
+MODULE  sell_engine.ui.main_gui
+  225 code objects {'func': 182, 'generator': 17, 'coroutine': 26}   last source line: ~7006
+====================================================================================================
+
+def  _dyn_decrypt_sec(enc_data, mask_data)                                         # line 39
+
+def  perform_security_integrity_check()                                            # line 62
+
+def  generate_stealth_browser_script(profile, salt)                                # line 201
+
+def  read_reg_value(name)                                                          # line 314
+
+def  write_reg_value(name, value)                                                  # line 323
+
+def  get_system_hwid()                                                             # line 331
+
+def  calculate_legacy_license_key(hwid, secret)                                    # line 418
+
+def  verify_license_string(hwid, key_str, secret)                                  # line 423
+
+def  verify_saved_license()                                                        # line 456
+
+def  save_valid_license(license_key)                                               # line 477
+
+def  delete_saved_license()                                                        # line 486
+
+def  is_response_blocked(res)                                                      # line 493
+
+def  query_remote_database(hwid, action, is_working, success, failed, endpoint)    # line 508
+
+class QueueLogHandler()                                                            # line 661
+    def  emit(self, record)                                                         # line 662
+
+def  make_file_writable(file_path)                                                 # line 681
+
+def  safe_write_text(file_path, content, mode)                                     # line 694
+
+def  load_config()                                                                 # line 739
+
+def  save_config(cfg)                                                              # line 795
+
+def  get_jwt_sub(token)                                                            # line 820
+
+def  extract_any_otp_code(text)                                                    # line 832
+
+class PersonalWorkerMailAPI()                                                      # line 884
+    def  _get_headers_list(cls, record)                                             # line 886
+    def  get_messages(cls, record)                                                  # line 928
+    def  get_message_detail(cls, record, message_id)                                # line 961
+    def  poll_for_code(cls, record, timeout, baseline_ids)                          # line 982
+
+def  resolve_sell_mailtd_uuid(email, api_key, mailbox_token)                       # line 1042
+
+class MailTdAPI()                                                                  # line 1075
+    def  _get_auth_headers(cls, token)                                              # line 1079
+    def  get_messages(cls, record)                                                  # line 1087
+    def  get_message_detail(cls, record, message_id)                                # line 1141
+    def  poll_for_code(cls, record, timeout, baseline_ids)                          # line 1171
+
+def  parse_mail_keys_file(file_path)                                               # line 1229
+
+def  match_masked_email(masked_str, mail_records)                                  # line 1372
+
+class TempMailPlusAPI()                                                            # line 1431
+    def  get_mails(email, epin)                                                     # line 1433
+    def  get_mail_detail(mail_id, email, epin)                                      # line 1448
+    def  poll_for_code(cls, email, timeout, epin, baseline_ids)                     # line 1461
+
+class MicrosoftOAuthMailAPI()                                                      # line 1495
+    def  get_access_token(refresh_token, client_id)                                 # line 1497
+    def  poll_for_code(cls, record, timeout, baseline_ids)                          # line 1515
+
+class InboxesAPI()                                                                 # line 1567
+    def  get_messages(email)                                                        # line 1569
+    def  get_message_detail(msg_id)                                                 # line 1583
+    def  poll_for_code(cls, email, timeout, baseline_ids)                           # line 1597
+
+class UnifiedEmailManager()                                                        # line 1631
+    def  poll_for_otp(cls, record, timeout, baseline_ids)                           # line 1633
+
+def  scrape_account_email_from_page(page, worker_tag)                              # line 1700
+
+class MyTelegramOrgHelper()                                                        # line 1759
+    def  __init__(self)                                                             # line 1760
+    def  send_code(self, phone)                                                     # line 1768
+    def  _extract_keys_from_html(html)                                              # line 1783
+    def  login_and_fetch_keys(self, code)                                           # line 1796
+
+def  _dedup_cookies(cookies)                                                       # line 1816
+
+def  parse_cookie_string(raw_cookie)                                               # line 1826
+
+def  build_clean_big_cookie_string(fresh_cookies, original_cookie_str)             # line 1966
+
+def  dismiss_post_login_modals(page)                                               # line 2005
+
+def  fast_api_check_cookie_live(cookie_str, worker_tag)                            # line 2024
+
+def  _remove_sold_account_from_files(target_username)                              # line 2109
+
+def  get_next_account_from_file(file_path)                                         # line 2151
+
+def  save_completed_account(done_path, account_data, updated_first_name, updated_login, new_pass)# line 2286
+
+def  save_dead_account(record, reason)                                             # line 2316
+
+def  extract_bot_credentials(message_text)                                         # line 2328
+
+def  safe_send_telegram_message(client, entity, text, max_retries, worker_tag)     # line 2378
+
+class click_keyboard_button(client, message_or_entity, keyword, delay, worker_tag, *args, **kwargs)# line 2395
+    def  is_match(btn_txt)                                                          # line 2400
+
+def  smart_click_element(page, locators_list, step_name, js_finder_script, verify_selector, wait_after, timeout_seconds)# line 2456
+
+def  check_account_status(page, worker_tag, context, account_username)             # line 2513
+
+def  precheck_cookie_status(playwright_instance, cookie_str, worker_tag, headless) # line 2605
+
+def  navigate_to_username_section(page, worker_tag)                                # line 2657
+
+def  fast_backend_check_cookie(cookie_str, worker_tag)                             # line 2733
+
+def  fast_backend_change_username(cookie_str, target_login, worker_tag)            # line 2807
+
+def  apply_username_to_open_page(page, target_login, worker_tag)                   # line 2893
+
+def  fast_manage_move_out_and_create_password(page, bot_password, worker_tag)      # line 3035
+
+def  manage_meta_account_and_create_password(page, bot_password, worker_tag)       # line 3562
+
+def  change_password_via_email_otp(page, current_pass, new_pass, mail_keys_file, known_email, worker_tag)# line 3683
+
+def  send_2fa_and_confirm_registration(client, bot_entity, payload, delay, worker_tag, is_cookie)# line 3915
+
+def  send_both_2fa_and_cookie_and_confirm(client, bot_entity, totp_key, cookie_payload, delay, worker_tag)# line 3944
+
+def  cancel_telegram_task(client, bot_entity, delay, worker_tag, *args, **kwargs)  # line 3977
+
+class EmbeddedTerminalConsole()                                                    # line 3990
+    def  __init__(self, parent, bg, fg, **kwargs)                                   # line 3991
+    def  write_log(self, level, message)                                            # line 4042
+    def  clear(self)                                                                # line 4063
+    def  copy_all(self)                                                             # line 4066
+    def  toggle_autoscroll(self)                                                    # line 4071
+    def  _on_filter_changed(self, event)                                            # line 4079
+
+def  get_tg_device_profile(phone)                                                  # line 4092
+
+def  optimize_sqlite_session(session_path)                                         # line 4097
+
+class TelegramBotGUI()                                                             # line 4202
+    def  __init__(self, master, hwid, license_info, is_embedded)                    # line 4203
+    def  _on_window_close(self)                                                     # line 4293
+    def  title(self, *args, **kwargs)                                               # line 4309
+    def  geometry(self, *args, **kwargs)                                            # line 4314
+    def  minsize(self, *args, **kwargs)                                             # line 4319
+    def  mainloop(self, *args, **kwargs)                                            # line 4324
+    def  _init_theme_and_styles(self)                                               # line 4330
+    def  _add_btn_hover(self, btn, normal_bg, hover_bg)                             # line 4355
+    def  _build_ui(self)                                                            # line 4359
+    def  _switch_tab(self, selected_tab)                                            # line 4449
+    def  _reset_license(self)                                                       # line 4458
+    def  _build_tab_automation(self)                                                # line 4472
+    def  create_stat_card(parent_f, title, text_var, color, bg_c, border_c)         # line 4478
+    def  _build_tab_cookie_checker(self)                                            # line 4719
+    def  create_stat_card(parent_f, title, text_var, color, bg_c, border_c)         # line 4725
+    def  on_start_cookie_check_clicked(self)                                        # line 4807
+    def  _check_all()                                                               # line 4837  # async
+    def  on_stop_cookie_check_clicked(self)                                         # line 4873
+    def  on_save_live_accounts_clicked(self)                                        # line 4880
+    def  on_export_dead_accounts_clicked(self)                                      # line 4893
+    def  _browse_mail_keys_file(self)                                               # line 4903
+    def  _browse_accounts_file(self)                                                # line 4915
+    def  import_accounts_file(self)                                                 # line 4934
+    def  _clear_pending_accounts(self)                                              # line 4986
+    def  _build_tab_tg_connect(self)                                                # line 5044
+    def  on_send_otp_clicked(self)                                                  # line 5167
+    def  _send()                                                                    # line 5185  # async
+    def  on_verify_otp_clicked(self)                                                # line 5225
+    def  _verify()                                                                  # line 5236  # async
+    def  _on_success_ui()                                                           # line 5300
+    def  delete_selected_tg_account(self)                                           # line 5329
+    def  _build_tab_bot_steps(self)                                                 # line 5344
+    def  _refresh_steps_treeview(self)                                              # line 5506
+    def  _on_step_row_selected(self, event)                                         # line 5521
+    def  on_add_bot_step_clicked(self)                                              # line 5540
+    def  on_update_selected_step_clicked(self)                                      # line 5564
+    def  on_delete_step(self)                                                       # line 5590
+    def  on_move_step_up(self)                                                      # line 5603
+    def  on_move_step_down(self)                                                    # line 5615
+    def  on_reset_steps_default(self)                                               # line 5627
+    def  save_bot_steps_config(self)                                                # line 5634
+    def  save_keywords_config(self)                                                 # line 5638
+    def  on_send_custom_cmd_clicked(self)                                           # line 5645
+    def  on_send_start_to_bot_clicked(self)                                         # line 5652
+    def  _dispatch_command_to_bot(self, cmd_text)                                   # line 5655
+    def  _do_send()                                                                 # line 5664  # async
+    def  _toggle_entry_mask(self, entry_widget, btn_widget)                         # line 5680
+    def  _toggle_api_id_visibility(self)                                            # line 5688
+    def  _toggle_api_hash_visibility(self)                                          # line 5697
+    def  _build_tab_api_generator(self)                                             # line 5706
+    def  _toggle_extracted_keys_reveal(self)                                        # line 5781
+    def  on_web_request_code_clicked(self)                                          # line 5792
+    def  _send()                                                                    # line 5797
+    def  on_web_fetch_keys_clicked(self)                                            # line 5805
+    def  _worker()                                                                  # line 5810
+    def  _run_web_fetch(self, code)                                                 # line 5817
+    def  copy_extracted_keys_to_tab(self)                                           # line 5837
+    def  _build_tab_accounts(self)                                                  # line 5854
+    def  _build_tab_mail_keys(self)                                                 # line 5910
+    def  load_mail_keys_text_into_editor(self)                                      # line 5945
+    def  save_editor_text_into_mail_keys(self)                                      # line 5955
+    def  _start_database_heartbeat_loop(self)                                       # line 5962
+    def  heartbeat_worker()                                                         # line 5963
+    def  _send_db_heartbeat_cycle(self, action)                                     # line 5977
+    def  _update_blocked()                                                          # line 6002
+    def  _update_active()                                                           # line 6018
+    def  _handle_remote_blocked_alert(self)                                         # line 6029
+    def  _start_background_loop(self)                                               # line 6051
+    def  run_loop(loop)                                                             # line 6052
+    def  run_coroutine(self, coro)                                                  # line 6060
+    def  _poll_log_queue(self)                                                      # line 6064
+    def  _on_toggle_only_username(self)                                             # line 6073
+    def  _on_task_mode_change(self)                                                 # line 6082
+    def  _manual_save_config_alert(self)                                            # line 6087
+    def  _quick_refresh_ip(self)                                                    # line 6091
+    def  _worker()                                                                  # line 6092
+    def  save_current_config(self)                                                  # line 6107
+    def  _reload_tg_wrappers_from_config(self)                                      # line 6147
+    def  connect_all_telegram_accounts(self)                                        # line 6187
+    def  _connect_all()                                                             # line 6188  # async
+    def  load_accounts_text_into_editor(self)                                       # line 6201
+    def  save_editor_text_into_accounts(self)                                       # line 6217
+    def  on_stop_automation_clicked(self)                                           # line 6227
+    def  on_cancel_tg_tasks_clicked(self)                                           # line 6233
+    def  _do_cancel()                                                               # line 6242  # async
+    def  _refresh_tg_treeview(self)                                                 # line 6253
+    def  update_account_stats(self)                                                 # line 6273
+    def  on_start_automation_clicked(self)                                          # line 6305
+    def  single_worker(worker_idx, assigned_wrapper, playwright_inst, bot_entity)   # line 6361  # async
+    def  _master_automation_runner()                                                # line 6942  # async
+    def  on_test_browser_clicked(self)                                              # line 6978
+    def  _test()                                                                    # line 6980  # async
+
+def  main_entry()                                                                  # line 7006
+
+class HWIDLockDialog                                                               # ~line 536
+    def  __init__(self, hwid)                                                       # line 536
+    def  _build_ui(self)                                                            # line 549
+    def  _copy_hwid(self)                                                           # line 633
+    def  _attempt_activation(self)                                                  # line 638
+    def  run(self)                                                                  # line 655
+
+class TelegramSessionWrapper                                                       # ~line 4116
+    def  __init__(self, phone, api_id, api_hash, session_name, title)               # line 4116
+    def  connect_and_check(self)                                                    # line 4144  # async
+    def  disconnect(self)                                                           # line 4192  # async
+
+# 35 module/comprehension/expression code objects (lines 1..6605)
+
+====================================================================================================
+MODULE  sell_engine.ui.terminal
+  8 code objects {'func': 8}   last source line: ~93
+====================================================================================================
+
+class EmbeddedTerminalConsole()                                                    # line 4
+    def  __init__(self, parent, bg, fg, **kwargs)                                   # line 5
+    def  write_log(self, level, message)                                            # line 56
+    def  clear(self)                                                                # line 77
+    def  copy_all(self)                                                             # line 80
+    def  toggle_autoscroll(self)                                                    # line 85
+    def  _on_filter_changed(self, event)                                            # line 93
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.utils
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.utils.file_utils
+  5 code objects {'func': 5}   last source line: ~131
+====================================================================================================
+
+def  make_file_writable(file_path)                                                 # line 17
+
+def  safe_write_text(file_path, content, mode)                                     # line 30
+
+def  get_next_account_from_file(file_path)                                         # line 75
+
+def  save_completed_account(done_path, account_data, updated_first_name, updated_login, new_pass)# line 131
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  sell_engine.utils.logger
+  3 code objects {'func': 3}   last source line: ~8
+====================================================================================================
+
+class QueueLogHandler()                                                            # line 6
+    def  emit(self, record)                                                         # line 8
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  utils
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  utils.file_utils
+  5 code objects {'func': 5}   last source line: ~131
+====================================================================================================
+
+def  make_file_writable(file_path)                                                 # line 17
+
+def  safe_write_text(file_path, content, mode)                                     # line 30
+
+def  get_next_account_from_file(file_path)                                         # line 75
+
+def  save_completed_account(done_path, account_data, updated_first_name, updated_login, new_pass)# line 131
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  utils.logger
+  3 code objects {'func': 3}   last source line: ~8
+====================================================================================================
+
+class QueueLogHandler()                                                            # line 6
+    def  emit(self, record)                                                         # line 8
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+
+====================================================================================================
+MODULE  utils.mailcow_imap
+  1 code objects {'func': 1}   last source line: ~0
+====================================================================================================
+
+# 1 module/comprehension/expression code objects (lines 1..1)
+

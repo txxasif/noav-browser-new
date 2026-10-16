@@ -20,7 +20,7 @@ class MailboxMixin:
 
     # Order tried when an inbox cannot be opened: the provider chosen in the dashboard first, then the
     # others. Only these three are offered (Yamin.bd and Guerrilla Mail are disabled).
-    _MAIL_FALLBACK_ORDER = ("mailfish", "mailtd")
+    _MAIL_FALLBACK_ORDER = ("mailfish", "mailtd", "grabmail")
 
     @staticmethod
     def _mail_enabled(name: str) -> bool:
@@ -79,6 +79,7 @@ class MailboxMixin:
         self.mail = None
         self.email = None
         self._mailfish_api = False
+        self._grabmail_api = False
         self._mail_session = {}
 
     def _open_mail_provider(self):
@@ -103,6 +104,24 @@ class MailboxMixin:
 #             self._guerrilla_seen = set()
 #             self.log(f'<font color="#00FF00"><b>[📧] Meta inbox (Guerrilla API): {email}</b></font>')
 #             return email
+        if str(provider).lower() in ("grabmail", "grabmail_io", "grab"):
+            # HTTP API inbox (no browser tab). The address IS the session: it is saved as
+            # grabmail_email so the 2FA task can read the same mailbox days later.
+            self.mail_provider = "grabmail"
+            from core import grabmail_api
+            email = grabmail_api.create_inbox(style=grabmail_api.alias_style())
+            if not email:
+                if getattr(grabmail_api, "last_failure", "") == "down":
+                    raise RuntimeError("grabmail.io is not answering")
+                raise RuntimeError("could not open a grabmail.io inbox")
+            self.email = email
+            self.mail = None
+            self._grabmail_api = True
+            self._grabmail_premium = not grabmail_api.is_public(email)
+            self._grabmail_seen = set()
+            kind = "premium" if self._grabmail_premium else "public"
+            self.log(f'[📧] grabmail.io inbox ({kind}): {email}')
+            return email
         if str(provider).lower() in ("mailfish", "tempmail_fish", "fish"):
             self.mail_provider = "mailfish"
             from core import mailfish_api
@@ -147,6 +166,11 @@ class MailboxMixin:
             fresh = {"mailfish_email": self.email}
             if getattr(self, "_mailfish_api", False):
                 fresh["mailfish_api"] = True
+        # grabmail.io: no token to keep — the address is the whole session. The 2FA reader
+        # only needs it plus the provider key, so persist the address (+ public/premium hint).
+        if provider == "grabmail" and getattr(self, "email", ""):
+            fresh = {"grabmail_email": self.email,
+                     "grabmail_public": "" if getattr(self, "_grabmail_premium", False) else "1"}
         try:
             if provider == "mailtd" and mail is not None and not mail.is_closed():
                 fresh = mail.evaluate("""() => ({
@@ -183,6 +207,15 @@ class MailboxMixin:
             return super().new_mailcf_address(timeout=timeout)
         if str(provider).lower() in ("mailfish", "tempmail_fish", "fish"):
             return super().new_mailfish_address(timeout=timeout)
+        if str(provider).lower() in ("grabmail", "grabmail_io", "grab"):
+            from core import grabmail_api
+            email = grabmail_api.create_inbox(style=grabmail_api.alias_style())
+            if email:
+                self.email = email
+                self._grabmail_api = True
+                self._grabmail_premium = not grabmail_api.is_public(email)
+                self._grabmail_seen = set()
+            return email or None
         return super().new_mailtd_address(timeout=timeout)
 
     def _ensure_mail_tab(self):
@@ -252,6 +285,16 @@ class MailboxMixin:
 #                 self, self.email, getattr(self, "_guerrilla_sid", ""), keyword=keyword, timeout=timeout,
 #                 seen=getattr(self, "_guerrilla_seen", None),
 #                 subject_hint=subject_hint, prefer_len=prefer_len)
+        if str(provider).lower() in ("grabmail", "grabmail_io", "grab"):
+            if getattr(self, "email", ""):
+                # Readable whenever we hold the address — including a resumed account
+                # whose mailbox was created days ago (no tab, no token involved).
+                from core import grabmail_api
+                return grabmail_api.wait_code(
+                    self, self.email, keyword=keyword, timeout=timeout,
+                    seen=getattr(self, "_grabmail_seen", None),
+                    subject_hint=subject_hint, prefer_len=prefer_len)
+            return None
         if str(provider).lower() in ("mailfish", "tempmail_fish", "fish"):
             if getattr(self, "_mailfish_api", False) and getattr(self, "email", ""):
                 from core import mailfish_api
@@ -326,4 +369,9 @@ class MailboxMixin:
     def open_mailfish(self):
         """Backward-compatible alias for the tempmail.fish provider."""
         self.mail_provider = "mailfish"
+        return self._open_mail_once()
+
+    def open_grabmail(self):
+        """Alias for the grabmail.io API provider (no browser tab)."""
+        self.mail_provider = "grabmail"
         return self._open_mail_once()

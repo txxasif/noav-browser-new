@@ -1665,9 +1665,111 @@ class IgHelpersMixin:
                         self._tap_or_click(p, btn)
                         p.wait_for_timeout(3000)
                         break
-            if "allow the following" in tail or "allow and continue" in tail:
-                self._try_click(p, "Allow and continue", timeout=4000)
+            if (
+                "allow and create" in tail
+                or "finish creating your instagram profile" in tail
+                or "allow the following" in tail
+                or "allow and continue" in tail
+            ):
+                if not self._try_click(p, "Allow and create", timeout=4000):
+                    self._try_click(p, "Allow and continue", timeout=4000)
 
             p.wait_for_timeout(2500)
 
         return "sessionid" in self._ig_cookie_names()
+
+    def _accept_ig_eu_interstitial(self, p) -> bool:
+        """Accept the Instagram combine/terms interstitial wherever it appears.
+
+        This is the screen that follows the username step on a fresh Meta -> Instagram
+        join: "Finish creating your Instagram profile in this Meta Account" ->
+        "Allow and create" / "Allow and continue" (localized across the EU), plus the
+        terms page's "I agree" further down the flow.
+
+        Its primary button sits at the bottom of a scrolled modal, so a plain .click()
+        misses it: every scrollable container is scrolled to the end first, then real
+        pointer/mouse events are dispatched at the button's centre. A Playwright locator
+        pass follows as fallback (and keeps this testable). Returns True when clicked.
+        """
+        dismiss_js = """
+        (function() {
+            try {
+                // Scroll modal containers down if button is below viewport
+                const scrollables = Array.from(document.querySelectorAll('div, [role="dialog"], section, body'));
+                scrollables.forEach(el => {
+                    if (el.scrollHeight > el.clientHeight && el.clientHeight > 100) {
+                        el.scrollTop = el.scrollHeight;
+                    }
+                });
+                window.scrollTo(0, document.body.scrollHeight);
+
+                const targets = [
+                    'allow and continue', 'allow and create', 'allow the following',
+                    'tillåt och skapa', 'tillåt och fortsätt', 'erlauben und erstellen',
+                    'zulassen und erstellen', 'autoriser et créer', 'autoriser et continuer',
+                    'permitir y crear', 'permitir y continuar', 'consenti e crea', 'consenti e continua',
+                    'permitir e criar', 'permitir e continuar', 'i agree', 'agree', 'done'
+                ];
+
+                const allBtns = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"], [role="button"], input[type="button"]'));
+                const btn = allBtns.find(b => {
+                    const t = (b.innerText || b.textContent || b.value || '').trim().toLowerCase();
+                    const disabled = b.disabled || b.getAttribute('aria-disabled') === 'true';
+                    return !disabled && targets.some(target => t === target || (t.includes(target) && t.length < 50));
+                });
+
+                if (btn) {
+                    btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    const r = btn.getBoundingClientRect();
+                    const cx = r.left + r.width / 2;
+                    const cy = r.top + r.height / 2;
+                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                        try {
+                            const ev = evt.startsWith('pointer')
+                                ? new PointerEvent(evt, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, pointerId: 1, pointerType: 'mouse', isPrimary: true })
+                                : new MouseEvent(evt, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy });
+                            btn.dispatchEvent(ev);
+                        } catch(e) {}
+                    });
+                    try { btn.click(); } catch(e) {}
+                    return (btn.innerText || btn.textContent || '').trim();
+                }
+            } catch(e) {}
+            return null;
+        })();
+        """
+        try:
+            clicked = p.evaluate(dismiss_js)
+            if clicked:
+                self.log(f"[🇪🇺] Instagram interstitial accepted: '{clicked}'")
+                p.wait_for_timeout(3000)
+                return True
+        except Exception:
+            pass
+
+        # Fallback to Playwright locators (English + EU localizations)
+        for sel in (
+            'button:has-text("Allow and continue")',
+            'div[role="button"]:has-text("Allow and continue")',
+            'button:has-text("Allow and create")',
+            'div[role="button"]:has-text("Allow and create")',
+            'button:has-text("Tillåt och skapa")',
+            'button:has-text("Tillåt och fortsätt")',
+            'button:has-text("Erlauben und erstellen")',
+            'button:has-text("Autoriser et créer")',
+            'button:has-text("Permitir y crear")',
+            'button:has-text("Consenti e crea")',
+            'button:has-text("I agree")',
+            'div[role="button"]:has-text("I agree")',
+        ):
+            try:
+                b = p.locator(sel).first
+                if b.count() > 0 and b.is_visible():
+                    b.scroll_into_view_if_needed(timeout=2000)
+                    b.click(force=True, timeout=2000)
+                    self.log(f"[🇪🇺] Instagram interstitial clicked via locator: {sel}")
+                    p.wait_for_timeout(3000)
+                    return True
+            except Exception:
+                continue
+        return False

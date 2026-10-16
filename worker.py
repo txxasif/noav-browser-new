@@ -881,7 +881,7 @@ def main():
     parser.add_argument("--target", type=int, default=0, help="Target total accounts to create (0 = unlimited)")
     parser.add_argument("--delay", type=int, default=4, help="Delay in seconds between cycles")
     parser.add_argument("--headless", action="store_true", help="Run in headless browser mode")
-    parser.add_argument("--mail", type=str, default="mailfish", choices=("mailtd", "mailfish", "mailcf", "yamin"), help="Mailbox provider tried first (mailfish, mailtd, mailcf or yamin; the others are fallbacks; default mailfish)")
+    parser.add_argument("--mail", type=str, default="mailfish", choices=("mailtd", "mailfish", "mailcf", "grabmail", "yamin"), help="Mailbox provider tried first (mailfish, mailtd, grabmail, mailcf or yamin; the others are fallbacks; default mailfish)")
     parser.add_argument("--captcha", type=str, default="extension", choices=Urls.CAPTCHA_MODES, help="Captcha solving mode")
     parser.add_argument("--mode", type=str, default="meta", choices=["meta", "meta-ig", "meta-only"], help="Creation mode: Meta account only, or Meta + Instagram join")
     parser.add_argument("--coupled", action="store_true",

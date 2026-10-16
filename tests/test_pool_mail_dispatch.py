@@ -38,6 +38,7 @@ class ProviderDispatchTests(unittest.TestCase):
         self.assertEqual(pool_common._mail_provider({"tempmail_token": "t"}), "mailtd")
         self.assertEqual(pool_common._mail_provider({"mailcf_token": "t", "mailcf_email": "a@x"}), "mailcf")
         self.assertEqual(pool_common._mail_provider({"yamin_email": "a@epicz.xyz"}), "yamin")
+        self.assertEqual(pool_common._mail_provider({"grabmail_email": "a@grabmail.io"}), "grabmail")
         self.assertEqual(pool_common._mail_provider({"mailfish_email": "a@x"}), "")
         self.assertEqual(pool_common._mail_provider({}), "")
 
@@ -82,6 +83,38 @@ class ProviderDispatchTests(unittest.TestCase):
         tokens = {"yamin_email": "john.doe.12@epicz.xyz"}
         with mock.patch("urllib.request.urlopen", return_value=_Resp([{"id": "m9", "timestamp": 1}])):
             self.assertEqual(pool_common._mail_ids(tokens), {"m9"})
+
+    # --- grabmail.io: address is the session, body is a second call -----------------
+    def test_grabmail_fresh_code_reads_the_message_body(self):
+        tokens = {"grabmail_email": "k7fq2m@grabmail.io"}
+        listing = {"messages": [{"id": "m1", "subject": "Instagram", "from": "no-reply@mail.instagram.com",
+                                 "date": "2026-08-04T18:31:07Z"}]}
+        full = {"id": "m1", "subject": "Instagram", "text": "Your code is 222333."}
+
+        def fake_request(method, path, key=None, **kw):
+            return (200, listing, 0) if path == "/mailbox" else (200, full, 0)
+
+        from core import grabmail_api
+        with mock.patch.object(grabmail_api, "_request", side_effect=fake_request):
+            code = pool_common._mail_http_code(_Runner(), tokens, set(), "instagram", 3,
+                                               subject_hint="instagram")
+        self.assertEqual(code, "222333")
+
+    def test_grabmail_snapshot_ignores_what_is_already_there(self):
+        tokens = {"grabmail_email": "k7fq2m@grabmail.io"}
+        listing = {"messages": [{"id": "m1", "subject": "Instagram", "from": "x@meta.com", "date": "1"}]}
+        from core import grabmail_api
+        with mock.patch.object(grabmail_api, "_request", return_value=(200, listing, 0)):
+            snapshot = pool_common._mail_ids(tokens)
+        self.assertEqual(snapshot, {"m1"})
+        # the 2FA task then only accepts mail that arrived after that snapshot
+        with mock.patch.object(grabmail_api, "_request", return_value=(200, listing, 0)):
+            self.assertIsNone(pool_common._mail_http_code(_Runner(), tokens, snapshot, "instagram", 3))
+
+    def test_old_grabmail_account_without_tokens_uses_its_address(self):
+        acc = {"email": "K7FQ2M@Grabmail.io", "extra": None}
+        self.assertEqual(pool_common._mail_tokens_for_account(acc),
+                         {"grabmail_email": "k7fq2m@grabmail.io", "grabmail_public": "1"})
 
 
 if __name__ == "__main__":

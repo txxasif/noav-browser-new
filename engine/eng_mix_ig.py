@@ -140,9 +140,9 @@ class EngineIgMixin:
                 pass
 
             try:
-                allow_btn = p.locator('button:has-text("Allow and continue"), button:has-text("Continue"), div[role="button"]:has-text("Allow and continue"), button:has-text("Yes, finish adding")').first
+                allow_btn = p.locator('button:has-text("Allow and create"), button:has-text("Allow and continue"), button:has-text("Continue"), div[role="button"]:has-text("Allow and create"), div[role="button"]:has-text("Allow and continue"), button:has-text("Yes, finish adding"), button:has-text("Tillåt och skapa"), button:has-text("Erlauben und erstellen"), button:has-text("Autoriser et créer")').first
                 if allow_btn.is_visible():
-                    self.log('[+] Clicking "Allow and continue" to link Meta account to Instagram…')
+                    self.log('[+] Clicking "Allow and create / continue" to link Meta account to Instagram…')
                     allow_btn.click()
                     p.wait_for_timeout(6000)
             except Exception:

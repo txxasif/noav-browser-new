@@ -6,6 +6,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.captcha import CaptchaMixin  # noqa: E402
+from instagram.helpers import IgHelpersMixin  # noqa: E402
 
 CONSENT = ("https://auth.meta.com/privacy/consent/?flow=user_cookie_choice_v2&params%5Breferrer%5D="
            "https%3A%2F%2Fauth.meta.com%2Fcheckpoints%2F675270400317265%2F%3Fnext%3Dx")
@@ -65,9 +66,83 @@ class EuTests(unittest.TestCase):
         self.assertEqual(pg.clicked, [])
 
 
+class _IgEuHelpers(IgHelpersMixin):
+    """IgHelpersMixin with logging captured; the rest of the mixin is not exercised."""
+
+    def __init__(self):
+        self.logs = []
+
+    def log(self, msg, *_a, **_k):
+        self.logs.append(str(msg))
+
+
+class _EuPage:
+    """Minimal page: the JS sweep answers ``js_result``, locators answer ``hits``."""
+
+    def __init__(self, js_result=None, hits=()):
+        self.js_result, self.hits = js_result, list(hits)
+        self.clicked = []
+        self.waits = 0
+
+    def evaluate(self, script, *args):
+        return self.js_result
+
+    def locator(self, sel):
+        outer = self
+        hit = any(h in sel for h in self.hits)
+
+        class _Loc:
+            def __init__(self):
+                self.first = self
+
+            def count(self):
+                return 1 if hit else 0
+
+            def is_visible(self):
+                return hit
+
+            def scroll_into_view_if_needed(self, timeout=None):
+                pass
+
+            def click(self, timeout=None, force=False):
+                outer.clicked.append(sel)
+
+        return _Loc()
+
+    def wait_for_timeout(self, ms):
+        self.waits += 1
+
+
+class InstagramAllowAndCreateTests(unittest.TestCase):
+    """The screen that lands right after the IG username step:
+
+    'Finish creating your Instagram profile in this Meta Account' -> 'Allow and create'
+    (its button sits below the fold of the scrolled modal, hence the JS scroll + real
+    pointer/mouse dispatch), with the EU localizations and the terms 'I agree' covered.
+    """
+
+    def test_js_sweep_accepts_allow_and_create(self):
+        pg = _EuPage(js_result="Allow and create")
+        m = _IgEuHelpers()
+        self.assertTrue(m._accept_ig_eu_interstitial(pg))
+        self.assertEqual(pg.clicked, [])                     # JS path wins
+        self.assertTrue(any("interstitial accepted" in s for s in m.logs))
+
+    def test_locator_fallback_when_js_finds_nothing(self):
+        pg = _EuPage(js_result=None, hits=("Allow and create",))
+        m = _IgEuHelpers()
+        self.assertTrue(m._accept_ig_eu_interstitial(pg))
+        self.assertTrue(any("Allow and create" in sel for sel in pg.clicked))
+
+    def test_screen_absent_is_a_no_op(self):
+        pg = _EuPage(js_result=None)
+        m = _IgEuHelpers()
+        self.assertFalse(m._accept_ig_eu_interstitial(pg))
+        self.assertEqual(pg.clicked, [])
+
+
 if __name__ == "__main__":
     unittest.main()
-
 
 class LoginChallengeTests(unittest.TestCase):
     """"Check your email" re-login after the chooser: password first, inbox code as the fallback."""

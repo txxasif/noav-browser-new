@@ -496,6 +496,7 @@ module.exports = function handleMeta(req, res, urlObj, pathname, ctx) {
       const mail = (rawMail === 'yamin' || rawMail === 'yaminbd' || rawMail === 'epicz' || rawMail === 'liseller') ? 'yamin'
         : (rawMail === 'mailcf' || rawMail === 'cloudflare' || rawMail === 'cf') ? 'mailcf'
         : (rawMail === 'mailtd' || rawMail === 'mail.td' || rawMail === 'td') ? 'mailtd'
+        : (rawMail === 'grabmail' || rawMail === 'grabmail.io' || rawMail === 'grab') ? 'grabmail'
         : 'mailfish';
       const captcha = opts.captcha_mode || opts.captcha || 'extension';
       // Worker expects 'meta-only' for Meta-only, 'meta-ig' for Meta -> IG

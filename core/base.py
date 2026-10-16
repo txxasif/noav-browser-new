@@ -58,6 +58,8 @@ class MetaBaseMixin:
             self.mail_provider = "mailcf"
         elif norm_mail in ("mailfish", "tempmail_fish", "fish"):
             self.mail_provider = "mailfish"
+        elif norm_mail in ("grabmail", "grabmail_io", "grab"):
+            self.mail_provider = "grabmail"
         # elif norm_mail in ("guerrilla", "guerrillamail", "gm"):
         #     self.mail_provider = "guerrilla"
         else:
